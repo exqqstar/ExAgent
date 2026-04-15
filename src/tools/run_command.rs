@@ -10,12 +10,12 @@ use tokio::time::{timeout, Duration};
 
 use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::policy::{new_policy_event_id, PolicyDecision};
-use crate::session::{ExecSessionId, ExecSessionStatus};
-use crate::session::{ApprovalId, ApprovalStatus};
 use crate::registry::ToolContext;
+use crate::session::{ApprovalId, ApprovalStatus};
+use crate::session::{ExecSessionId, ExecSessionStatus};
 use crate::tools::Tool;
-use crate::types::{ToolCall, ToolResult, ToolStatus};
 use crate::transcript;
+use crate::types::{ToolCall, ToolResult, ToolStatus};
 use crate::workspace::resolve_workspace_path;
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -105,7 +105,9 @@ async fn run_command(args: &RunCommandArgs, ctx: &ToolContext) -> Result<Command
         .ok_or_else(|| "command is required".to_string())?;
     let cwd = resolve_cwd(args, ctx)?;
     let timeout_secs = args.timeout_secs.unwrap_or(ctx.config.command_timeout_secs);
-    if let Some(outcome) = maybe_require_approval(ctx, command_text, &cwd, args.timeout_secs, false).await? {
+    if let Some(outcome) =
+        maybe_require_approval(ctx, command_text, &cwd, args.timeout_secs, false).await?
+    {
         return Ok(outcome);
     }
 
@@ -180,7 +182,9 @@ async fn handle_approval_decision(
                 let mut outcome = run_one_shot_command(
                     &pending.command,
                     pending.cwd.clone(),
-                    pending.timeout_secs.unwrap_or(ctx.config.command_timeout_secs),
+                    pending
+                        .timeout_secs
+                        .unwrap_or(ctx.config.command_timeout_secs),
                     ctx,
                 )
                 .await?;
@@ -244,13 +248,18 @@ async fn run_persistent_command(
 
 fn persistent_outcome(snapshot: crate::exec_session::ExecSessionSnapshot) -> CommandOutcome {
     let status = match snapshot.status {
-        ExecSessionStatus::Exited if snapshot.exit_code.unwrap_or_default() != 0 => ToolStatus::Error,
+        ExecSessionStatus::Exited if snapshot.exit_code.unwrap_or_default() != 0 => {
+            ToolStatus::Error
+        }
         _ => ToolStatus::Success,
     };
 
     CommandOutcome {
         status,
-        content: format!("stdout:\n{}\n\nstderr:\n{}", snapshot.stdout, snapshot.stderr),
+        content: format!(
+            "stdout:\n{}\n\nstderr:\n{}",
+            snapshot.stdout, snapshot.stderr
+        ),
         meta: json!({
             "exec_session_id": snapshot.exec_session_id.as_str(),
             "command": snapshot.command,
@@ -271,9 +280,7 @@ async fn maybe_require_approval(
     timeout_secs: Option<u64>,
     persistent: bool,
 ) -> Result<Option<CommandOutcome>, String> {
-    let (decision, reason) = ctx
-        .policy
-        .classify_command(ctx.config.policy_mode, command);
+    let (decision, reason) = ctx.policy.classify_command(ctx.config.policy_mode, command);
 
     match decision {
         PolicyDecision::Allow => Ok(None),
@@ -454,15 +461,20 @@ fn annotate_policy_meta(
     approval_event_id: Option<&crate::types::EventId>,
 ) {
     if let Some(object) = meta.as_object_mut() {
-        object.insert("approval_id".into(), Value::String(approval_id.as_str().into()));
+        object.insert(
+            "approval_id".into(),
+            Value::String(approval_id.as_str().into()),
+        );
         object.insert(
             "approval_status".into(),
-            Value::String(match approval_status {
-                ApprovalStatus::Pending => "pending",
-                ApprovalStatus::Approved => "approved",
-                ApprovalStatus::Denied => "denied",
-            }
-            .into()),
+            Value::String(
+                match approval_status {
+                    ApprovalStatus::Pending => "pending",
+                    ApprovalStatus::Approved => "approved",
+                    ApprovalStatus::Denied => "denied",
+                }
+                .into(),
+            ),
         );
         object.insert(
             "policy_decision".into(),

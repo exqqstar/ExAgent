@@ -4,8 +4,8 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use exagent::agent::Agent;
 use exagent::config::AgentConfig;
-use exagent::exec_session::ExecSessionManager;
 use exagent::events::RuntimeEventKind;
+use exagent::exec_session::ExecSessionManager;
 use exagent::llm::LlmClient;
 use exagent::policy::{PolicyManager, PolicyMode};
 use exagent::registry::{ToolContext, ToolRegistry};
@@ -225,7 +225,9 @@ impl LlmClient for PolicyInspectingLlm {
                     .iter()
                     .find(|message| matches!(message.role, MessageRole::Tool))
                     .ok_or_else(|| anyhow!("expected tool message"))?;
-                assert!(tool_message.content.contains("\"status\":\"review_required\""));
+                assert!(tool_message
+                    .content
+                    .contains("\"status\":\"review_required\""));
 
                 Ok(AssistantTurn {
                     text: Some("waiting for approval".into()),

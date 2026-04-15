@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use exagent::config::AgentConfig;
-use exagent::exec_session::ExecSessionManager;
 use exagent::events::{ExecOutputStream, RuntimeEventKind};
+use exagent::exec_session::ExecSessionManager;
 use exagent::policy::PolicyManager;
 use exagent::registry::{ToolContext, ToolRegistry};
 use exagent::tools::run_command::RunCommandTool;

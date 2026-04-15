@@ -15,7 +15,8 @@ use crate::config::AgentConfig;
 use crate::exec_session::ExecSessionManager;
 use crate::llm::OpenAiCompatibleLlm;
 use crate::policy::PolicyManager;
-use crate::types::{SessionId, ToolCall};
+use crate::session::AgentRole;
+use crate::types::{SessionId, ToolCall, TurnId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRunResponse {
@@ -32,6 +33,15 @@ struct RunRequest {
     workspace_root: Option<String>,
     cwd: Option<String>,
     session_id: Option<SessionId>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForkRequest {
+    parent_session_id: SessionId,
+    agent_role: AgentRole,
+    prompt: String,
+    workspace_root: Option<String>,
+    spawned_by_turn_id: Option<TurnId>,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,6 +67,15 @@ pub trait AgentRunner: Send + Sync {
         workspace_root: Option<&str>,
         cwd: Option<&str>,
         session_id: Option<&SessionId>,
+    ) -> Result<AgentRunResponse>;
+
+    async fn fork(
+        &self,
+        parent_session_id: &SessionId,
+        agent_role: AgentRole,
+        prompt: &str,
+        workspace_root: Option<&str>,
+        spawned_by_turn_id: Option<&TurnId>,
     ) -> Result<AgentRunResponse>;
 }
 
@@ -97,13 +116,31 @@ impl AgentRunner for DefaultAgentRunner {
             None => agent.run_with_meta(prompt).await?,
         };
 
-        Ok(AgentRunResponse {
-            text: output.final_turn.text,
-            tool_calls: output.final_turn.tool_calls,
-            session_id: output.session_id,
-            snapshot_path: output.snapshot_path.display().to_string(),
-            events_path: output.events_path.display().to_string(),
-        })
+        Ok(agent_run_response(output))
+    }
+
+    async fn fork(
+        &self,
+        parent_session_id: &SessionId,
+        agent_role: AgentRole,
+        prompt: &str,
+        workspace_root: Option<&str>,
+        spawned_by_turn_id: Option<&TurnId>,
+    ) -> Result<AgentRunResponse> {
+        let config = build_config(workspace_root, None)?;
+        let llm = OpenAiCompatibleLlm::from_env()?;
+        let agent = Agent::with_runtime(
+            config,
+            Box::new(llm),
+            crate::default_tool_registry(),
+            self.exec_sessions.clone(),
+            self.policy.clone(),
+        );
+        let output = agent
+            .fork_session(parent_session_id, agent_role, prompt, spawned_by_turn_id)
+            .await?;
+
+        Ok(agent_run_response(output))
     }
 }
 
@@ -111,6 +148,7 @@ pub fn build_router(runner: Arc<dyn AgentRunner>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/run", post(run_agent))
+        .route("/fork", post(fork_agent))
         .with_state(ApiState { runner })
 }
 
@@ -125,9 +163,12 @@ pub async fn serve(bind_addr: Option<&str>) -> Result<()> {
         .with_context(|| format!("Failed to bind API listener on {bind_addr}"))?;
 
     tracing::info!("exagent API listening on {}", bind_addr);
-    axum::serve(listener, build_router(Arc::new(DefaultAgentRunner::default())))
-        .await
-        .context("API server stopped unexpectedly")?;
+    axum::serve(
+        listener,
+        build_router(Arc::new(DefaultAgentRunner::default())),
+    )
+    .await
+    .context("API server stopped unexpectedly")?;
 
     Ok(())
 }
@@ -147,6 +188,32 @@ async fn run_agent(
             request.workspace_root.as_deref(),
             request.cwd.as_deref(),
             request.session_id.as_ref(),
+        )
+        .await
+    {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn fork_agent(
+    State(state): State<ApiState>,
+    Json(request): Json<ForkRequest>,
+) -> impl IntoResponse {
+    match state
+        .runner
+        .fork(
+            &request.parent_session_id,
+            request.agent_role,
+            &request.prompt,
+            request.workspace_root.as_deref(),
+            request.spawned_by_turn_id.as_ref(),
         )
         .await
     {
@@ -215,4 +282,14 @@ fn canonicalize_from_root(root: &Path, raw: &str) -> Result<PathBuf> {
     }
 
     Ok(candidate)
+}
+
+fn agent_run_response(output: crate::agent::AgentRunOutput) -> AgentRunResponse {
+    AgentRunResponse {
+        text: output.final_turn.text,
+        tool_calls: output.final_turn.tool_calls,
+        session_id: output.session_id,
+        snapshot_path: output.snapshot_path.display().to_string(),
+        events_path: output.events_path.display().to_string(),
+    }
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, Command};
@@ -209,10 +209,7 @@ impl ExecSessionManager {
             exec_session_id: handle.exec_session_id.clone(),
             command: handle.command.clone(),
             cwd: handle.cwd.clone(),
-            status: state
-                .status
-                .clone()
-                .unwrap_or(ExecSessionStatus::Running),
+            status: state.status.clone().unwrap_or(ExecSessionStatus::Running),
             stdout: state.stdout.clone(),
             stderr: state.stderr.clone(),
             exit_code: state.exit_code,

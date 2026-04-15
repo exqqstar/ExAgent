@@ -3,15 +3,15 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
-use crate::exec_session::ExecSessionManager;
-use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::config::AgentConfig;
+use crate::events::{RuntimeEvent, RuntimeEventKind};
+use crate::exec_session::ExecSessionManager;
 use crate::llm::LlmClient;
 use crate::policy::PolicyManager;
 use crate::registry::{ToolContext, ToolRegistry};
 use crate::session::{
-    ApprovalId, ApprovalStatus, ExecSessionId, ExecSessionRef, ExecSessionStatus, PendingApproval,
-    SessionSnapshot,
+    AgentRole, ApprovalId, ApprovalStatus, ExecSessionId, ExecSessionRef, ExecSessionStatus,
+    PendingApproval, SessionSnapshot,
 };
 use crate::types::{AssistantTurn, ConversationMessage, EventId, MessageRole, SessionId, TurnId};
 
@@ -77,37 +77,74 @@ impl Agent {
     }
 
     pub async fn run_with_meta(&self, user_prompt: &str) -> Result<AgentRunOutput> {
-        let snapshot = SessionSnapshot {
-            session_id: crate::transcript::new_session_id(),
-            workspace_root: self.config.workspace_root.clone(),
-            cwd: self.config.cwd.clone(),
-            conversation: vec![ConversationMessage::user(user_prompt)],
-            open_exec_sessions: vec![],
-            latest_compaction: None,
-            pending_approvals: vec![],
-        };
+        let session_id = crate::transcript::new_session_id();
+        let snapshot = SessionSnapshot::new_root(
+            session_id,
+            self.config.workspace_root.clone(),
+            self.config.cwd.clone(),
+            user_prompt,
+        );
 
         self.run_session(snapshot).await
     }
 
-    pub async fn resume(&self, session_id: &SessionId, user_prompt: &str) -> Result<AgentRunOutput> {
+    pub async fn resume(
+        &self,
+        session_id: &SessionId,
+        user_prompt: &str,
+    ) -> Result<AgentRunOutput> {
         let paths = crate::transcript::session_paths(&self.config.workspace_root, session_id);
         let mut snapshot: SessionSnapshot = crate::transcript::read_json(&paths.snapshot_path)?;
-        snapshot.conversation.push(ConversationMessage::user(user_prompt));
+        snapshot.normalize_lineage();
+        snapshot
+            .conversation
+            .push(ConversationMessage::user(user_prompt));
         crate::transcript::write_json(&paths.snapshot_path, &snapshot)?;
 
         self.run_session(snapshot).await
     }
 
+    pub async fn fork_session(
+        &self,
+        parent_session_id: &SessionId,
+        agent_role: AgentRole,
+        prompt: &str,
+        spawned_by_turn_id: Option<&TurnId>,
+    ) -> Result<AgentRunOutput> {
+        let parent_paths =
+            crate::transcript::session_paths(&self.config.workspace_root, parent_session_id);
+        let mut parent_snapshot: SessionSnapshot =
+            crate::transcript::read_json(&parent_paths.snapshot_path)?;
+        parent_snapshot.normalize_lineage();
+        crate::transcript::write_json(&parent_paths.snapshot_path, &parent_snapshot)?;
+
+        let child_snapshot =
+            parent_snapshot.fork_child(agent_role.clone(), prompt, spawned_by_turn_id.cloned());
+        crate::transcript::record_session_spawn(
+            &self.config.workspace_root,
+            &parent_snapshot.session_id,
+            &child_snapshot.session_id,
+            agent_role,
+            spawned_by_turn_id,
+        )?;
+
+        self.run_session(child_snapshot).await
+    }
+
     async fn run_session(&self, mut snapshot: SessionSnapshot) -> Result<AgentRunOutput> {
+        snapshot.normalize_lineage();
+        let mut session_config = self.config.clone();
+        session_config.workspace_root = snapshot.workspace_root.clone();
+        session_config.cwd = snapshot.cwd.clone();
+
         let session_id = snapshot.session_id.clone();
-        let paths = crate::transcript::session_paths(&self.config.workspace_root, &session_id);
+        let paths = crate::transcript::session_paths(&session_config.workspace_root, &session_id);
         crate::transcript::write_json(&paths.snapshot_path, &snapshot)?;
 
         let mut messages = snapshot.conversation.clone();
 
         let ctx = ToolContext {
-            config: self.config.clone(),
+            config: session_config.clone(),
             session_id: Some(session_id.clone()),
             exec_sessions: self.exec_sessions.clone(),
             policy: self.policy.clone(),
@@ -118,7 +155,8 @@ impl Agent {
             .count()
             + 1;
         let mut next_event_index =
-            crate::transcript::read_session_events(&self.config.workspace_root, &session_id)?.len()
+            crate::transcript::read_session_events(&session_config.workspace_root, &session_id)?
+                .len()
                 + 1;
 
         for _ in 0..self.config.max_turns {
@@ -138,10 +176,8 @@ impl Agent {
             crate::transcript::append_json_line(&paths.events_path, &assistant_event)?;
 
             if turn.text.is_some() || !turn.tool_calls.is_empty() {
-                let assistant_message = ConversationMessage::assistant(
-                    turn.text.clone(),
-                    turn.tool_calls.clone(),
-                );
+                let assistant_message =
+                    ConversationMessage::assistant(turn.text.clone(), turn.tool_calls.clone());
                 messages.push(assistant_message.clone());
                 snapshot.conversation.push(assistant_message);
                 crate::transcript::write_json(&paths.snapshot_path, &snapshot)?;
@@ -192,7 +228,10 @@ fn apply_exec_session_update(snapshot: &mut SessionSnapshot, result: &crate::typ
     let Some(meta) = result.meta.as_ref() else {
         return;
     };
-    let Some(exec_session_id) = meta.get("exec_session_id").and_then(serde_json::Value::as_str) else {
+    let Some(exec_session_id) = meta
+        .get("exec_session_id")
+        .and_then(serde_json::Value::as_str)
+    else {
         return;
     };
     let Some(lifecycle) = meta.get("lifecycle").and_then(serde_json::Value::as_str) else {
@@ -227,7 +266,10 @@ fn apply_exec_session_update(snapshot: &mut SessionSnapshot, result: &crate::typ
     });
 }
 
-fn apply_pending_approval_update(snapshot: &mut SessionSnapshot, result: &crate::types::ToolResult) {
+fn apply_pending_approval_update(
+    snapshot: &mut SessionSnapshot,
+    result: &crate::types::ToolResult,
+) {
     let Some(meta) = result.meta.as_ref() else {
         return;
     };

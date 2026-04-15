@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
@@ -63,7 +63,11 @@ pub struct PolicyManager {
 }
 
 impl PolicyManager {
-    pub fn classify_command(&self, mode: PolicyMode, command: &str) -> (PolicyDecision, Option<String>) {
+    pub fn classify_command(
+        &self,
+        mode: PolicyMode,
+        command: &str,
+    ) -> (PolicyDecision, Option<String>) {
         if let Some(reason) = hard_deny_reason(command) {
             return (PolicyDecision::Deny, Some(reason.to_string()));
         }
@@ -136,7 +140,13 @@ fn hard_deny_reason(command: &str) -> Option<&'static str> {
 }
 
 fn review_required_reason(command: &str) -> Option<&'static str> {
-    const PATTERNS: [&str; 5] = ["rm -rf", "git reset --hard", "git checkout --", "shutdown", "reboot"];
+    const PATTERNS: [&str; 5] = [
+        "rm -rf",
+        "git reset --hard",
+        "git checkout --",
+        "shutdown",
+        "reboot",
+    ];
     if PATTERNS.iter().any(|pattern| command.contains(pattern)) {
         return Some("risky command matched approval policy");
     }

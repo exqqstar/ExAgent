@@ -1,15 +1,18 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use exagent::api::{build_router, AgentRunResponse, AgentRunner};
 use exagent::cli::{parse_cli_command, CliCommand};
-use exagent::types::{AssistantTurn, SessionId, ToolCall};
+use exagent::session::AgentRole;
+use exagent::types::{SessionId, ToolCall, TurnId};
 use serde_json::{json, Value};
 use tower::util::ServiceExt;
 
 struct StubRunner {
-    turn: AssistantTurn,
+    response: AgentRunResponse,
+    calls: Mutex<Vec<String>>,
 }
 
 #[async_trait::async_trait]
@@ -21,28 +24,79 @@ impl AgentRunner for StubRunner {
         cwd: Option<&str>,
         session_id: Option<&SessionId>,
     ) -> anyhow::Result<AgentRunResponse> {
+        self.calls.lock().unwrap().push("run".into());
         assert_eq!(prompt, "continue phase2");
         assert_eq!(workspace_root, Some("."));
         assert_eq!(cwd, Some("."));
         assert_eq!(session_id.map(SessionId::as_str), Some("session_123"));
 
-        Ok(AgentRunResponse {
-            text: self.turn.text.clone(),
-            tool_calls: self.turn.tool_calls.clone(),
-            session_id: SessionId::new("session_123"),
-            snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
-            events_path: ".exagent/sessions/session_123/events.jsonl".into(),
-        })
+        Ok(self.response.clone())
+    }
+
+    async fn fork(
+        &self,
+        parent_session_id: &SessionId,
+        agent_role: AgentRole,
+        prompt: &str,
+        workspace_root: Option<&str>,
+        spawned_by_turn_id: Option<&TurnId>,
+    ) -> anyhow::Result<AgentRunResponse> {
+        self.calls.lock().unwrap().push("fork".into());
+        assert_eq!(parent_session_id.as_str(), "session_123");
+        assert_eq!(agent_role, AgentRole::Spec);
+        assert_eq!(prompt, "draft goals");
+        assert_eq!(workspace_root, Some("."));
+        assert_eq!(spawned_by_turn_id.map(TurnId::as_str), Some("turn_1"));
+
+        Ok(self.response.clone())
+    }
+}
+
+struct ForkIgnoresCwdRunner {
+    response: AgentRunResponse,
+}
+
+#[async_trait::async_trait]
+impl AgentRunner for ForkIgnoresCwdRunner {
+    async fn run(
+        &self,
+        _prompt: &str,
+        _workspace_root: Option<&str>,
+        _cwd: Option<&str>,
+        _session_id: Option<&SessionId>,
+    ) -> anyhow::Result<AgentRunResponse> {
+        panic!("run should not be called in fork test");
+    }
+
+    async fn fork(
+        &self,
+        parent_session_id: &SessionId,
+        agent_role: AgentRole,
+        prompt: &str,
+        workspace_root: Option<&str>,
+        spawned_by_turn_id: Option<&TurnId>,
+    ) -> anyhow::Result<AgentRunResponse> {
+        assert_eq!(parent_session_id.as_str(), "session_123");
+        assert_eq!(agent_role, AgentRole::Spec);
+        assert_eq!(prompt, "draft goals");
+        assert_eq!(workspace_root, Some("."));
+        assert_eq!(spawned_by_turn_id.map(TurnId::as_str), Some("turn_1"));
+
+        Ok(self.response.clone())
     }
 }
 
 #[tokio::test]
 async fn health_route_returns_ok() {
     let app = build_router(Arc::new(StubRunner {
-        turn: AssistantTurn {
+        response: AgentRunResponse {
             text: Some("unused".into()),
             tool_calls: vec![],
+            session_id: SessionId::new("session_123"),
+            snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
+            events_path: ".exagent/sessions/session_123/events.jsonl".into(),
         },
+        calls: Mutex::new(vec![]),
     }));
 
     let response = app
@@ -66,14 +120,18 @@ async fn health_route_returns_ok() {
 #[tokio::test]
 async fn run_route_accepts_existing_session_id() {
     let app = build_router(Arc::new(StubRunner {
-        turn: AssistantTurn {
+        response: AgentRunResponse {
             text: Some("done".into()),
             tool_calls: vec![ToolCall {
                 id: "call_1".into(),
                 name: "read_file".into(),
                 arguments: json!({"path": "Cargo.toml"}),
             }],
+            session_id: SessionId::new("session_123"),
+            snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
+            events_path: ".exagent/sessions/session_123/events.jsonl".into(),
         },
+        calls: Mutex::new(vec![]),
     }));
 
     let response = app
@@ -114,6 +172,99 @@ async fn run_route_accepts_existing_session_id() {
     );
 }
 
+#[tokio::test]
+async fn fork_route_accepts_parent_session_id_and_agent_role() {
+    let app = build_router(Arc::new(StubRunner {
+        response: AgentRunResponse {
+            text: Some("unused".into()),
+            tool_calls: vec![ToolCall {
+                id: "call_fork_1".into(),
+                name: "read_file".into(),
+                arguments: json!({"path": "docs/plan.md"}),
+            }],
+            session_id: SessionId::new("session_child"),
+            snapshot_path: ".exagent/sessions/session_child/snapshot.json".into(),
+            events_path: ".exagent/sessions/session_child/events.jsonl".into(),
+        },
+        calls: Mutex::new(vec![]),
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/fork")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "parent_session_id": "session_123",
+                        "agent_role": "spec",
+                        "prompt": "draft goals",
+                        "workspace_root": ".",
+                        "spawned_by_turn_id": "turn_1"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({
+            "text": "unused",
+            "tool_calls": [{
+                "id": "call_fork_1",
+                "name": "read_file",
+                "arguments": {"path": "docs/plan.md"}
+            }],
+            "session_id": "session_child",
+            "snapshot_path": ".exagent/sessions/session_child/snapshot.json",
+            "events_path": ".exagent/sessions/session_child/events.jsonl"
+        })
+    );
+}
+
+#[tokio::test]
+async fn fork_route_ignores_cwd_override_and_keeps_parent_context_authoritative() {
+    let app = build_router(Arc::new(ForkIgnoresCwdRunner {
+        response: AgentRunResponse {
+            text: Some("unused".into()),
+            tool_calls: vec![],
+            session_id: SessionId::new("session_child"),
+            snapshot_path: ".exagent/sessions/session_child/snapshot.json".into(),
+            events_path: ".exagent/sessions/session_child/events.jsonl".into(),
+        },
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/fork")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "parent_session_id": "session_123",
+                        "agent_role": "spec",
+                        "prompt": "draft goals",
+                        "workspace_root": ".",
+                        "cwd": "nested",
+                        "spawned_by_turn_id": "turn_1"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 #[test]
 fn parse_cli_resume_command_reads_session_id_and_prompt() {
     let args = vec![
@@ -129,6 +280,27 @@ fn parse_cli_resume_command_reads_session_id_and_prompt() {
         CliCommand::Resume {
             session_id: SessionId::new("session_123"),
             prompt: "continue phase2".into(),
+        }
+    );
+}
+
+#[test]
+fn parse_cli_fork_command_reads_parent_session_id_agent_role_and_prompt() {
+    let args = vec![
+        "fork".to_string(),
+        "session_123".to_string(),
+        "spec".to_string(),
+        "draft goals".to_string(),
+    ];
+
+    let command = parse_cli_command(args).unwrap();
+
+    assert_eq!(
+        command,
+        CliCommand::Fork {
+            parent_session_id: SessionId::new("session_123"),
+            agent_role: AgentRole::Spec,
+            prompt: "draft goals".into(),
         }
     );
 }

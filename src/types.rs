@@ -3,7 +3,7 @@ use serde_json::Value;
 
 macro_rules! string_id {
     ($name:ident) => {
-        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
         #[serde(transparent)]
         pub struct $name(String);
 

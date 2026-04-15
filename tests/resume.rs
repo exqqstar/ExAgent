@@ -8,7 +8,7 @@ use exagent::events::{RuntimeEvent, RuntimeEventKind};
 use exagent::llm::{LlmClient, MockLlm};
 use exagent::registry::ToolRegistry;
 use exagent::session::{
-    ApprovalId, ApprovalStatus, CompactionSummary, ExecSessionId, ExecSessionRef,
+    AgentRole, ApprovalId, ApprovalStatus, CompactionSummary, ExecSessionId, ExecSessionRef,
     ExecSessionStatus, PendingApproval, SessionSnapshot,
 };
 use exagent::tools::write_file::WriteFileTool;
@@ -24,6 +24,10 @@ use tokio::sync::Mutex;
 fn session_snapshot_round_trips_to_json() {
     let snapshot = SessionSnapshot {
         session_id: SessionId::new("session_123"),
+        parent_session_id: None,
+        root_session_id: SessionId::new("session_123"),
+        spawned_by_turn_id: Some(TurnId::new("turn_parent_1")),
+        agent_role: AgentRole::Implementation,
         workspace_root: PathBuf::from("/tmp/exagent"),
         cwd: PathBuf::from("/tmp/exagent/src"),
         conversation: vec![
@@ -52,13 +56,13 @@ fn session_snapshot_round_trips_to_json() {
     let value = serde_json::to_value(&snapshot).unwrap();
 
     assert_eq!(value["session_id"], "session_123");
+    assert_eq!(value["root_session_id"], "session_123");
+    assert_eq!(value["spawned_by_turn_id"], "turn_parent_1");
+    assert_eq!(value["agent_role"], "implementation");
     assert_eq!(value["workspace_root"], "/tmp/exagent");
     assert_eq!(value["cwd"], "/tmp/exagent/src");
     assert_eq!(value["open_exec_sessions"][0]["exec_session_id"], "exec_1");
-    assert_eq!(
-        value["pending_approvals"][0]["approval_id"],
-        "approval_1"
-    );
+    assert_eq!(value["pending_approvals"][0]["approval_id"], "approval_1");
 
     let decoded: SessionSnapshot = serde_json::from_value(value).unwrap();
     assert_eq!(decoded, snapshot);
@@ -170,9 +174,18 @@ async fn agent_persists_snapshot_and_event_log_for_new_session() {
 
     let events = exagent::transcript::read_session_events(dir.path(), &output.session_id).unwrap();
     assert_eq!(events.len(), 3);
-    assert!(matches!(events[0].kind, RuntimeEventKind::AssistantTurn { .. }));
-    assert!(matches!(events[1].kind, RuntimeEventKind::ToolResult { .. }));
-    assert!(matches!(events[2].kind, RuntimeEventKind::AssistantTurn { .. }));
+    assert!(matches!(
+        events[0].kind,
+        RuntimeEventKind::AssistantTurn { .. }
+    ));
+    assert!(matches!(
+        events[1].kind,
+        RuntimeEventKind::ToolResult { .. }
+    ));
+    assert!(matches!(
+        events[2].kind,
+        RuntimeEventKind::AssistantTurn { .. }
+    ));
 }
 
 #[tokio::test]
@@ -188,7 +201,10 @@ async fn agent_can_resume_existing_session_with_prior_context() {
 
     let agent = Agent::new(config, Box::new(llm), ToolRegistry::new());
     let first = agent.run_with_meta("start phase2").await.unwrap();
-    let resumed = agent.resume(&first.session_id, "continue phase2").await.unwrap();
+    let resumed = agent
+        .resume(&first.session_id, "continue phase2")
+        .await
+        .unwrap();
 
     assert_eq!(resumed.session_id, first.session_id);
     assert_eq!(resumed.final_turn.text.as_deref(), Some("second response"));
@@ -217,11 +233,58 @@ async fn replay_reads_persisted_events_without_rerunning_tools() {
 
     let agent = Agent::new(config, Box::new(llm), ToolRegistry::new());
     let output = agent.run_with_meta("record this").await.unwrap();
+    exagent::transcript::record_session_spawn(
+        dir.path(),
+        &output.session_id,
+        &SessionId::new("session_child"),
+        AgentRole::Spec,
+        Some(&TurnId::new("turn_1")),
+    )
+    .unwrap();
     let replay = exagent::transcript::replay_session(dir.path(), &output.session_id).unwrap();
 
-    assert_eq!(replay.len(), 1);
+    assert_eq!(replay.len(), 2);
     assert_eq!(replay[0].event_id.as_str(), "evt_1");
-    assert!(matches!(replay[0].kind, RuntimeEventKind::AssistantTurn { .. }));
+    assert_eq!(replay[1].event_id.as_str(), "evt_2");
+    assert!(matches!(
+        replay[0].kind,
+        RuntimeEventKind::AssistantTurn { .. }
+    ));
+    assert!(matches!(
+        &replay[1].kind,
+        RuntimeEventKind::SessionSpawned {
+            child_session_id,
+            parent_session_id,
+            agent_role: AgentRole::Spec,
+            spawned_by_turn_id: Some(turn_id),
+        } if child_session_id == &SessionId::new("session_child")
+            && parent_session_id == &output.session_id
+            && turn_id == &TurnId::new("turn_1")
+    ));
+}
+
+#[tokio::test]
+async fn new_root_session_defaults_to_primary_role_and_own_root_id() {
+    let dir = tempdir().unwrap();
+    let llm = MockLlm::new(vec![AssistantTurn {
+        text: Some("done".into()),
+        tool_calls: vec![],
+    }]);
+
+    let config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        ..AgentConfig::default()
+    };
+
+    let agent = Agent::new(config, Box::new(llm), ToolRegistry::new());
+    let output = agent.run_with_meta("start phase3").await.unwrap();
+    let snapshot: SessionSnapshot = exagent::transcript::read_json(&output.snapshot_path).unwrap();
+
+    assert_eq!(snapshot.parent_session_id, None);
+    assert_eq!(snapshot.spawned_by_turn_id, None);
+    assert_eq!(snapshot.root_session_id, snapshot.session_id);
+    assert_eq!(snapshot.agent_role, AgentRole::Primary);
 }
 
 #[derive(Default)]

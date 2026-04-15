@@ -8,8 +8,9 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::events::RuntimeEvent;
-use crate::types::SessionId;
+use crate::events::{RuntimeEvent, RuntimeEventKind};
+use crate::session::AgentRole;
+use crate::types::{EventId, SessionId, TurnId};
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -85,11 +86,66 @@ pub fn session_paths(workspace_root: &Path, session_id: &SessionId) -> SessionPa
     }
 }
 
-pub fn read_session_events(workspace_root: &Path, session_id: &SessionId) -> Result<Vec<RuntimeEvent>> {
+pub fn read_session_events(
+    workspace_root: &Path,
+    session_id: &SessionId,
+) -> Result<Vec<RuntimeEvent>> {
     let paths = session_paths(workspace_root, session_id);
     read_json_lines(&paths.events_path)
 }
 
 pub fn replay_session(workspace_root: &Path, session_id: &SessionId) -> Result<Vec<RuntimeEvent>> {
     read_session_events(workspace_root, session_id)
+}
+
+pub fn append_runtime_event(
+    workspace_root: &Path,
+    session_id: &SessionId,
+    turn_id: Option<&TurnId>,
+    kind: RuntimeEventKind,
+) -> Result<RuntimeEvent> {
+    let next_event_id = EventId::new(format!(
+        "evt_{}",
+        read_session_events(workspace_root, session_id)?.len() + 1
+    ));
+    let event = RuntimeEvent {
+        event_id: next_event_id,
+        session_id: session_id.clone(),
+        turn_id: turn_id.cloned(),
+        kind,
+    };
+    let paths = session_paths(workspace_root, session_id);
+    append_json_line(&paths.events_path, &event)?;
+    Ok(event)
+}
+
+pub fn record_session_spawn(
+    workspace_root: &Path,
+    parent_session_id: &SessionId,
+    child_session_id: &SessionId,
+    agent_role: AgentRole,
+    spawned_by_turn_id: Option<&TurnId>,
+) -> Result<()> {
+    let parent_event_kind = RuntimeEventKind::SessionSpawned {
+        child_session_id: child_session_id.clone(),
+        parent_session_id: parent_session_id.clone(),
+        agent_role: agent_role.clone(),
+        spawned_by_turn_id: spawned_by_turn_id.cloned(),
+    };
+    append_runtime_event(
+        workspace_root,
+        parent_session_id,
+        spawned_by_turn_id,
+        parent_event_kind,
+    )?;
+
+    let child_event_kind = RuntimeEventKind::SessionSpawned {
+        child_session_id: child_session_id.clone(),
+        parent_session_id: parent_session_id.clone(),
+        agent_role,
+        spawned_by_turn_id: spawned_by_turn_id.cloned(),
+    };
+    append_runtime_event(workspace_root, child_session_id, None, child_event_kind)?;
+
+    Ok(())
 }

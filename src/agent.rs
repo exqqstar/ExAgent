@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::{anyhow, Result};
 
 use crate::config::AgentConfig;
@@ -11,6 +13,11 @@ pub struct Agent {
     registry: ToolRegistry,
 }
 
+pub struct AgentRunOutput {
+    pub final_turn: AssistantTurn,
+    pub transcript_path: PathBuf,
+}
+
 impl Agent {
     pub fn new(config: AgentConfig, llm: Box<dyn LlmClient>, registry: ToolRegistry) -> Self {
         Self {
@@ -21,12 +28,17 @@ impl Agent {
     }
 
     pub async fn run(&self, user_prompt: &str) -> Result<AssistantTurn> {
+        Ok(self.run_with_meta(user_prompt).await?.final_turn)
+    }
+
+    pub async fn run_with_meta(&self, user_prompt: &str) -> Result<AgentRunOutput> {
         let mut messages = vec![ConversationMessage::user(user_prompt)];
 
         let ctx = ToolContext {
             config: self.config.clone(),
         };
-        let transcript_path = self.config.workspace_root.join(".exagent/transcript.jsonl");
+        let transcript_dir = self.config.workspace_root.join(".exagent/runs");
+        let transcript_path = crate::transcript::new_run_transcript_path(&transcript_dir);
 
         for _ in 0..self.config.max_turns {
             let turn = self
@@ -43,7 +55,10 @@ impl Agent {
             }
 
             if turn.tool_calls.is_empty() {
-                return Ok(turn);
+                return Ok(AgentRunOutput {
+                    final_turn: turn,
+                    transcript_path,
+                });
             }
 
             for call in turn.tool_calls.clone() {

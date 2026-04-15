@@ -4,12 +4,17 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::config::AgentConfig;
+use crate::exec_session::ExecSessionManager;
+use crate::policy::PolicyManager;
 use crate::tools::Tool;
-use crate::types::{ToolCall, ToolResult, ToolStatus};
+use crate::types::{SessionId, ToolCall, ToolResult, ToolStatus};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolContext {
     pub config: AgentConfig,
+    pub session_id: Option<SessionId>,
+    pub exec_sessions: Arc<ExecSessionManager>,
+    pub policy: Arc<PolicyManager>,
 }
 
 pub struct ToolRegistry {

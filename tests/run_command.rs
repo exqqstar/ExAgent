@@ -1,8 +1,11 @@
 use exagent::config::AgentConfig;
+use exagent::exec_session::ExecSessionManager;
+use exagent::policy::PolicyManager;
 use exagent::registry::{ToolContext, ToolRegistry};
 use exagent::tools::run_command::RunCommandTool;
 use exagent::types::ToolCall;
 use serde_json::json;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn test_context() -> (tempfile::TempDir, ToolContext) {
@@ -13,6 +16,9 @@ fn test_context() -> (tempfile::TempDir, ToolContext) {
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         },
+        session_id: None,
+        exec_sessions: Arc::new(ExecSessionManager::default()),
+        policy: Arc::new(PolicyManager::default()),
     };
     (dir, ctx)
 }

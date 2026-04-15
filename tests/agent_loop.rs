@@ -45,7 +45,15 @@ async fn agent_runs_until_assistant_returns_no_tool_calls() {
         std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
         "hello"
     );
-    assert!(dir.path().join(".exagent/transcript.jsonl").exists());
+    let sessions_dir = dir.path().join(".exagent/sessions");
+    let session_dirs = std::fs::read_dir(&sessions_dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(session_dirs.len(), 1);
+    let session_dir = session_dirs[0].path();
+    assert!(session_dir.join("snapshot.json").exists());
+    assert!(session_dir.join("events.jsonl").exists());
 }
 
 #[tokio::test]

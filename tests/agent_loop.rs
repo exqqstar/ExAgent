@@ -45,9 +45,15 @@ async fn agent_runs_until_assistant_returns_no_tool_calls() {
         std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
         "hello"
     );
-    let runs_dir = dir.path().join(".exagent/runs");
-    assert!(runs_dir.exists());
-    assert_eq!(std::fs::read_dir(runs_dir).unwrap().count(), 1);
+    let sessions_dir = dir.path().join(".exagent/sessions");
+    let session_dirs = std::fs::read_dir(&sessions_dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(session_dirs.len(), 1);
+    let session_dir = session_dirs[0].path();
+    assert!(session_dir.join("snapshot.json").exists());
+    assert!(session_dir.join("events.jsonl").exists());
 }
 
 #[tokio::test]
@@ -65,40 +71,6 @@ async fn agent_feeds_tool_errors_back_into_next_turn() {
     let final_turn = agent.run("do something").await.unwrap();
 
     assert_eq!(final_turn.text.as_deref(), Some("handled tool error"));
-}
-
-#[tokio::test]
-async fn agent_creates_a_new_transcript_for_each_run() {
-    let dir = tempdir().unwrap();
-
-    let config = AgentConfig {
-        workspace_root: dir.path().to_path_buf(),
-        cwd: dir.path().to_path_buf(),
-        ..AgentConfig::default()
-    };
-
-    let agent_one = Agent::new(
-        config.clone(),
-        Box::new(MockLlm::new(vec![AssistantTurn {
-            text: Some("first".into()),
-            tool_calls: vec![],
-        }])),
-        ToolRegistry::new(),
-    );
-    let agent_two = Agent::new(
-        config,
-        Box::new(MockLlm::new(vec![AssistantTurn {
-            text: Some("second".into()),
-            tool_calls: vec![],
-        }])),
-        ToolRegistry::new(),
-    );
-
-    agent_one.run("first prompt").await.unwrap();
-    agent_two.run("second prompt").await.unwrap();
-
-    let runs_dir = dir.path().join(".exagent/runs");
-    assert_eq!(std::fs::read_dir(runs_dir).unwrap().count(), 2);
 }
 
 #[derive(Default)]

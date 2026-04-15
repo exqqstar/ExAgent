@@ -1,8 +1,11 @@
 use exagent::config::AgentConfig;
+use exagent::exec_session::ExecSessionManager;
+use exagent::policy::PolicyManager;
 use exagent::registry::{ToolContext, ToolRegistry};
 use exagent::tools::{read_file::ReadFileTool, write_file::WriteFileTool};
 use exagent::types::ToolCall;
 use serde_json::json;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -19,6 +22,9 @@ async fn read_file_limits_to_requested_range() {
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         },
+        session_id: None,
+        exec_sessions: Arc::new(ExecSessionManager::default()),
+        policy: Arc::new(PolicyManager::default()),
     };
 
     let result = registry
@@ -50,6 +56,9 @@ async fn write_file_creates_parent_directories() {
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         },
+        session_id: None,
+        exec_sessions: Arc::new(ExecSessionManager::default()),
+        policy: Arc::new(PolicyManager::default()),
     };
 
     let result = registry
@@ -86,6 +95,9 @@ async fn read_file_rejects_escape_outside_workspace() {
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         },
+        session_id: None,
+        exec_sessions: Arc::new(ExecSessionManager::default()),
+        policy: Arc::new(PolicyManager::default()),
     };
 
     let result = registry

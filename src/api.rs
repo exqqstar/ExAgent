@@ -12,14 +12,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::Agent;
 use crate::config::AgentConfig;
+use crate::exec_session::ExecSessionManager;
 use crate::llm::OpenAiCompatibleLlm;
-use crate::types::ToolCall;
+use crate::policy::PolicyManager;
+use crate::types::{SessionId, ToolCall};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRunResponse {
     pub text: Option<String>,
     pub tool_calls: Vec<ToolCall>,
-    pub transcript_path: String,
+    pub session_id: SessionId,
+    pub snapshot_path: String,
+    pub events_path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -27,6 +31,7 @@ struct RunRequest {
     prompt: String,
     workspace_root: Option<String>,
     cwd: Option<String>,
+    session_id: Option<SessionId>,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,11 +56,23 @@ pub trait AgentRunner: Send + Sync {
         prompt: &str,
         workspace_root: Option<&str>,
         cwd: Option<&str>,
+        session_id: Option<&SessionId>,
     ) -> Result<AgentRunResponse>;
 }
 
-#[derive(Default)]
-pub struct DefaultAgentRunner;
+pub struct DefaultAgentRunner {
+    exec_sessions: Arc<ExecSessionManager>,
+    policy: Arc<PolicyManager>,
+}
+
+impl Default for DefaultAgentRunner {
+    fn default() -> Self {
+        Self {
+            exec_sessions: Arc::new(ExecSessionManager::default()),
+            policy: Arc::new(PolicyManager::default()),
+        }
+    }
+}
 
 #[async_trait]
 impl AgentRunner for DefaultAgentRunner {
@@ -64,16 +81,28 @@ impl AgentRunner for DefaultAgentRunner {
         prompt: &str,
         workspace_root: Option<&str>,
         cwd: Option<&str>,
+        session_id: Option<&SessionId>,
     ) -> Result<AgentRunResponse> {
         let config = build_config(workspace_root, cwd)?;
         let llm = OpenAiCompatibleLlm::from_env()?;
-        let agent = Agent::new(config, Box::new(llm), crate::default_tool_registry());
-        let output = agent.run_with_meta(prompt).await?;
+        let agent = Agent::with_runtime(
+            config,
+            Box::new(llm),
+            crate::default_tool_registry(),
+            self.exec_sessions.clone(),
+            self.policy.clone(),
+        );
+        let output = match session_id {
+            Some(session_id) => agent.resume(session_id, prompt).await?,
+            None => agent.run_with_meta(prompt).await?,
+        };
 
         Ok(AgentRunResponse {
             text: output.final_turn.text,
             tool_calls: output.final_turn.tool_calls,
-            transcript_path: output.transcript_path.display().to_string(),
+            session_id: output.session_id,
+            snapshot_path: output.snapshot_path.display().to_string(),
+            events_path: output.events_path.display().to_string(),
         })
     }
 }
@@ -96,7 +125,7 @@ pub async fn serve(bind_addr: Option<&str>) -> Result<()> {
         .with_context(|| format!("Failed to bind API listener on {bind_addr}"))?;
 
     tracing::info!("exagent API listening on {}", bind_addr);
-    axum::serve(listener, build_router(Arc::new(DefaultAgentRunner)))
+    axum::serve(listener, build_router(Arc::new(DefaultAgentRunner::default())))
         .await
         .context("API server stopped unexpectedly")?;
 
@@ -117,6 +146,7 @@ async fn run_agent(
             &request.prompt,
             request.workspace_root.as_deref(),
             request.cwd.as_deref(),
+            request.session_id.as_ref(),
         )
         .await
     {

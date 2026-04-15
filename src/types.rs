@@ -1,7 +1,29 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+macro_rules! string_id {
+    ($name:ident) => {
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Self {
+                Self(value.into())
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+    };
+}
+
+string_id!(SessionId);
+string_id!(TurnId);
+string_id!(EventId);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -13,6 +35,7 @@ pub struct ToolCall {
 pub enum ToolStatus {
     Success,
     Error,
+    ReviewRequired,
 }
 
 impl ToolStatus {
@@ -20,11 +43,12 @@ impl ToolStatus {
         match self {
             Self::Success => "success",
             Self::Error => "error",
+            Self::ReviewRequired => "review_required",
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolResult {
     pub tool_call_id: String,
     pub tool_name: String,
@@ -33,13 +57,13 @@ pub struct ToolResult {
     pub meta: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AssistantTurn {
     pub text: Option<String>,
     pub tool_calls: Vec<ToolCall>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
     System,
@@ -48,7 +72,7 @@ pub enum MessageRole {
     Tool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConversationMessage {
     pub role: MessageRole,
     pub content: String,

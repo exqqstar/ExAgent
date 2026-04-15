@@ -1,8 +1,13 @@
 pub mod agent;
 pub mod api;
+pub mod cli;
 pub mod config;
+pub mod exec_session;
+pub mod events;
 pub mod llm;
+pub mod policy;
 pub mod registry;
+pub mod session;
 pub mod tools;
 pub mod transcript;
 pub mod types;

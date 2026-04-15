@@ -2,21 +2,26 @@
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let mut args = std::env::args().skip(1);
-    let first_arg = args
-        .next()
-        .expect("usage: cargo run -- '<prompt>' | cargo run -- api [bind_addr]");
+    let command =
+        exagent::cli::parse_cli_command(std::env::args().skip(1).collect::<Vec<_>>())?;
 
-    if first_arg == "api" {
-        exagent::api::serve(args.next().as_deref()).await?;
+    if let exagent::cli::CliCommand::Api { bind_addr } = &command {
+        exagent::api::serve(bind_addr.as_deref()).await?;
         return Ok(());
     }
 
     let config = exagent::config::AgentConfig::default();
     let llm = exagent::llm::OpenAiCompatibleLlm::from_env()?;
     let agent = exagent::agent::Agent::new(config, Box::new(llm), exagent::default_tool_registry());
-    let final_turn = agent.run(&first_arg).await?;
-    println!("{}", final_turn.text.unwrap_or_default());
+
+    let output = match command {
+        exagent::cli::CliCommand::Run { prompt } => agent.run_with_meta(&prompt).await?,
+        exagent::cli::CliCommand::Resume { session_id, prompt } => {
+            agent.resume(&session_id, &prompt).await?
+        }
+        exagent::cli::CliCommand::Api { .. } => unreachable!("api handled above"),
+    };
+    println!("{}", output.final_turn.text.unwrap_or_default());
 
     Ok(())
 }

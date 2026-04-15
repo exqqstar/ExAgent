@@ -155,9 +155,10 @@ impl Agent {
 
         let mut messages = snapshot.conversation.clone();
 
-        let ctx = ToolContext {
+        let base_ctx = ToolContext {
             config: session_config.clone(),
             session_id: Some(session_id.clone()),
+            turn_id: None,
             exec_sessions: self.exec_sessions.clone(),
             policy: self.policy.clone(),
         };
@@ -205,6 +206,8 @@ impl Agent {
             }
 
             for call in turn.tool_calls.clone() {
+                let mut ctx = base_ctx.clone();
+                ctx.turn_id = Some(turn_id.clone());
                 let result = self.registry.execute(call, Some(&ctx)).await;
                 apply_exec_session_update(&mut snapshot, &result);
                 apply_pending_approval_update(&mut snapshot, &result);

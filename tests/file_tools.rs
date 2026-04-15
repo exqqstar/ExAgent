@@ -23,6 +23,7 @@ async fn read_file_limits_to_requested_range() {
             ..AgentConfig::default()
         },
         session_id: None,
+        turn_id: None,
         exec_sessions: Arc::new(ExecSessionManager::default()),
         policy: Arc::new(PolicyManager::default()),
     };
@@ -57,6 +58,7 @@ async fn write_file_creates_parent_directories() {
             ..AgentConfig::default()
         },
         session_id: None,
+        turn_id: None,
         exec_sessions: Arc::new(ExecSessionManager::default()),
         policy: Arc::new(PolicyManager::default()),
     };
@@ -96,6 +98,7 @@ async fn read_file_rejects_escape_outside_workspace() {
             ..AgentConfig::default()
         },
         session_id: None,
+        turn_id: None,
         exec_sessions: Arc::new(ExecSessionManager::default()),
         policy: Arc::new(PolicyManager::default()),
     };

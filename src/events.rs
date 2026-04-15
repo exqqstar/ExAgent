@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::result_contract::StructuredSessionResult;
 use crate::session::{AgentRole, ApprovalId, ApprovalStatus, CompactionSummary, ExecSessionId};
 use crate::types::{AssistantTurn, EventId, SessionId, ToolResult, TurnId};
 
@@ -51,6 +52,9 @@ pub enum RuntimeEventKind {
     },
     CompactionWritten {
         summary: CompactionSummary,
+    },
+    StructuredResultRecorded {
+        result: StructuredSessionResult,
     },
     RuntimeError {
         message: String,

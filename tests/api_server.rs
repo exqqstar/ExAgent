@@ -9,6 +9,9 @@ use exagent::orchestration::{
     ChildLifecycleStatus, ChildSessionSummary, CollectedChildSession, CollectedOutput,
     CollectedOutputKind,
 };
+use exagent::result_contract::{
+    StructuredResultPayload, StructuredSessionResult, STRUCTURED_RESULT_SCHEMA_VERSION,
+};
 use exagent::session::AgentRole;
 use exagent::types::{SessionId, ToolCall, TurnId};
 use serde_json::{json, Value};
@@ -407,6 +410,66 @@ async fn collect_route_accepts_child_session_id() {
     assert_eq!(
         serde_json::from_slice::<Value>(&body).unwrap(),
         json!({
+                "session": {
+                    "child": {
+                        "session_id": "session_child",
+                    "parent_session_id": "session_parent",
+                    "root_session_id": "session_parent",
+                    "spawned_by_turn_id": "turn_1",
+                    "agent_role": "spec",
+                    "status": "completed",
+                        "snapshot_path": ".exagent/sessions/session_child/snapshot.json",
+                        "events_path": ".exagent/sessions/session_child/events.jsonl"
+                    },
+                    "latest_useful_output": {
+                        "kind": "assistant_text",
+                        "content": "spec summary",
+                    "tool_name": null,
+                    "tool_call_id": null
+                }
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn collect_route_serializes_structured_result() {
+    let app = build_router(Arc::new(StubRunner {
+        response: AgentRunResponse {
+            text: Some("unused".into()),
+            tool_calls: vec![],
+            session_id: SessionId::new("session_123"),
+            snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
+            events_path: ".exagent/sessions/session_123/events.jsonl".into(),
+        },
+        inspect_response: sample_inspect_response(),
+        collect_response: sample_collect_response_with_structured_result(),
+        calls: Mutex::new(vec![]),
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/collect")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "session_id": "session_child",
+                        "workspace_root": "."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({
             "session": {
                 "child": {
                     "session_id": "session_child",
@@ -417,6 +480,24 @@ async fn collect_route_accepts_child_session_id() {
                     "status": "completed",
                     "snapshot_path": ".exagent/sessions/session_child/snapshot.json",
                     "events_path": ".exagent/sessions/session_child/events.jsonl"
+                },
+                "structured_result": {
+                    "schema_version": "phase3_p2/v1",
+                    "agent_role": "spec",
+                    "session_id": "session_child",
+                    "parent_session_id": "session_parent",
+                    "source_turn_id": "turn_1",
+                    "summary": "spec summary",
+                    "assumptions": ["P1 is stable"],
+                    "risks": ["scope creep"],
+                    "open_questions": ["none"],
+                    "payload": {
+                        "kind": "spec",
+                        "goals": ["add structured contracts"],
+                        "non_goals": ["no planner"],
+                        "acceptance_criteria": ["collect returns typed result"],
+                        "contract_boundaries": ["inspect stays topology-only"]
+                    }
                 },
                 "latest_useful_output": {
                     "kind": "assistant_text",
@@ -520,6 +601,38 @@ fn sample_collect_response() -> CollectResponse {
     CollectResponse {
         session: CollectedChildSession {
             child: sample_summary(),
+            structured_result: None,
+            latest_useful_output: Some(CollectedOutput {
+                kind: CollectedOutputKind::AssistantText,
+                content: "spec summary".into(),
+                tool_name: None,
+                tool_call_id: None,
+            }),
+        },
+    }
+}
+
+fn sample_collect_response_with_structured_result() -> CollectResponse {
+    CollectResponse {
+        session: CollectedChildSession {
+            child: sample_summary(),
+            structured_result: Some(StructuredSessionResult {
+                schema_version: STRUCTURED_RESULT_SCHEMA_VERSION.into(),
+                agent_role: AgentRole::Spec,
+                session_id: SessionId::new("session_child"),
+                parent_session_id: Some(SessionId::new("session_parent")),
+                source_turn_id: Some(TurnId::new("turn_1")),
+                summary: "spec summary".into(),
+                assumptions: vec!["P1 is stable".into()],
+                risks: vec!["scope creep".into()],
+                open_questions: vec!["none".into()],
+                payload: StructuredResultPayload::Spec {
+                    goals: vec!["add structured contracts".into()],
+                    non_goals: vec!["no planner".into()],
+                    acceptance_criteria: vec!["collect returns typed result".into()],
+                    contract_boundaries: vec!["inspect stays topology-only".into()],
+                },
+            }),
             latest_useful_output: Some(CollectedOutput {
                 kind: CollectedOutputKind::AssistantText,
                 content: "spec summary".into(),

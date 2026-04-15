@@ -4,6 +4,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::events::RuntimeEventKind;
+use crate::result_contract::StructuredSessionResult;
 use crate::session::{AgentRole, SessionSnapshot};
 use crate::types::{MessageRole, SessionId, ToolResult, TurnId};
 
@@ -47,6 +48,8 @@ pub struct CollectedOutput {
 pub struct CollectedChildSession {
     pub child: ChildSessionSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_result: Option<StructuredSessionResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_useful_output: Option<CollectedOutput>,
 }
 
@@ -69,6 +72,7 @@ pub fn collect_session(
 
     Ok(CollectedChildSession {
         child,
+        structured_result: crate::transcript::latest_structured_result(workspace_root, session_id)?,
         latest_useful_output: latest_useful_output(workspace_root, session_id, &snapshot)?,
     })
 }

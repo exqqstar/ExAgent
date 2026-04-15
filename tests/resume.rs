@@ -339,6 +339,80 @@ async fn collect_returns_latest_resumed_child_output() {
     );
 }
 
+#[tokio::test]
+async fn collect_returns_latest_structured_result_after_resume() {
+    let dir = tempdir().unwrap();
+    let llm = MockLlm::new(vec![
+        AssistantTurn {
+            text: Some("parent ready".into()),
+            tool_calls: vec![],
+        },
+        AssistantTurn {
+            text: Some("record first spec".into()),
+            tool_calls: vec![structured_result_tool_call("first spec summary")],
+        },
+        AssistantTurn {
+            text: Some("child draft".into()),
+            tool_calls: vec![],
+        },
+        AssistantTurn {
+            text: Some("record revised spec".into()),
+            tool_calls: vec![structured_result_tool_call("revised spec summary")],
+        },
+        AssistantTurn {
+            text: Some("child revised".into()),
+            tool_calls: vec![],
+        },
+    ]);
+
+    let config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        ..AgentConfig::default()
+    };
+
+    let agent = Agent::new(config, Box::new(llm), exagent::default_tool_registry());
+    let parent = agent.run_with_meta("lead phase3").await.unwrap();
+    let child = agent
+        .fork_session(
+            &parent.session_id,
+            AgentRole::Spec,
+            "draft goals",
+            Some(&TurnId::new("turn_1")),
+        )
+        .await
+        .unwrap();
+    agent
+        .resume(&child.session_id, "revise the draft")
+        .await
+        .unwrap();
+
+    let collected = agent.collect_session(&child.session_id).unwrap();
+
+    assert_eq!(
+        collected
+            .structured_result
+            .as_ref()
+            .map(|result| result.summary.as_str()),
+        Some("revised spec summary")
+    );
+    assert_eq!(
+        collected
+            .structured_result
+            .as_ref()
+            .and_then(|result| result.source_turn_id.as_ref())
+            .map(TurnId::as_str),
+        Some("turn_3")
+    );
+    assert_eq!(
+        collected
+            .latest_useful_output
+            .as_ref()
+            .map(|output| output.content.as_str()),
+        Some("child revised")
+    );
+}
+
 #[derive(Default)]
 struct ResumeInspectingLlm {
     calls: Mutex<usize>,
@@ -381,5 +455,25 @@ impl LlmClient for ResumeInspectingLlm {
             }
             _ => Err(anyhow!("unexpected extra llm call")),
         }
+    }
+}
+
+fn structured_result_tool_call(summary: &str) -> ToolCall {
+    ToolCall {
+        id: format!("call_{}", summary.replace(' ', "_")),
+        name: "record_structured_result".into(),
+        arguments: json!({
+            "summary": summary,
+            "assumptions": ["P1 is stable"],
+            "risks": ["scope creep"],
+            "open_questions": ["none"],
+            "payload": {
+                "kind": "spec",
+                "goals": ["add structured contracts"],
+                "non_goals": ["no planner"],
+                "acceptance_criteria": ["collect returns typed result"],
+                "contract_boundaries": ["inspect stays topology-only"]
+            }
+        }),
     }
 }

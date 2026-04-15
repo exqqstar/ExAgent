@@ -10,6 +10,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::events::{RuntimeEvent, RuntimeEventKind};
+use crate::result_contract::StructuredSessionResult;
 use crate::session::{AgentRole, SessionSnapshot};
 use crate::types::{EventId, SessionId, TurnId};
 
@@ -132,6 +133,19 @@ pub fn replay_session(workspace_root: &Path, session_id: &SessionId) -> Result<V
     read_session_events(workspace_root, session_id)
 }
 
+pub fn latest_structured_result(
+    workspace_root: &Path,
+    session_id: &SessionId,
+) -> Result<Option<StructuredSessionResult>> {
+    Ok(read_session_events(workspace_root, session_id)?
+        .into_iter()
+        .rev()
+        .find_map(|event| match event.kind {
+            RuntimeEventKind::StructuredResultRecorded { result } => Some(result),
+            _ => None,
+        }))
+}
+
 pub fn append_runtime_event(
     workspace_root: &Path,
     session_id: &SessionId,
@@ -151,6 +165,20 @@ pub fn append_runtime_event(
     let paths = session_paths(workspace_root, session_id);
     append_json_line(&paths.events_path, &event)?;
     Ok(event)
+}
+
+pub fn record_structured_result(
+    workspace_root: &Path,
+    session_id: &SessionId,
+    turn_id: Option<&TurnId>,
+    result: StructuredSessionResult,
+) -> Result<RuntimeEvent> {
+    append_runtime_event(
+        workspace_root,
+        session_id,
+        turn_id,
+        RuntimeEventKind::StructuredResultRecorded { result },
+    )
 }
 
 pub fn record_session_spawn(

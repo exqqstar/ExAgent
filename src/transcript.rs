@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -9,7 +10,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::events::{RuntimeEvent, RuntimeEventKind};
-use crate::session::AgentRole;
+use crate::session::{AgentRole, SessionSnapshot};
 use crate::types::{EventId, SessionId, TurnId};
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -92,6 +93,39 @@ pub fn read_session_events(
 ) -> Result<Vec<RuntimeEvent>> {
     let paths = session_paths(workspace_root, session_id);
     read_json_lines(&paths.events_path)
+}
+
+pub fn read_session_snapshot(
+    workspace_root: &Path,
+    session_id: &SessionId,
+) -> Result<SessionSnapshot> {
+    let paths = session_paths(workspace_root, session_id);
+    read_json(&paths.snapshot_path)
+}
+
+pub fn direct_child_session_ids(
+    workspace_root: &Path,
+    parent_session_id: &SessionId,
+) -> Result<Vec<SessionId>> {
+    let mut child_session_ids = Vec::new();
+    let mut seen = HashSet::new();
+
+    for event in read_session_events(workspace_root, parent_session_id)? {
+        let RuntimeEventKind::SessionSpawned {
+            child_session_id,
+            parent_session_id: event_parent_session_id,
+            ..
+        } = event.kind
+        else {
+            continue;
+        };
+
+        if event_parent_session_id == *parent_session_id && seen.insert(child_session_id.clone()) {
+            child_session_ids.push(child_session_id);
+        }
+    }
+
+    Ok(child_session_ids)
 }
 
 pub fn replay_session(workspace_root: &Path, session_id: &SessionId) -> Result<Vec<RuntimeEvent>> {

@@ -9,27 +9,61 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let config = exagent::config::AgentConfig::default();
-    let llm = exagent::llm::OpenAiCompatibleLlm::from_env()?;
-    let agent = exagent::agent::Agent::new(config, Box::new(llm), exagent::default_tool_registry());
-
-    let output = match command {
-        exagent::cli::CliCommand::Run { prompt } => agent.run_with_meta(&prompt).await?,
+    match command {
+        exagent::cli::CliCommand::Inspect { parent_session_id } => {
+            let config = exagent::config::AgentConfig::default();
+            let children = exagent::orchestration::inspect_children(
+                &config.workspace_root,
+                &parent_session_id,
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&exagent::api::InspectResponse { children })?
+            );
+            return Ok(());
+        }
+        exagent::cli::CliCommand::Collect { session_id } => {
+            let config = exagent::config::AgentConfig::default();
+            let session =
+                exagent::orchestration::collect_session(&config.workspace_root, &session_id)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&exagent::api::CollectResponse { session })?
+            );
+            return Ok(());
+        }
+        exagent::cli::CliCommand::Run { prompt } => {
+            let config = exagent::config::AgentConfig::default();
+            let llm = exagent::llm::OpenAiCompatibleLlm::from_env()?;
+            let agent =
+                exagent::agent::Agent::new(config, Box::new(llm), exagent::default_tool_registry());
+            let output = agent.run_with_meta(&prompt).await?;
+            println!("{}", output.final_turn.text.unwrap_or_default());
+        }
         exagent::cli::CliCommand::Resume { session_id, prompt } => {
-            agent.resume(&session_id, &prompt).await?
+            let config = exagent::config::AgentConfig::default();
+            let llm = exagent::llm::OpenAiCompatibleLlm::from_env()?;
+            let agent =
+                exagent::agent::Agent::new(config, Box::new(llm), exagent::default_tool_registry());
+            let output = agent.resume(&session_id, &prompt).await?;
+            println!("{}", output.final_turn.text.unwrap_or_default());
         }
         exagent::cli::CliCommand::Fork {
             parent_session_id,
             agent_role,
             prompt,
         } => {
-            agent
+            let config = exagent::config::AgentConfig::default();
+            let llm = exagent::llm::OpenAiCompatibleLlm::from_env()?;
+            let agent =
+                exagent::agent::Agent::new(config, Box::new(llm), exagent::default_tool_registry());
+            let output = agent
                 .fork_session(&parent_session_id, agent_role, &prompt, None)
-                .await?
+                .await?;
+            println!("{}", output.final_turn.text.unwrap_or_default());
         }
         exagent::cli::CliCommand::Api { .. } => unreachable!("api handled above"),
     };
-    println!("{}", output.final_turn.text.unwrap_or_default());
 
     Ok(())
 }

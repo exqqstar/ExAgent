@@ -287,6 +287,58 @@ async fn new_root_session_defaults_to_primary_role_and_own_root_id() {
     assert_eq!(snapshot.agent_role, AgentRole::Primary);
 }
 
+#[tokio::test]
+async fn collect_returns_latest_resumed_child_output() {
+    let dir = tempdir().unwrap();
+    let llm = MockLlm::new(vec![
+        AssistantTurn {
+            text: Some("parent ready".into()),
+            tool_calls: vec![],
+        },
+        AssistantTurn {
+            text: Some("child draft".into()),
+            tool_calls: vec![],
+        },
+        AssistantTurn {
+            text: Some("child revised".into()),
+            tool_calls: vec![],
+        },
+    ]);
+
+    let config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        ..AgentConfig::default()
+    };
+
+    let agent = Agent::new(config, Box::new(llm), ToolRegistry::new());
+    let parent = agent.run_with_meta("lead phase3").await.unwrap();
+    let child = agent
+        .fork_session(
+            &parent.session_id,
+            AgentRole::Spec,
+            "draft goals",
+            Some(&TurnId::new("turn_1")),
+        )
+        .await
+        .unwrap();
+    let resumed = agent
+        .resume(&child.session_id, "revise the draft")
+        .await
+        .unwrap();
+
+    let collected = agent.collect_session(&child.session_id).unwrap();
+
+    assert_eq!(resumed.session_id, child.session_id);
+    assert_eq!(
+        collected
+            .latest_useful_output
+            .as_ref()
+            .map(|output| output.content.as_str()),
+        Some("child revised")
+    );
+}
+
 #[derive(Default)]
 struct ResumeInspectingLlm {
     calls: Mutex<usize>,

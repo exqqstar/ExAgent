@@ -5,6 +5,7 @@ pub mod config;
 pub mod events;
 pub mod exec_session;
 pub mod llm;
+pub mod orchestration;
 pub mod policy;
 pub mod registry;
 pub mod session;

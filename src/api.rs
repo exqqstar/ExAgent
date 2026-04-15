@@ -14,6 +14,7 @@ use crate::agent::Agent;
 use crate::config::AgentConfig;
 use crate::exec_session::ExecSessionManager;
 use crate::llm::OpenAiCompatibleLlm;
+use crate::orchestration::{ChildSessionSummary, CollectedChildSession};
 use crate::policy::PolicyManager;
 use crate::session::AgentRole;
 use crate::types::{SessionId, ToolCall, TurnId};
@@ -25,6 +26,16 @@ pub struct AgentRunResponse {
     pub session_id: SessionId,
     pub snapshot_path: String,
     pub events_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InspectResponse {
+    pub children: Vec<ChildSessionSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CollectResponse {
+    pub session: CollectedChildSession,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,6 +53,18 @@ struct ForkRequest {
     prompt: String,
     workspace_root: Option<String>,
     spawned_by_turn_id: Option<TurnId>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InspectRequest {
+    parent_session_id: SessionId,
+    workspace_root: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CollectRequest {
+    session_id: SessionId,
+    workspace_root: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,6 +100,18 @@ pub trait AgentRunner: Send + Sync {
         workspace_root: Option<&str>,
         spawned_by_turn_id: Option<&TurnId>,
     ) -> Result<AgentRunResponse>;
+
+    async fn inspect(
+        &self,
+        parent_session_id: &SessionId,
+        workspace_root: Option<&str>,
+    ) -> Result<InspectResponse>;
+
+    async fn collect(
+        &self,
+        session_id: &SessionId,
+        workspace_root: Option<&str>,
+    ) -> Result<CollectResponse>;
 }
 
 pub struct DefaultAgentRunner {
@@ -142,6 +177,31 @@ impl AgentRunner for DefaultAgentRunner {
 
         Ok(agent_run_response(output))
     }
+
+    async fn inspect(
+        &self,
+        parent_session_id: &SessionId,
+        workspace_root: Option<&str>,
+    ) -> Result<InspectResponse> {
+        let config = build_config(workspace_root, None)?;
+        Ok(InspectResponse {
+            children: crate::orchestration::inspect_children(
+                &config.workspace_root,
+                parent_session_id,
+            )?,
+        })
+    }
+
+    async fn collect(
+        &self,
+        session_id: &SessionId,
+        workspace_root: Option<&str>,
+    ) -> Result<CollectResponse> {
+        let config = build_config(workspace_root, None)?;
+        Ok(CollectResponse {
+            session: crate::orchestration::collect_session(&config.workspace_root, session_id)?,
+        })
+    }
 }
 
 pub fn build_router(runner: Arc<dyn AgentRunner>) -> Router {
@@ -149,6 +209,8 @@ pub fn build_router(runner: Arc<dyn AgentRunner>) -> Router {
         .route("/health", get(health))
         .route("/run", post(run_agent))
         .route("/fork", post(fork_agent))
+        .route("/inspect", post(inspect_children))
+        .route("/collect", post(collect_session))
         .with_state(ApiState { runner })
 }
 
@@ -215,6 +277,49 @@ async fn fork_agent(
             request.workspace_root.as_deref(),
             request.spawned_by_turn_id.as_ref(),
         )
+        .await
+    {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn inspect_children(
+    State(state): State<ApiState>,
+    Json(request): Json<InspectRequest>,
+) -> impl IntoResponse {
+    match state
+        .runner
+        .inspect(
+            &request.parent_session_id,
+            request.workspace_root.as_deref(),
+        )
+        .await
+    {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn collect_session(
+    State(state): State<ApiState>,
+    Json(request): Json<CollectRequest>,
+) -> impl IntoResponse {
+    match state
+        .runner
+        .collect(&request.session_id, request.workspace_root.as_deref())
         .await
     {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),

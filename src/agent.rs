@@ -7,6 +7,7 @@ use crate::config::AgentConfig;
 use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::exec_session::ExecSessionManager;
 use crate::llm::LlmClient;
+use crate::orchestration::{ChildSessionSummary, CollectedChildSession};
 use crate::policy::PolicyManager;
 use crate::registry::{ToolContext, ToolRegistry};
 use crate::session::{
@@ -129,6 +130,17 @@ impl Agent {
         )?;
 
         self.run_session(child_snapshot).await
+    }
+
+    pub fn inspect_children(
+        &self,
+        parent_session_id: &SessionId,
+    ) -> Result<Vec<ChildSessionSummary>> {
+        crate::orchestration::inspect_children(&self.config.workspace_root, parent_session_id)
+    }
+
+    pub fn collect_session(&self, session_id: &SessionId) -> Result<CollectedChildSession> {
+        crate::orchestration::collect_session(&self.config.workspace_root, session_id)
     }
 
     async fn run_session(&self, mut snapshot: SessionSnapshot) -> Result<AgentRunOutput> {

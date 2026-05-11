@@ -15,6 +15,7 @@ use exagent::result_contract::{
 use exagent::session::AgentRole;
 use exagent::types::{SessionId, ToolCall, TurnId};
 use serde_json::{json, Value};
+use tempfile::tempdir;
 use tower::util::ServiceExt;
 
 struct StubRunner {
@@ -166,6 +167,201 @@ async fn health_route_returns_ok() {
         serde_json::from_slice::<Value>(&body).unwrap(),
         json!({"status": "ok"})
     );
+}
+
+#[tokio::test]
+async fn initialize_route_returns_protocol_capabilities() {
+    let app = build_router(Arc::new(StubRunner {
+        response: AgentRunResponse {
+            text: Some("unused".into()),
+            tool_calls: vec![],
+            session_id: SessionId::new("session_123"),
+            snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
+            events_path: ".exagent/sessions/session_123/events.jsonl".into(),
+        },
+        inspect_response: sample_inspect_response(),
+        collect_response: sample_collect_response(),
+        calls: Mutex::new(vec![]),
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/initialize")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "client_info": {
+                            "name": "exagent-test-client",
+                            "version": "0.1.0"
+                        },
+                        "capabilities": {
+                            "sse": true,
+                            "interrupt": true
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({
+            "protocol_version": "runtime_control/v1",
+            "server_capabilities": {
+                "sse": false,
+                "interrupt": false,
+                "compact": false,
+                "thread_lifecycle": true
+            },
+            "supported_event_types": [
+                "assistant_turn",
+                "tool_result",
+                "session_spawned",
+                "exec_output",
+                "approval_requested",
+                "approval_decision",
+                "compaction_written",
+                "structured_result_recorded",
+                "runtime_error"
+            ]
+        })
+    );
+}
+
+#[tokio::test]
+async fn threads_route_starts_managed_thread() {
+    let dir = tempdir().unwrap();
+    let nested = dir.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let app = build_router(Arc::new(StubRunner {
+        response: AgentRunResponse {
+            text: Some("unused".into()),
+            tool_calls: vec![],
+            session_id: SessionId::new("session_123"),
+            snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
+            events_path: ".exagent/sessions/session_123/events.jsonl".into(),
+        },
+        inspect_response: sample_inspect_response(),
+        collect_response: sample_collect_response(),
+        calls: Mutex::new(vec![]),
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/threads")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "workspace_root": dir.path(),
+                        "cwd": "nested",
+                        "model": "thread-model",
+                        "agent_role": "implementation",
+                        "instructions": ["use runtime queue"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value = serde_json::from_slice::<Value>(&body).unwrap();
+    assert!(value["thread"]["session_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("session-"));
+    assert_eq!(value["thread"]["status"], "idle");
+    assert_eq!(value["thread"]["context"]["model"], "thread-model");
+    assert_eq!(value["thread"]["context"]["agent_role"], "implementation");
+    assert_eq!(
+        value["thread"]["context"]["instructions"][0],
+        "use runtime queue"
+    );
+    assert_eq!(
+        value["thread"]["context"]["cwd"],
+        std::fs::canonicalize(nested).unwrap().display().to_string()
+    );
+}
+
+#[tokio::test]
+async fn thread_turns_route_queues_turn_for_managed_thread() {
+    let dir = tempdir().unwrap();
+    let app = build_router(Arc::new(StubRunner {
+        response: AgentRunResponse {
+            text: Some("unused".into()),
+            tool_calls: vec![],
+            session_id: SessionId::new("session_123"),
+            snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
+            events_path: ".exagent/sessions/session_123/events.jsonl".into(),
+        },
+        inspect_response: sample_inspect_response(),
+        collect_response: sample_collect_response(),
+        calls: Mutex::new(vec![]),
+    }));
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/threads")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "workspace_root": dir.path()
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let create_body = to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let session_id = serde_json::from_slice::<Value>(&create_body).unwrap()["thread"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let turn_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/threads/{session_id}/turns"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "input": [{"content": "continue the work"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(turn_response.status(), StatusCode::OK);
+    let turn_body = to_bytes(turn_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice::<Value>(&turn_body).unwrap();
+    assert!(value["turn"]["turn_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("turn_"));
+    assert_eq!(value["turn"]["status"], "queued");
 }
 
 #[tokio::test]

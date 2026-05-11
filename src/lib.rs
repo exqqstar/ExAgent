@@ -9,6 +9,7 @@ pub mod orchestration;
 pub mod policy;
 pub mod registry;
 pub mod result_contract;
+pub mod runtime;
 pub mod session;
 pub mod tools;
 pub mod transcript;

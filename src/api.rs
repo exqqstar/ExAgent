@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
-use axum::extract::State;
+use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -16,6 +16,10 @@ use crate::exec_session::ExecSessionManager;
 use crate::llm::OpenAiCompatibleLlm;
 use crate::orchestration::{ChildSessionSummary, CollectedChildSession};
 use crate::policy::PolicyManager;
+use crate::runtime::{
+    ManagedThreadStatus, RuntimeController, ThreadManager, ThreadStartRequest, TurnContextRequest,
+    TurnStartRequest, UserInput,
+};
 use crate::session::AgentRole;
 use crate::types::{SessionId, ToolCall, TurnId};
 
@@ -67,6 +71,95 @@ struct CollectRequest {
     workspace_root: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ThreadStartApiRequest {
+    workspace_root: Option<String>,
+    cwd: Option<String>,
+    model: Option<String>,
+    agent_role: Option<AgentRole>,
+    #[serde(default)]
+    instructions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TurnStartApiRequest {
+    input: Vec<UserInput>,
+    workspace_root: Option<String>,
+    cwd: Option<String>,
+    model: Option<String>,
+    agent_role: Option<AgentRole>,
+    #[serde(default)]
+    instructions: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ThreadStartApiResponse {
+    thread: ThreadApiResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct ThreadApiResponse {
+    session_id: SessionId,
+    status: String,
+    context: TurnContextApiResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct TurnContextApiResponse {
+    model: String,
+    workspace_root: String,
+    cwd: String,
+    policy_mode: &'static str,
+    agent_role: AgentRole,
+    instructions: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TurnStartApiResponse {
+    turn: TurnApiResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct TurnApiResponse {
+    turn_id: TurnId,
+    status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct InitializeRequest {
+    client_info: ClientInfo,
+    capabilities: ClientCapabilities,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClientInfo {
+    name: String,
+    version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClientCapabilities {
+    #[serde(default)]
+    sse: bool,
+    #[serde(default)]
+    interrupt: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct InitializeResponse {
+    protocol_version: &'static str,
+    server_capabilities: ServerCapabilities,
+    supported_event_types: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct ServerCapabilities {
+    sse: bool,
+    interrupt: bool,
+    compact: bool,
+    thread_lifecycle: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     status: &'static str,
@@ -80,6 +173,7 @@ struct ErrorResponse {
 #[derive(Clone)]
 struct ApiState {
     runner: Arc<dyn AgentRunner>,
+    runtime: RuntimeController,
 }
 
 #[async_trait]
@@ -117,6 +211,7 @@ pub trait AgentRunner: Send + Sync {
 pub struct DefaultAgentRunner {
     exec_sessions: Arc<ExecSessionManager>,
     policy: Arc<PolicyManager>,
+    threads: ThreadManager,
 }
 
 impl Default for DefaultAgentRunner {
@@ -124,6 +219,7 @@ impl Default for DefaultAgentRunner {
         Self {
             exec_sessions: Arc::new(ExecSessionManager::default()),
             policy: Arc::new(PolicyManager::default()),
+            threads: ThreadManager::default(),
         }
     }
 }
@@ -137,6 +233,15 @@ impl AgentRunner for DefaultAgentRunner {
         cwd: Option<&str>,
         session_id: Option<&SessionId>,
     ) -> Result<AgentRunResponse> {
+        let live_thread = match session_id {
+            Some(session_id) => Some(self.threads.get_or_start(session_id.clone()).await),
+            None => None,
+        };
+        let _execution_guard = match live_thread.as_ref() {
+            Some(handle) => Some(handle.lock_execution().await),
+            None => None,
+        };
+
         let config = build_config(workspace_root, cwd)?;
         let llm = OpenAiCompatibleLlm::from_env()?;
         let agent = Agent::with_runtime(
@@ -146,10 +251,17 @@ impl AgentRunner for DefaultAgentRunner {
             self.exec_sessions.clone(),
             self.policy.clone(),
         );
-        let output = match session_id {
-            Some(session_id) => agent.resume(session_id, prompt).await?,
-            None => agent.run_with_meta(prompt).await?,
+        if let Some(handle) = live_thread.as_ref() {
+            handle.set_status(ManagedThreadStatus::Running).await;
+        }
+        let output_result = match session_id {
+            Some(session_id) => agent.resume(session_id, prompt).await,
+            None => agent.run_with_meta(prompt).await,
         };
+        if let Some(handle) = live_thread.as_ref() {
+            handle.set_status(ManagedThreadStatus::Idle).await;
+        }
+        let output = output_result?;
 
         Ok(agent_run_response(output))
     }
@@ -162,6 +274,9 @@ impl AgentRunner for DefaultAgentRunner {
         workspace_root: Option<&str>,
         spawned_by_turn_id: Option<&TurnId>,
     ) -> Result<AgentRunResponse> {
+        let parent_thread = self.threads.get_or_start(parent_session_id.clone()).await;
+        let _parent_execution_guard = parent_thread.lock_execution().await;
+
         let config = build_config(workspace_root, None)?;
         let llm = OpenAiCompatibleLlm::from_env()?;
         let agent = Agent::with_runtime(
@@ -206,12 +321,18 @@ impl AgentRunner for DefaultAgentRunner {
 
 pub fn build_router(runner: Arc<dyn AgentRunner>) -> Router {
     Router::new()
+        .route("/initialize", post(initialize))
         .route("/health", get(health))
+        .route("/threads", post(start_thread))
+        .route("/threads/{session_id}/turns", post(start_turn))
         .route("/run", post(run_agent))
         .route("/fork", post(fork_agent))
         .route("/inspect", post(inspect_children))
         .route("/collect", post(collect_session))
-        .with_state(ApiState { runner })
+        .with_state(ApiState {
+            runner,
+            runtime: RuntimeController::new(AgentConfig::default()),
+        })
 }
 
 pub async fn serve(bind_addr: Option<&str>) -> Result<()> {
@@ -237,6 +358,117 @@ pub async fn serve(bind_addr: Option<&str>) -> Result<()> {
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
+}
+
+async fn initialize(Json(request): Json<InitializeRequest>) -> Json<InitializeResponse> {
+    let _client_name = request.client_info.name;
+    let _client_version = request.client_info.version;
+    let _client_requested_sse = request.capabilities.sse;
+    let _client_requested_interrupt = request.capabilities.interrupt;
+
+    Json(InitializeResponse {
+        protocol_version: "runtime_control/v1",
+        server_capabilities: ServerCapabilities {
+            sse: false,
+            interrupt: false,
+            compact: false,
+            thread_lifecycle: true,
+        },
+        supported_event_types: vec![
+            "assistant_turn",
+            "tool_result",
+            "session_spawned",
+            "exec_output",
+            "approval_requested",
+            "approval_decision",
+            "compaction_written",
+            "structured_result_recorded",
+            "runtime_error",
+        ],
+    })
+}
+
+async fn start_thread(
+    State(state): State<ApiState>,
+    Json(request): Json<ThreadStartApiRequest>,
+) -> impl IntoResponse {
+    let request = ThreadStartRequest {
+        context: TurnContextRequest {
+            workspace_root: request.workspace_root,
+            cwd: request.cwd,
+            model: request.model,
+            policy_mode: None,
+            agent_role: request.agent_role,
+            instructions: request.instructions,
+        },
+    };
+
+    match state.runtime.start_thread(request).await {
+        Ok(thread) => (
+            StatusCode::OK,
+            Json(ThreadStartApiResponse {
+                thread: ThreadApiResponse {
+                    session_id: thread.session_id,
+                    status: thread.status,
+                    context: TurnContextApiResponse {
+                        model: thread.context.model,
+                        workspace_root: thread.context.workspace_root.display().to_string(),
+                        cwd: thread.context.cwd.display().to_string(),
+                        policy_mode: policy_mode_name(thread.context.policy_mode),
+                        agent_role: thread.context.agent_role,
+                        instructions: thread.context.instructions,
+                    },
+                },
+            }),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn start_turn(
+    State(state): State<ApiState>,
+    AxumPath(session_id): AxumPath<String>,
+    Json(request): Json<TurnStartApiRequest>,
+) -> impl IntoResponse {
+    let request = TurnStartRequest {
+        session_id: SessionId::new(session_id),
+        input: request.input,
+        context: TurnContextRequest {
+            workspace_root: request.workspace_root,
+            cwd: request.cwd,
+            model: request.model,
+            policy_mode: None,
+            agent_role: request.agent_role,
+            instructions: request.instructions,
+        },
+    };
+
+    match state.runtime.start_turn(request).await {
+        Ok(turn) => (
+            StatusCode::OK,
+            Json(TurnStartApiResponse {
+                turn: TurnApiResponse {
+                    turn_id: turn.turn_id,
+                    status: turn.status,
+                },
+            }),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 async fn run_agent(
@@ -396,5 +628,13 @@ fn agent_run_response(output: crate::agent::AgentRunOutput) -> AgentRunResponse 
         session_id: output.session_id,
         snapshot_path: output.snapshot_path.display().to_string(),
         events_path: output.events_path.display().to_string(),
+    }
+}
+
+fn policy_mode_name(policy_mode: crate::policy::PolicyMode) -> &'static str {
+    match policy_mode {
+        crate::policy::PolicyMode::Off => "off",
+        crate::policy::PolicyMode::Advisory => "advisory",
+        crate::policy::PolicyMode::Enforced => "enforced",
     }
 }

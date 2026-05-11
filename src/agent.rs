@@ -10,6 +10,7 @@ use crate::llm::LlmClient;
 use crate::orchestration::{ChildSessionSummary, CollectedChildSession};
 use crate::policy::PolicyManager;
 use crate::registry::{ToolContext, ToolRegistry};
+use crate::runtime::{RuntimeExecution, RuntimeOp, RuntimeOpExecutor};
 use crate::session::{
     AgentRole, ApprovalId, ApprovalStatus, ExecSessionId, ExecSessionRef, ExecSessionStatus,
     PendingApproval, SessionSnapshot,
@@ -236,6 +237,60 @@ impl Agent {
             "Agent reached max turns ({}) without a final assistant turn",
             self.config.max_turns
         ))
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeOpExecutor for Agent {
+    async fn execute_op(&self, session_id: &SessionId, op: RuntimeOp) -> Result<RuntimeExecution> {
+        match op {
+            RuntimeOp::UserInput {
+                turn_id,
+                input,
+                context,
+            } => {
+                let prompt = input
+                    .into_iter()
+                    .map(|item| item.content)
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if prompt.trim().is_empty() {
+                    return Err(anyhow!("runtime user input cannot be empty"));
+                }
+
+                let paths = crate::transcript::session_paths(&context.workspace_root, session_id);
+                let snapshot = if paths.snapshot_path.exists() {
+                    let mut snapshot: SessionSnapshot =
+                        crate::transcript::read_json(&paths.snapshot_path)?;
+                    snapshot.normalize_lineage();
+                    snapshot
+                        .conversation
+                        .push(ConversationMessage::user(prompt));
+                    crate::transcript::write_json(&paths.snapshot_path, &snapshot)?;
+                    snapshot
+                } else {
+                    SessionSnapshot::new_root(
+                        session_id.clone(),
+                        context.workspace_root,
+                        context.cwd,
+                        prompt,
+                    )
+                };
+                self.run_session(snapshot).await?;
+
+                Ok(RuntimeExecution {
+                    session_id: session_id.clone(),
+                    turn_id: Some(turn_id),
+                    status: "completed".into(),
+                })
+            }
+            RuntimeOp::Interrupt { .. }
+            | RuntimeOp::Compact
+            | RuntimeOp::Shutdown
+            | RuntimeOp::SetThreadName { .. } => {
+                Err(anyhow!("runtime op is not executable by Agent yet"))
+            }
+        }
     }
 }
 

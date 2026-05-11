@@ -365,6 +365,46 @@ async fn thread_turns_route_queues_turn_for_managed_thread() {
 }
 
 #[tokio::test]
+async fn thread_turns_route_rejects_unknown_thread_id() {
+    let app = build_router(Arc::new(StubRunner {
+        response: AgentRunResponse {
+            text: Some("unused".into()),
+            tool_calls: vec![],
+            session_id: SessionId::new("session_123"),
+            snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
+            events_path: ".exagent/sessions/session_123/events.jsonl".into(),
+        },
+        inspect_response: sample_inspect_response(),
+        collect_response: sample_collect_response(),
+        calls: Mutex::new(vec![]),
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/threads/missing_session/turns")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "input": [{"content": "continue the work"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(serde_json::from_slice::<Value>(&body).unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .contains("thread not found"));
+}
+
+#[tokio::test]
 async fn run_route_accepts_existing_session_id() {
     let app = build_router(Arc::new(StubRunner {
         response: AgentRunResponse {

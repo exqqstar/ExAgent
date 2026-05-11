@@ -1,17 +1,21 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, Mutex, MutexGuard};
 
 use crate::config::AgentConfig;
 use crate::policy::PolicyMode;
 use crate::session::AgentRole;
 use crate::types::{SessionId, TurnId};
+use crate::workspace::{
+    canonicalize_existing_cwd, canonicalize_from_current, canonicalize_from_root,
+};
 
 static TURN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -102,7 +106,7 @@ impl ConfigManager {
     pub fn build_turn_context(&self, request: TurnContextRequest) -> Result<TurnContext> {
         let workspace_overridden = request.workspace_root.is_some();
         let workspace_root = match request.workspace_root.as_deref() {
-            Some(raw) => canonicalize_from_current(raw)?,
+            Some(raw) => canonicalize_from_current(raw, "workspace_root")?,
             None => std::fs::canonicalize(&self.base.workspace_root).with_context(|| {
                 format!(
                     "workspace_root does not exist or is not accessible: {}",
@@ -220,8 +224,17 @@ impl RuntimeController {
             bail!("turn input cannot be empty");
         }
 
+        let handle = self
+            .threads
+            .get_live(&request.session_id)
+            .await
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "thread not found or archived: {}",
+                    request.session_id.as_str()
+                )
+            })?;
         let context = self.turn_context_for_request(&request).await?;
-        let handle = self.threads.get_or_start(request.session_id.clone()).await;
         let turn_id = new_turn_id();
         handle
             .submit(RuntimeOp::UserInput {
@@ -257,8 +270,38 @@ impl RuntimeController {
             return Ok(default_context);
         }
 
-        ConfigManager::new(config_from_context(&default_context))
-            .build_turn_context(request.context.clone())
+        self.merge_turn_context(default_context, request.context.clone())
+    }
+
+    fn merge_turn_context(
+        &self,
+        default_context: TurnContext,
+        request: TurnContextRequest,
+    ) -> Result<TurnContext> {
+        let workspace_overridden = request.workspace_root.is_some();
+        let workspace_root = match request.workspace_root.as_deref() {
+            Some(raw) => canonicalize_from_current(raw, "workspace_root")?,
+            None => default_context.workspace_root,
+        };
+
+        let cwd = match request.cwd.as_deref() {
+            Some(raw) => canonicalize_from_root(&workspace_root, raw)?,
+            None if workspace_overridden => workspace_root.clone(),
+            None => default_context.cwd,
+        };
+
+        Ok(TurnContext {
+            model: request.model.unwrap_or(default_context.model),
+            workspace_root,
+            cwd,
+            policy_mode: request.policy_mode.unwrap_or(default_context.policy_mode),
+            agent_role: request.agent_role.unwrap_or(default_context.agent_role),
+            instructions: if request.instructions.is_empty() {
+                default_context.instructions
+            } else {
+                request.instructions
+            },
+        })
     }
 }
 
@@ -271,24 +314,51 @@ where
     }
 
     pub async fn run_next(&self, handle: &ThreadHandle) -> Result<Option<RuntimeExecution>> {
+        let _execution_guard = handle.lock_execution().await;
+        let Some(op) = handle.try_next_op().await else {
+            return Ok(None);
+        };
+
+        self.execute_locked_op(handle, op).await.map(Some)
+    }
+
+    pub async fn run_next_blocking(
+        &self,
+        handle: &ThreadHandle,
+    ) -> Result<Option<RuntimeExecution>> {
+        let _execution_guard = handle.lock_execution().await;
         let Some(op) = handle.next_op().await else {
             return Ok(None);
         };
 
+        self.execute_locked_op(handle, op).await.map(Some)
+    }
+
+    async fn execute_locked_op(
+        &self,
+        handle: &ThreadHandle,
+        op: RuntimeOp,
+    ) -> Result<RuntimeExecution> {
         handle.set_status(ManagedThreadStatus::Running).await;
         let result = self.executor.execute_op(handle.session_id(), op).await;
         handle.set_status(ManagedThreadStatus::Idle).await;
-        result.map(Some)
+        result
     }
 }
 
 impl ThreadManager {
     pub async fn get_live(&self, session_id: &SessionId) -> Option<ThreadHandle> {
-        self.live_threads
+        let handle = self
+            .live_threads
             .lock()
             .await
             .get(session_id.as_str())
-            .cloned()
+            .cloned();
+
+        match handle {
+            Some(handle) if handle.status().await != ManagedThreadStatus::Archived => Some(handle),
+            _ => None,
+        }
     }
 }
 
@@ -330,6 +400,13 @@ impl ThreadHandle {
         self.inner.op_rx.lock().await.recv().await
     }
 
+    pub async fn try_next_op(&self) -> Option<RuntimeOp> {
+        match self.inner.op_rx.lock().await.try_recv() {
+            Ok(op) => Some(op),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+        }
+    }
+
     pub async fn status(&self) -> ManagedThreadStatus {
         *self.inner.status.lock().await
     }
@@ -345,64 +422,7 @@ impl ThreadHandle {
     }
 }
 
-fn canonicalize_from_current(raw: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(raw);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        std::env::current_dir()
-            .context("Failed to resolve current directory")?
-            .join(path)
-    };
-
-    std::fs::canonicalize(&path).with_context(|| {
-        format!(
-            "workspace_root does not exist or is not accessible: {}",
-            path.display()
-        )
-    })
-}
-
-fn canonicalize_existing_cwd(workspace_root: &Path, cwd: &Path) -> Result<PathBuf> {
-    let raw = cwd
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("cwd must be valid UTF-8"))?;
-    canonicalize_from_root(workspace_root, raw)
-}
-
-fn config_from_context(context: &TurnContext) -> AgentConfig {
-    AgentConfig {
-        model: context.model.clone(),
-        workspace_root: context.workspace_root.clone(),
-        cwd: context.cwd.clone(),
-        policy_mode: context.policy_mode,
-        ..AgentConfig::default()
-    }
-}
-
 fn new_turn_id() -> TurnId {
     let next = TURN_COUNTER.fetch_add(1, Ordering::Relaxed);
     TurnId::new(format!("turn_{next}"))
-}
-
-fn canonicalize_from_root(root: &Path, raw: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(raw);
-    let candidate = if path.is_absolute() {
-        path
-    } else {
-        root.join(path)
-    };
-
-    let candidate = std::fs::canonicalize(&candidate).with_context(|| {
-        format!(
-            "cwd does not exist or is not accessible: {}",
-            candidate.display()
-        )
-    })?;
-
-    if !candidate.starts_with(root) {
-        bail!("cwd must stay within workspace_root");
-    }
-
-    Ok(candidate)
 }

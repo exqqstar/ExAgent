@@ -5,7 +5,7 @@ use exagent::config::AgentConfig;
 use exagent::llm::{LlmClient, MockLlm};
 use exagent::registry::ToolRegistry;
 use exagent::runtime::{RuntimeExecution, RuntimeOp, RuntimeOpExecutor, TurnContext, UserInput};
-use exagent::session::AgentRole;
+use exagent::session::{AgentRole, SessionSnapshot};
 use exagent::tools::write_file::WriteFileTool;
 use exagent::types::{
     AssistantTurn, ConversationMessage, MessageRole, SessionId, ToolCall, TurnId,
@@ -202,6 +202,54 @@ async fn agent_runtime_user_input_op_resumes_existing_session_state() {
     assert!(contents.contains(&"first done"));
     assert!(contents.contains(&"second input"));
     assert!(contents.contains(&"second done"));
+}
+
+#[tokio::test]
+async fn agent_runtime_user_input_rejects_snapshot_workspace_mismatch() {
+    let dir = tempdir().unwrap();
+    let other_dir = tempdir().unwrap();
+    let llm = MockLlm::new(vec![AssistantTurn {
+        text: Some("should not run".into()),
+        tool_calls: vec![],
+    }]);
+    let config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        ..AgentConfig::default()
+    };
+    let agent = Agent::new(config, Box::new(llm), ToolRegistry::new());
+    let session_id = SessionId::new("session_runtime_mismatch");
+    let snapshot = SessionSnapshot::new_root(
+        session_id.clone(),
+        other_dir.path().to_path_buf(),
+        other_dir.path().to_path_buf(),
+        "original input",
+    );
+    let paths = exagent::transcript::session_paths(dir.path(), &session_id);
+    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+
+    let err = agent
+        .execute_op(
+            &session_id,
+            RuntimeOp::UserInput {
+                turn_id: TurnId::new("turn_runtime_1"),
+                input: vec![UserInput {
+                    content: "continue through wrong workspace".into(),
+                }],
+                context: TurnContext {
+                    model: "runtime-model".into(),
+                    workspace_root: dir.path().to_path_buf(),
+                    cwd: dir.path().to_path_buf(),
+                    policy_mode: exagent::policy::PolicyMode::Off,
+                    agent_role: AgentRole::Primary,
+                    instructions: vec![],
+                },
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("workspace_root mismatch"));
 }
 
 #[derive(Default)]

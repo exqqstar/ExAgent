@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -10,7 +10,7 @@ use crate::llm::LlmClient;
 use crate::orchestration::{ChildSessionSummary, CollectedChildSession};
 use crate::policy::PolicyManager;
 use crate::registry::{ToolContext, ToolRegistry};
-use crate::runtime::{RuntimeExecution, RuntimeOp, RuntimeOpExecutor};
+use crate::runtime::{RuntimeExecution, RuntimeOp, RuntimeOpExecutor, TurnContext};
 use crate::session::{
     AgentRole, ApprovalId, ApprovalStatus, ExecSessionId, ExecSessionRef, ExecSessionStatus,
     PendingApproval, SessionSnapshot,
@@ -263,6 +263,7 @@ impl RuntimeOpExecutor for Agent {
                     let mut snapshot: SessionSnapshot =
                         crate::transcript::read_json(&paths.snapshot_path)?;
                     snapshot.normalize_lineage();
+                    validate_runtime_context_matches_snapshot(&snapshot, &context)?;
                     snapshot
                         .conversation
                         .push(ConversationMessage::user(prompt));
@@ -292,6 +293,39 @@ impl RuntimeOpExecutor for Agent {
             }
         }
     }
+}
+
+fn validate_runtime_context_matches_snapshot(
+    snapshot: &SessionSnapshot,
+    context: &TurnContext,
+) -> Result<()> {
+    if !paths_match(&snapshot.workspace_root, &context.workspace_root) {
+        return Err(anyhow!(
+            "workspace_root mismatch for session {}: snapshot={}, context={}",
+            snapshot.session_id.as_str(),
+            snapshot.workspace_root.display(),
+            context.workspace_root.display()
+        ));
+    }
+
+    if !paths_match(&snapshot.cwd, &context.cwd) {
+        return Err(anyhow!(
+            "cwd mismatch for session {}: snapshot={}, context={}",
+            snapshot.session_id.as_str(),
+            snapshot.cwd.display(),
+            context.cwd.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    canonical_or_original(left) == canonical_or_original(right)
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn apply_exec_session_update(snapshot: &mut SessionSnapshot, result: &crate::types::ToolResult) {

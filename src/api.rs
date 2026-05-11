@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
@@ -9,6 +9,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use crate::agent::Agent;
 use crate::config::AgentConfig;
@@ -17,11 +18,11 @@ use crate::llm::OpenAiCompatibleLlm;
 use crate::orchestration::{ChildSessionSummary, CollectedChildSession};
 use crate::policy::PolicyManager;
 use crate::runtime::{
-    ManagedThreadStatus, RuntimeController, ThreadManager, ThreadStartRequest, TurnContextRequest,
-    TurnStartRequest, UserInput,
+    RuntimeController, ThreadStartRequest, TurnContextRequest, TurnStartRequest, UserInput,
 };
 use crate::session::AgentRole;
 use crate::types::{SessionId, ToolCall, TurnId};
+use crate::workspace::{canonicalize_from_current, canonicalize_from_root};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRunResponse {
@@ -211,7 +212,7 @@ pub trait AgentRunner: Send + Sync {
 pub struct DefaultAgentRunner {
     exec_sessions: Arc<ExecSessionManager>,
     policy: Arc<PolicyManager>,
-    threads: ThreadManager,
+    session_locks: SessionLockRegistry,
 }
 
 impl Default for DefaultAgentRunner {
@@ -219,7 +220,66 @@ impl Default for DefaultAgentRunner {
         Self {
             exec_sessions: Arc::new(ExecSessionManager::default()),
             policy: Arc::new(PolicyManager::default()),
-            threads: ThreadManager::default(),
+            session_locks: SessionLockRegistry::default(),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct SessionLockRegistry {
+    slots: Arc<StdMutex<HashMap<String, SessionLockSlot>>>,
+}
+
+struct SessionLockSlot {
+    lock: Arc<AsyncMutex<()>>,
+    holders: usize,
+}
+
+struct SessionLockGuard {
+    key: String,
+    slots: Arc<StdMutex<HashMap<String, SessionLockSlot>>>,
+    _guard: OwnedMutexGuard<()>,
+}
+
+impl SessionLockRegistry {
+    async fn lock(&self, session_id: &SessionId) -> SessionLockGuard {
+        let key = session_id.as_str().to_string();
+        let lock = {
+            let mut slots = self.slots.lock().expect("session lock registry poisoned");
+            let slot = slots.entry(key.clone()).or_insert_with(|| SessionLockSlot {
+                lock: Arc::new(AsyncMutex::new(())),
+                holders: 0,
+            });
+            slot.holders += 1;
+            slot.lock.clone()
+        };
+        let guard = lock.lock_owned().await;
+
+        SessionLockGuard {
+            key,
+            slots: self.slots.clone(),
+            _guard: guard,
+        }
+    }
+
+    #[cfg(test)]
+    fn slot_count(&self) -> usize {
+        self.slots
+            .lock()
+            .expect("session lock registry poisoned")
+            .len()
+    }
+}
+
+impl Drop for SessionLockGuard {
+    fn drop(&mut self) {
+        let mut slots = self.slots.lock().expect("session lock registry poisoned");
+        let Some(slot) = slots.get_mut(&self.key) else {
+            return;
+        };
+        slot.holders = slot.holders.saturating_sub(1);
+        if slot.holders == 0 {
+            slots.remove(&self.key);
         }
     }
 }
@@ -233,12 +293,8 @@ impl AgentRunner for DefaultAgentRunner {
         cwd: Option<&str>,
         session_id: Option<&SessionId>,
     ) -> Result<AgentRunResponse> {
-        let live_thread = match session_id {
-            Some(session_id) => Some(self.threads.get_or_start(session_id.clone()).await),
-            None => None,
-        };
-        let _execution_guard = match live_thread.as_ref() {
-            Some(handle) => Some(handle.lock_execution().await),
+        let _session_guard = match session_id {
+            Some(session_id) => Some(self.session_locks.lock(session_id).await),
             None => None,
         };
 
@@ -251,16 +307,10 @@ impl AgentRunner for DefaultAgentRunner {
             self.exec_sessions.clone(),
             self.policy.clone(),
         );
-        if let Some(handle) = live_thread.as_ref() {
-            handle.set_status(ManagedThreadStatus::Running).await;
-        }
         let output_result = match session_id {
             Some(session_id) => agent.resume(session_id, prompt).await,
             None => agent.run_with_meta(prompt).await,
         };
-        if let Some(handle) = live_thread.as_ref() {
-            handle.set_status(ManagedThreadStatus::Idle).await;
-        }
         let output = output_result?;
 
         Ok(agent_run_response(output))
@@ -274,8 +324,7 @@ impl AgentRunner for DefaultAgentRunner {
         workspace_root: Option<&str>,
         spawned_by_turn_id: Option<&TurnId>,
     ) -> Result<AgentRunResponse> {
-        let parent_thread = self.threads.get_or_start(parent_session_id.clone()).await;
-        let _parent_execution_guard = parent_thread.lock_execution().await;
+        let _parent_session_guard = self.session_locks.lock(parent_session_id).await;
 
         let config = build_config(workspace_root, None)?;
         let llm = OpenAiCompatibleLlm::from_env()?;
@@ -462,7 +511,7 @@ async fn start_turn(
         )
             .into_response(),
         Err(err) => (
-            StatusCode::BAD_REQUEST,
+            runtime_error_status(&err),
             Json(ErrorResponse {
                 error: err.to_string(),
             }),
@@ -569,7 +618,7 @@ fn build_config(workspace_root: Option<&str>, cwd: Option<&str>) -> Result<Agent
     let mut config = AgentConfig::default();
 
     if let Some(raw_root) = workspace_root {
-        let root = canonicalize_from_current(raw_root)?;
+        let root = canonicalize_from_current(raw_root, "Path")?;
         config.workspace_root = root.clone();
         config.cwd = root;
     }
@@ -579,46 +628,6 @@ fn build_config(workspace_root: Option<&str>, cwd: Option<&str>) -> Result<Agent
     }
 
     Ok(config)
-}
-
-fn canonicalize_from_current(raw: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(raw);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        std::env::current_dir()
-            .context("Failed to resolve current directory")?
-            .join(path)
-    };
-
-    std::fs::canonicalize(&path).with_context(|| {
-        format!(
-            "Path does not exist or is not accessible: {}",
-            path.display()
-        )
-    })
-}
-
-fn canonicalize_from_root(root: &Path, raw: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(raw);
-    let candidate = if path.is_absolute() {
-        path
-    } else {
-        root.join(path)
-    };
-
-    let candidate = std::fs::canonicalize(&candidate).with_context(|| {
-        format!(
-            "cwd does not exist or is not accessible: {}",
-            candidate.display()
-        )
-    })?;
-
-    if !candidate.starts_with(root) {
-        bail!("cwd must stay within workspace_root");
-    }
-
-    Ok(candidate)
 }
 
 fn agent_run_response(output: crate::agent::AgentRunOutput) -> AgentRunResponse {
@@ -636,5 +645,57 @@ fn policy_mode_name(policy_mode: crate::policy::PolicyMode) -> &'static str {
         crate::policy::PolicyMode::Off => "off",
         crate::policy::PolicyMode::Advisory => "advisory",
         crate::policy::PolicyMode::Enforced => "enforced",
+    }
+}
+
+fn runtime_error_status(err: &anyhow::Error) -> StatusCode {
+    if err.to_string().contains("thread not found") {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::BAD_REQUEST
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::Mutex;
+    use tokio::time::{timeout, Duration};
+
+    #[tokio::test]
+    async fn session_lock_registry_serializes_same_session_and_cleans_up() {
+        let registry = SessionLockRegistry::default();
+        let session_id = SessionId::new("session_1");
+        let first_guard = registry.lock(&session_id).await;
+        let marker = Arc::new(Mutex::new(Vec::new()));
+
+        let competing_registry = registry.clone();
+        let competing_marker = marker.clone();
+        let competing_session_id = session_id.clone();
+        let task = tokio::spawn(async move {
+            let _second_guard = competing_registry.lock(&competing_session_id).await;
+            competing_marker.lock().await.push("second");
+        });
+
+        assert!(
+            timeout(Duration::from_millis(50), async {
+                loop {
+                    if !marker.lock().await.is_empty() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err(),
+            "second lock acquired before first lock was released"
+        );
+        assert_eq!(registry.slot_count(), 1);
+
+        drop(first_guard);
+        task.await.unwrap();
+
+        assert_eq!(*marker.lock().await, vec!["second"]);
+        assert_eq!(registry.slot_count(), 0);
     }
 }

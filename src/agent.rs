@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -10,6 +10,7 @@ use crate::llm::LlmClient;
 use crate::orchestration::{ChildSessionSummary, CollectedChildSession};
 use crate::policy::PolicyManager;
 use crate::registry::{ToolContext, ToolRegistry};
+use crate::runtime::{RuntimeExecution, RuntimeOp, RuntimeOpExecutor, TurnContext};
 use crate::session::{
     AgentRole, ApprovalId, ApprovalStatus, ExecSessionId, ExecSessionRef, ExecSessionStatus,
     PendingApproval, SessionSnapshot,
@@ -237,6 +238,94 @@ impl Agent {
             self.config.max_turns
         ))
     }
+}
+
+#[async_trait::async_trait]
+impl RuntimeOpExecutor for Agent {
+    async fn execute_op(&self, session_id: &SessionId, op: RuntimeOp) -> Result<RuntimeExecution> {
+        match op {
+            RuntimeOp::UserInput {
+                turn_id,
+                input,
+                context,
+            } => {
+                let prompt = input
+                    .into_iter()
+                    .map(|item| item.content)
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if prompt.trim().is_empty() {
+                    return Err(anyhow!("runtime user input cannot be empty"));
+                }
+
+                let paths = crate::transcript::session_paths(&context.workspace_root, session_id);
+                let snapshot = if paths.snapshot_path.exists() {
+                    let mut snapshot: SessionSnapshot =
+                        crate::transcript::read_json(&paths.snapshot_path)?;
+                    snapshot.normalize_lineage();
+                    validate_runtime_context_matches_snapshot(&snapshot, &context)?;
+                    snapshot
+                        .conversation
+                        .push(ConversationMessage::user(prompt));
+                    crate::transcript::write_json(&paths.snapshot_path, &snapshot)?;
+                    snapshot
+                } else {
+                    SessionSnapshot::new_root(
+                        session_id.clone(),
+                        context.workspace_root,
+                        context.cwd,
+                        prompt,
+                    )
+                };
+                self.run_session(snapshot).await?;
+
+                Ok(RuntimeExecution {
+                    session_id: session_id.clone(),
+                    turn_id: Some(turn_id),
+                    status: "completed".into(),
+                })
+            }
+            RuntimeOp::Interrupt { .. }
+            | RuntimeOp::Compact
+            | RuntimeOp::Shutdown
+            | RuntimeOp::SetThreadName { .. } => {
+                Err(anyhow!("runtime op is not executable by Agent yet"))
+            }
+        }
+    }
+}
+
+fn validate_runtime_context_matches_snapshot(
+    snapshot: &SessionSnapshot,
+    context: &TurnContext,
+) -> Result<()> {
+    if !paths_match(&snapshot.workspace_root, &context.workspace_root) {
+        return Err(anyhow!(
+            "workspace_root mismatch for session {}: snapshot={}, context={}",
+            snapshot.session_id.as_str(),
+            snapshot.workspace_root.display(),
+            context.workspace_root.display()
+        ));
+    }
+
+    if !paths_match(&snapshot.cwd, &context.cwd) {
+        return Err(anyhow!(
+            "cwd mismatch for session {}: snapshot={}, context={}",
+            snapshot.session_id.as_str(),
+            snapshot.cwd.display(),
+            context.cwd.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    canonical_or_original(left) == canonical_or_original(right)
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn apply_exec_session_update(snapshot: &mut SessionSnapshot, result: &crate::types::ToolResult) {

@@ -5,12 +5,15 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use exagent::api::build_router;
 use exagent::app_server::protocol::{
-    AgentRunResponse, CollectParams, CollectResponse, EventsReplayParams, EventsReplayResponse,
-    ForkParams, InspectParams, InspectResponse, RunParams, ThreadSpawnChildParams,
-    ThreadSpawnChildResponse, ThreadStartParams, ThreadStartResponse, TurnStartParams,
+    AgentRunResponse, BoundaryOp, BoundaryOpResponse, CollectParams, CollectResponse,
+    EventsReplayParams, EventsReplayResponse, ForkParams, IgnoredOverrideField, InspectParams,
+    InspectResponse, RunParams, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadSpawnChildParams, ThreadSpawnChildResponse, ThreadStartParams,
+    ThreadStartResponse, ThreadStatus, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
     TurnStartResponse,
 };
 use exagent::app_server::AppServerBoundary;
+use exagent::app_server::AppServerError;
 use exagent::cli::{parse_cli_command, CliCommand};
 use exagent::events::{RuntimeEvent, RuntimeEventKind};
 use exagent::orchestration::{
@@ -31,6 +34,8 @@ struct StubRunner {
     inspect_response: InspectResponse,
     collect_response: CollectResponse,
     thread_start_response: ThreadStartResponse,
+    thread_read_response: ThreadReadResponse,
+    thread_resume_response: ThreadResumeResponse,
     turn_start_response: TurnStartResponse,
     thread_spawn_child_response: ThreadSpawnChildResponse,
     events_replay_response: EventsReplayResponse,
@@ -90,6 +95,26 @@ impl AppServerBoundary for StubRunner {
         Ok(self.thread_start_response.clone())
     }
 
+    async fn thread_read(&self, params: ThreadReadParams) -> anyhow::Result<ThreadReadResponse> {
+        self.calls.lock().unwrap().push("thread_read".into());
+        assert_eq!(params.thread_id.as_str(), "session_123");
+        assert_eq!(params.workspace_root.as_deref(), Some("."));
+
+        Ok(self.thread_read_response.clone())
+    }
+
+    async fn thread_resume(
+        &self,
+        params: ThreadResumeParams,
+    ) -> anyhow::Result<ThreadResumeResponse> {
+        self.calls.lock().unwrap().push("thread_resume".into());
+        assert_eq!(params.thread_id.as_str(), "session_123");
+        assert_eq!(params.workspace_root.as_deref(), Some("."));
+        assert_eq!(params.cwd.as_deref(), Some("ignored"));
+
+        Ok(self.thread_resume_response.clone())
+    }
+
     async fn turn_start(&self, params: TurnStartParams) -> anyhow::Result<TurnStartResponse> {
         self.calls.lock().unwrap().push("turn_start".into());
         assert_eq!(params.thread_id.as_str(), "session_123");
@@ -97,6 +122,13 @@ impl AppServerBoundary for StubRunner {
         assert_eq!(params.workspace_root.as_deref(), Some("."));
 
         Ok(self.turn_start_response.clone())
+    }
+
+    async fn turn_interrupt(
+        &self,
+        _params: TurnInterruptParams,
+    ) -> anyhow::Result<TurnInterruptResponse> {
+        panic!("turn_interrupt should not be called in these api adapter tests");
     }
 
     async fn thread_spawn_child(
@@ -115,6 +147,10 @@ impl AppServerBoundary for StubRunner {
         );
 
         Ok(self.thread_spawn_child_response.clone())
+    }
+
+    async fn submit_boundary_op(&self, _op: BoundaryOp) -> anyhow::Result<BoundaryOpResponse> {
+        panic!("submit_boundary_op should not be called in api adapter tests");
     }
 
     async fn events_replay(
@@ -167,8 +203,26 @@ impl AppServerBoundary for ForkIgnoresCwdRunner {
         panic!("thread_start should not be called in fork test");
     }
 
+    async fn thread_read(&self, _params: ThreadReadParams) -> anyhow::Result<ThreadReadResponse> {
+        panic!("thread_read should not be called in fork test");
+    }
+
+    async fn thread_resume(
+        &self,
+        _params: ThreadResumeParams,
+    ) -> anyhow::Result<ThreadResumeResponse> {
+        panic!("thread_resume should not be called in fork test");
+    }
+
     async fn turn_start(&self, _params: TurnStartParams) -> anyhow::Result<TurnStartResponse> {
         panic!("turn_start should not be called in fork test");
+    }
+
+    async fn turn_interrupt(
+        &self,
+        _params: TurnInterruptParams,
+    ) -> anyhow::Result<TurnInterruptResponse> {
+        panic!("turn_interrupt should not be called in fork test");
     }
 
     async fn thread_spawn_child(
@@ -178,11 +232,259 @@ impl AppServerBoundary for ForkIgnoresCwdRunner {
         panic!("thread_spawn_child should not be called in fork test");
     }
 
+    async fn submit_boundary_op(&self, _op: BoundaryOp) -> anyhow::Result<BoundaryOpResponse> {
+        panic!("submit_boundary_op should not be called in fork test");
+    }
+
     async fn events_replay(
         &self,
         _params: EventsReplayParams,
     ) -> anyhow::Result<EventsReplayResponse> {
         panic!("events_replay should not be called in fork test");
+    }
+}
+
+struct ErrorBoundary {
+    kind: ErrorKind,
+}
+
+enum ErrorKind {
+    InvalidRequest,
+    ThreadNotFound,
+    ThreadBusy,
+}
+
+impl ErrorBoundary {
+    fn error(&self) -> anyhow::Error {
+        match self.kind {
+            ErrorKind::InvalidRequest => {
+                AppServerError::InvalidRequest("cwd must stay within workspace_root".into()).into()
+            }
+            ErrorKind::ThreadNotFound => {
+                AppServerError::ThreadNotFound(SessionId::new("missing-thread")).into()
+            }
+            ErrorKind::ThreadBusy => {
+                AppServerError::ThreadBusy(SessionId::new("session_123")).into()
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AppServerBoundary for ErrorBoundary {
+    async fn run(&self, _params: RunParams) -> anyhow::Result<AgentRunResponse> {
+        Err(self.error())
+    }
+
+    async fn fork(&self, _params: ForkParams) -> anyhow::Result<AgentRunResponse> {
+        Err(self.error())
+    }
+
+    async fn inspect(&self, _params: InspectParams) -> anyhow::Result<InspectResponse> {
+        Err(self.error())
+    }
+
+    async fn collect(&self, _params: CollectParams) -> anyhow::Result<CollectResponse> {
+        Err(self.error())
+    }
+
+    async fn thread_start(
+        &self,
+        _params: ThreadStartParams,
+    ) -> anyhow::Result<ThreadStartResponse> {
+        Err(self.error())
+    }
+
+    async fn thread_read(&self, _params: ThreadReadParams) -> anyhow::Result<ThreadReadResponse> {
+        Err(self.error())
+    }
+
+    async fn thread_resume(
+        &self,
+        _params: ThreadResumeParams,
+    ) -> anyhow::Result<ThreadResumeResponse> {
+        Err(self.error())
+    }
+
+    async fn turn_start(&self, _params: TurnStartParams) -> anyhow::Result<TurnStartResponse> {
+        Err(self.error())
+    }
+
+    async fn turn_interrupt(
+        &self,
+        _params: TurnInterruptParams,
+    ) -> anyhow::Result<TurnInterruptResponse> {
+        Err(self.error())
+    }
+
+    async fn thread_spawn_child(
+        &self,
+        _params: ThreadSpawnChildParams,
+    ) -> anyhow::Result<ThreadSpawnChildResponse> {
+        Err(self.error())
+    }
+
+    async fn submit_boundary_op(&self, _op: BoundaryOp) -> anyhow::Result<BoundaryOpResponse> {
+        Err(self.error())
+    }
+
+    async fn events_replay(
+        &self,
+        _params: EventsReplayParams,
+    ) -> anyhow::Result<EventsReplayResponse> {
+        Err(self.error())
+    }
+}
+
+struct BoundaryOpRunner {
+    response: BoundaryOpResponse,
+}
+
+#[async_trait::async_trait]
+impl AppServerBoundary for BoundaryOpRunner {
+    async fn run(&self, _params: RunParams) -> anyhow::Result<AgentRunResponse> {
+        panic!("run should not be called in thread op test");
+    }
+
+    async fn fork(&self, _params: ForkParams) -> anyhow::Result<AgentRunResponse> {
+        panic!("fork should not be called in thread op test");
+    }
+
+    async fn inspect(&self, _params: InspectParams) -> anyhow::Result<InspectResponse> {
+        panic!("inspect should not be called in thread op test");
+    }
+
+    async fn collect(&self, _params: CollectParams) -> anyhow::Result<CollectResponse> {
+        panic!("collect should not be called in thread op test");
+    }
+
+    async fn thread_start(
+        &self,
+        _params: ThreadStartParams,
+    ) -> anyhow::Result<ThreadStartResponse> {
+        panic!("thread_start should not be called in thread op test");
+    }
+
+    async fn thread_read(&self, _params: ThreadReadParams) -> anyhow::Result<ThreadReadResponse> {
+        panic!("thread_read should not be called in thread op test");
+    }
+
+    async fn thread_resume(
+        &self,
+        _params: ThreadResumeParams,
+    ) -> anyhow::Result<ThreadResumeResponse> {
+        panic!("thread_resume should not be called in thread op test");
+    }
+
+    async fn turn_start(&self, _params: TurnStartParams) -> anyhow::Result<TurnStartResponse> {
+        panic!("turn_start should not be called in thread op test");
+    }
+
+    async fn turn_interrupt(
+        &self,
+        _params: TurnInterruptParams,
+    ) -> anyhow::Result<TurnInterruptResponse> {
+        panic!("turn_interrupt should not be called in thread op test");
+    }
+
+    async fn thread_spawn_child(
+        &self,
+        _params: ThreadSpawnChildParams,
+    ) -> anyhow::Result<ThreadSpawnChildResponse> {
+        panic!("thread_spawn_child should not be called in thread op test");
+    }
+
+    async fn submit_boundary_op(&self, op: BoundaryOp) -> anyhow::Result<BoundaryOpResponse> {
+        let BoundaryOp::EventsReplay(params) = op else {
+            panic!("expected events replay op");
+        };
+        assert_eq!(params.thread_id.as_str(), "session_123");
+        assert_eq!(params.workspace_root.as_deref(), Some("."));
+
+        Ok(self.response.clone())
+    }
+
+    async fn events_replay(
+        &self,
+        _params: EventsReplayParams,
+    ) -> anyhow::Result<EventsReplayResponse> {
+        panic!("events_replay should not be called in thread op test");
+    }
+}
+
+struct ThreadReadOpRunner {
+    response: BoundaryOpResponse,
+}
+
+#[async_trait::async_trait]
+impl AppServerBoundary for ThreadReadOpRunner {
+    async fn run(&self, _params: RunParams) -> anyhow::Result<AgentRunResponse> {
+        panic!("run should not be called in thread read op test");
+    }
+
+    async fn fork(&self, _params: ForkParams) -> anyhow::Result<AgentRunResponse> {
+        panic!("fork should not be called in thread read op test");
+    }
+
+    async fn inspect(&self, _params: InspectParams) -> anyhow::Result<InspectResponse> {
+        panic!("inspect should not be called in thread read op test");
+    }
+
+    async fn collect(&self, _params: CollectParams) -> anyhow::Result<CollectResponse> {
+        panic!("collect should not be called in thread read op test");
+    }
+
+    async fn thread_start(
+        &self,
+        _params: ThreadStartParams,
+    ) -> anyhow::Result<ThreadStartResponse> {
+        panic!("thread_start should not be called in thread read op test");
+    }
+
+    async fn thread_read(&self, _params: ThreadReadParams) -> anyhow::Result<ThreadReadResponse> {
+        panic!("thread_read should not be called directly in thread read op test");
+    }
+
+    async fn thread_resume(
+        &self,
+        _params: ThreadResumeParams,
+    ) -> anyhow::Result<ThreadResumeResponse> {
+        panic!("thread_resume should not be called in thread read op test");
+    }
+
+    async fn turn_start(&self, _params: TurnStartParams) -> anyhow::Result<TurnStartResponse> {
+        panic!("turn_start should not be called in thread read op test");
+    }
+
+    async fn turn_interrupt(
+        &self,
+        _params: TurnInterruptParams,
+    ) -> anyhow::Result<TurnInterruptResponse> {
+        panic!("turn_interrupt should not be called in thread read op test");
+    }
+
+    async fn thread_spawn_child(
+        &self,
+        _params: ThreadSpawnChildParams,
+    ) -> anyhow::Result<ThreadSpawnChildResponse> {
+        panic!("thread_spawn_child should not be called in thread read op test");
+    }
+
+    async fn submit_boundary_op(&self, op: BoundaryOp) -> anyhow::Result<BoundaryOpResponse> {
+        let BoundaryOp::ThreadRead(params) = op else {
+            panic!("expected thread read op");
+        };
+        assert_eq!(params.thread_id.as_str(), "session_123");
+        assert_eq!(params.workspace_root.as_deref(), Some("."));
+
+        Ok(self.response.clone())
+    }
+
+    async fn events_replay(
+        &self,
+        _params: EventsReplayParams,
+    ) -> anyhow::Result<EventsReplayResponse> {
+        panic!("events_replay should not be called in thread read op test");
     }
 }
 
@@ -199,6 +501,8 @@ async fn health_route_returns_ok() {
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
         thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
         turn_start_response: sample_turn_start_response(),
         thread_spawn_child_response: sample_thread_spawn_child_response(),
         events_replay_response: sample_events_replay_response(),
@@ -235,6 +539,12 @@ async fn initialize_route_returns_protocol_capabilities() {
         },
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
         calls: Mutex::new(vec![]),
     }));
 
@@ -304,6 +614,12 @@ async fn threads_route_starts_managed_thread() {
         },
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
         calls: Mutex::new(vec![]),
     }));
 
@@ -361,6 +677,12 @@ async fn thread_turns_route_queues_turn_for_managed_thread() {
         },
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
         calls: Mutex::new(vec![]),
     }));
 
@@ -430,6 +752,12 @@ async fn thread_turns_route_rejects_unknown_thread_id() {
         },
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
         calls: Mutex::new(vec![]),
     }));
 
@@ -475,6 +803,8 @@ async fn run_route_accepts_existing_session_id() {
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
         thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
         turn_start_response: sample_turn_start_response(),
         thread_spawn_child_response: sample_thread_spawn_child_response(),
         events_replay_response: sample_events_replay_response(),
@@ -536,6 +866,8 @@ async fn fork_route_accepts_parent_session_id_and_agent_role() {
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
         thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
         turn_start_response: sample_turn_start_response(),
         thread_spawn_child_response: sample_thread_spawn_child_response(),
         events_replay_response: sample_events_replay_response(),
@@ -631,6 +963,8 @@ async fn inspect_route_accepts_parent_session_id() {
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
         thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
         turn_start_response: sample_turn_start_response(),
         thread_spawn_child_response: sample_thread_spawn_child_response(),
         events_replay_response: sample_events_replay_response(),
@@ -687,6 +1021,8 @@ async fn collect_route_accepts_child_session_id() {
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
         thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
         turn_start_response: sample_turn_start_response(),
         thread_spawn_child_response: sample_thread_spawn_child_response(),
         events_replay_response: sample_events_replay_response(),
@@ -751,6 +1087,8 @@ async fn collect_route_serializes_structured_result() {
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response_with_structured_result(),
         thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
         turn_start_response: sample_turn_start_response(),
         thread_spawn_child_response: sample_thread_spawn_child_response(),
         events_replay_response: sample_events_replay_response(),
@@ -827,6 +1165,8 @@ async fn thread_start_route_accepts_workspace_and_cwd() {
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
         thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
         turn_start_response: sample_turn_start_response(),
         thread_spawn_child_response: sample_thread_spawn_child_response(),
         events_replay_response: sample_events_replay_response(),
@@ -864,12 +1204,146 @@ async fn thread_start_route_accepts_workspace_and_cwd() {
 }
 
 #[tokio::test]
+async fn thread_start_route_maps_invalid_request_errors_to_bad_request() {
+    let app = build_router(Arc::new(ErrorBoundary {
+        kind: ErrorKind::InvalidRequest,
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/thread/start")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "workspace_root": ".",
+                        "cwd": "../outside"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({"error": "invalid request: cwd must stay within workspace_root"})
+    );
+}
+
+#[tokio::test]
+async fn thread_read_route_accepts_thread_id_and_returns_lifecycle_state() {
+    let app = build_router(Arc::new(StubRunner {
+        response: sample_run_response("unused"),
+        inspect_response: sample_inspect_response(),
+        collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
+        calls: Mutex::new(vec![]),
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/thread/read")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "thread_id": "session_123",
+                        "workspace_root": "."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({
+            "thread_id": "session_123",
+            "status": "idle",
+            "active_turn": null,
+            "latest_turn": null,
+            "snapshot_path": ".exagent/sessions/session_123/snapshot.json",
+            "events_path": ".exagent/sessions/session_123/events.jsonl"
+        })
+    );
+}
+
+#[tokio::test]
+async fn thread_resume_route_accepts_thread_id_and_reports_ignored_overrides() {
+    let app = build_router(Arc::new(StubRunner {
+        response: sample_run_response("unused"),
+        inspect_response: sample_inspect_response(),
+        collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
+        calls: Mutex::new(vec![]),
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/thread/resume")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "thread_id": "session_123",
+                        "workspace_root": ".",
+                        "cwd": "ignored"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({
+            "thread": {
+                "thread_id": "session_123",
+                "status": "idle",
+                "active_turn": null,
+                "latest_turn": null,
+                "snapshot_path": ".exagent/sessions/session_123/snapshot.json",
+                "events_path": ".exagent/sessions/session_123/events.jsonl"
+            },
+            "ignored_overrides": ["cwd"]
+        })
+    );
+}
+
+#[tokio::test]
 async fn turn_start_route_accepts_thread_id_and_prompt() {
     let app = build_router(Arc::new(StubRunner {
         response: sample_run_response("unused"),
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
         thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
         turn_start_response: sample_turn_start_response(),
         thread_spawn_child_response: sample_thread_spawn_child_response(),
         events_replay_response: sample_events_replay_response(),
@@ -914,12 +1388,47 @@ async fn turn_start_route_accepts_thread_id_and_prompt() {
 }
 
 #[tokio::test]
+async fn turn_start_route_maps_thread_busy_errors_to_conflict() {
+    let app = build_router(Arc::new(ErrorBoundary {
+        kind: ErrorKind::ThreadBusy,
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/turn/start")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "thread_id": "session_123",
+                        "prompt": "rejected while running",
+                        "workspace_root": "."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({"error": "thread is busy: session_123"})
+    );
+}
+
+#[tokio::test]
 async fn thread_spawn_child_route_accepts_parent_role_and_prompt() {
     let app = build_router(Arc::new(StubRunner {
         response: sample_run_response("unused"),
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
         thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
         turn_start_response: sample_turn_start_response(),
         thread_spawn_child_response: sample_thread_spawn_child_response(),
         events_replay_response: sample_events_replay_response(),
@@ -956,6 +1465,7 @@ async fn thread_spawn_child_route_accepts_parent_role_and_prompt() {
             "parent_thread_id": "session_123",
             "child_thread_id": "session_child",
             "agent_role": "spec",
+            "ignored_overrides": ["cwd"],
             "output": {
                 "text": "child complete",
                 "tool_calls": [],
@@ -968,12 +1478,54 @@ async fn thread_spawn_child_route_accepts_parent_role_and_prompt() {
 }
 
 #[tokio::test]
+async fn thread_spawn_child_slash_route_accepts_parent_role_and_prompt() {
+    let app = build_router(Arc::new(StubRunner {
+        response: sample_run_response("unused"),
+        inspect_response: sample_inspect_response(),
+        collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
+        calls: Mutex::new(vec![]),
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/thread/spawn_child")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "parent_thread_id": "session_123",
+                        "agent_role": "spec",
+                        "prompt": "draft goals",
+                        "workspace_root": ".",
+                        "cwd": "ignored",
+                        "spawned_by_turn_id": "turn_1"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn events_replay_route_returns_runtime_events() {
     let app = build_router(Arc::new(StubRunner {
         response: sample_run_response("unused"),
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
         thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
         turn_start_response: sample_turn_start_response(),
         thread_spawn_child_response: sample_thread_spawn_child_response(),
         events_replay_response: sample_events_replay_response(),
@@ -1016,6 +1568,163 @@ async fn events_replay_route_returns_runtime_events() {
                     }
                 }
             }]
+        })
+    );
+}
+
+#[tokio::test]
+async fn events_replay_slash_route_returns_runtime_events() {
+    let app = build_router(Arc::new(StubRunner {
+        response: sample_run_response("unused"),
+        inspect_response: sample_inspect_response(),
+        collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
+        calls: Mutex::new(vec![]),
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/events/replay")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "thread_id": "session_123",
+                        "workspace_root": "."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn events_replay_route_maps_missing_thread_errors_to_not_found() {
+    let app = build_router(Arc::new(ErrorBoundary {
+        kind: ErrorKind::ThreadNotFound,
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/events_replay")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "thread_id": "missing-thread",
+                        "workspace_root": "."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({"error": "thread not found: missing-thread"})
+    );
+}
+
+#[tokio::test]
+async fn thread_op_route_accepts_events_replay_as_first_class_op() {
+    let app = build_router(Arc::new(BoundaryOpRunner {
+        response: BoundaryOpResponse::EventsReplayed(sample_events_replay_response()),
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/thread/op")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "type": "events_replay",
+                        "thread_id": "session_123",
+                        "workspace_root": "."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({
+            "type": "events_replayed",
+            "thread_id": "session_123",
+            "events": [{
+                "event_id": "evt_1",
+                "session_id": "session_123",
+                "turn_id": "turn_1",
+                "kind": {
+                    "type": "assistant_turn",
+                    "turn": {
+                        "text": "turn complete",
+                        "tool_calls": []
+                    }
+                }
+            }]
+        })
+    );
+}
+
+#[tokio::test]
+async fn thread_op_route_accepts_thread_read_as_boundary_op() {
+    let app = build_router(Arc::new(ThreadReadOpRunner {
+        response: BoundaryOpResponse::ThreadRead(sample_thread_read_response()),
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/thread/op")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "type": "thread_read",
+                        "thread_id": "session_123",
+                        "workspace_root": "."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({
+            "type": "thread_read",
+            "thread_id": "session_123",
+            "status": "idle",
+            "active_turn": null,
+            "latest_turn": null,
+            "snapshot_path": ".exagent/sessions/session_123/snapshot.json",
+            "events_path": ".exagent/sessions/session_123/events.jsonl"
         })
     );
 }
@@ -1106,6 +1815,24 @@ fn sample_thread_start_response() -> ThreadStartResponse {
     }
 }
 
+fn sample_thread_read_response() -> ThreadReadResponse {
+    ThreadReadResponse {
+        thread_id: SessionId::new("session_123"),
+        status: ThreadStatus::Idle,
+        active_turn: None,
+        latest_turn: None,
+        snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
+        events_path: ".exagent/sessions/session_123/events.jsonl".into(),
+    }
+}
+
+fn sample_thread_resume_response() -> ThreadResumeResponse {
+    ThreadResumeResponse {
+        thread: sample_thread_read_response(),
+        ignored_overrides: vec![IgnoredOverrideField::Cwd],
+    }
+}
+
 fn sample_turn_start_response() -> TurnStartResponse {
     TurnStartResponse {
         thread_id: SessionId::new("session_123"),
@@ -1119,6 +1846,7 @@ fn sample_thread_spawn_child_response() -> ThreadSpawnChildResponse {
         parent_thread_id: SessionId::new("session_123"),
         child_thread_id: SessionId::new("session_child"),
         agent_role: AgentRole::Spec,
+        ignored_overrides: vec![IgnoredOverrideField::Cwd],
         output: AgentRunResponse {
             text: Some("child complete".into()),
             tool_calls: vec![],
@@ -1143,6 +1871,7 @@ fn sample_events_replay_response() -> EventsReplayResponse {
                 },
             },
         }],
+        snapshot: None,
     }
 }
 

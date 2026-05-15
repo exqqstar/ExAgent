@@ -119,6 +119,13 @@ impl PolicyManager {
             .remove(approval_id.as_str())
             .ok_or_else(|| format!("unknown approval id: {}", approval_id.as_str()))
     }
+
+    pub async fn cancel_pending_for_session(&self, session_id: &SessionId) {
+        self.pending
+            .lock()
+            .await
+            .retain(|_, approval| &approval.session_id != session_id);
+    }
 }
 
 pub fn new_policy_event_id() -> EventId {

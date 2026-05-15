@@ -2,10 +2,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::app_server::protocol::{
-    AgentRunResponse, CollectParams, CollectResponse, EventsReplayParams, EventsReplayResponse,
-    ForkParams, InspectParams, InspectResponse, RunParams, ThreadSpawnChildParams,
-    ThreadSpawnChildResponse, ThreadStartParams, ThreadStartResponse, TurnStartParams,
-    TurnStartResponse,
+    AgentRunResponse, BoundaryOp, BoundaryOpResponse, CollectParams, CollectResponse,
+    EventsReplayParams, EventsReplayResponse, ForkParams, InspectParams, InspectResponse,
+    RunParams, ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
+    ThreadSpawnChildParams, ThreadSpawnChildResponse, ThreadStartParams, ThreadStartResponse,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
 };
 use crate::app_server::ThreadManager;
 use crate::config::AgentConfig;
@@ -19,11 +20,15 @@ pub trait AppServerBoundary: Send + Sync {
     async fn inspect(&self, params: InspectParams) -> Result<InspectResponse>;
     async fn collect(&self, params: CollectParams) -> Result<CollectResponse>;
     async fn thread_start(&self, params: ThreadStartParams) -> Result<ThreadStartResponse>;
+    async fn thread_read(&self, params: ThreadReadParams) -> Result<ThreadReadResponse>;
+    async fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse>;
     async fn turn_start(&self, params: TurnStartParams) -> Result<TurnStartResponse>;
+    async fn turn_interrupt(&self, params: TurnInterruptParams) -> Result<TurnInterruptResponse>;
     async fn thread_spawn_child(
         &self,
         params: ThreadSpawnChildParams,
     ) -> Result<ThreadSpawnChildResponse>;
+    async fn submit_boundary_op(&self, op: BoundaryOp) -> Result<BoundaryOpResponse>;
     async fn events_replay(&self, params: EventsReplayParams) -> Result<EventsReplayResponse>;
 }
 
@@ -79,8 +84,23 @@ impl AppServerService {
         self.thread_manager.thread_start(params)
     }
 
+    pub fn thread_read(&self, params: ThreadReadParams) -> Result<ThreadReadResponse> {
+        self.thread_manager.thread_read(params)
+    }
+
+    pub fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse> {
+        self.thread_manager.thread_resume(params)
+    }
+
     pub async fn turn_start(&self, params: TurnStartParams) -> Result<TurnStartResponse> {
         self.thread_manager.turn_start(params).await
+    }
+
+    pub async fn turn_interrupt(
+        &self,
+        params: TurnInterruptParams,
+    ) -> Result<TurnInterruptResponse> {
+        self.thread_manager.turn_interrupt(params).await
     }
 
     pub async fn thread_spawn_child(
@@ -88,6 +108,10 @@ impl AppServerService {
         params: ThreadSpawnChildParams,
     ) -> Result<ThreadSpawnChildResponse> {
         self.thread_manager.thread_spawn_child(params).await
+    }
+
+    pub async fn submit_boundary_op(&self, op: BoundaryOp) -> Result<BoundaryOpResponse> {
+        self.thread_manager.submit_boundary_op(op).await
     }
 
     pub fn events_replay(&self, params: EventsReplayParams) -> Result<EventsReplayResponse> {
@@ -117,8 +141,20 @@ impl AppServerBoundary for AppServerService {
         self.thread_start(params)
     }
 
+    async fn thread_read(&self, params: ThreadReadParams) -> Result<ThreadReadResponse> {
+        self.thread_read(params)
+    }
+
+    async fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse> {
+        self.thread_resume(params)
+    }
+
     async fn turn_start(&self, params: TurnStartParams) -> Result<TurnStartResponse> {
         self.turn_start(params).await
+    }
+
+    async fn turn_interrupt(&self, params: TurnInterruptParams) -> Result<TurnInterruptResponse> {
+        self.turn_interrupt(params).await
     }
 
     async fn thread_spawn_child(
@@ -126,6 +162,10 @@ impl AppServerBoundary for AppServerService {
         params: ThreadSpawnChildParams,
     ) -> Result<ThreadSpawnChildResponse> {
         self.thread_spawn_child(params).await
+    }
+
+    async fn submit_boundary_op(&self, op: BoundaryOp) -> Result<BoundaryOpResponse> {
+        self.submit_boundary_op(op).await
     }
 
     async fn events_replay(&self, params: EventsReplayParams) -> Result<EventsReplayResponse> {

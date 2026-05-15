@@ -23,6 +23,9 @@ pub struct RuntimeEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEventKind {
+    TurnStarted,
+    TurnCompleted,
+    TurnInterrupted,
     AssistantTurn {
         turn: AssistantTurn,
     },

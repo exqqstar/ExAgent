@@ -1,0 +1,1184 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex app-server Call Canvas</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #efe9dc;
+        --paper: #fbf7ed;
+        --ink: #191713;
+        --muted: #6f675b;
+        --line: #cdbfae;
+        --hard: #2f2a23;
+        --teal: #0f766e;
+        --rust: #9a3412;
+        --blue: #1d4ed8;
+        --green: #166534;
+        --soft-teal: #dbece8;
+        --soft-rust: #f3dfd2;
+        --soft-blue: #dfe8f7;
+        --soft-green: #dfeadb;
+        --shadow: rgba(29, 24, 18, 0.16);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+      }
+
+      body {
+        margin: 0;
+        background:
+          linear-gradient(90deg, rgba(25, 23, 19, 0.05) 1px, transparent 1px) 0 0 / 36px
+            36px,
+          linear-gradient(rgba(25, 23, 19, 0.035) 1px, transparent 1px) 0 0 / 36px 36px,
+          var(--bg);
+        color: var(--ink);
+        font-family:
+          ui-serif, Georgia, "Times New Roman", "Noto Serif SC", "Songti SC", serif;
+      }
+
+      code,
+      pre,
+      .mono {
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans Mono CJK SC",
+          monospace;
+      }
+
+      .shell {
+        display: grid;
+        grid-template-columns: 1fr 390px;
+        height: 100vh;
+        overflow: hidden;
+      }
+
+      .left {
+        display: grid;
+        grid-template-rows: auto auto 1fr;
+        min-width: 0;
+      }
+
+      header {
+        padding: 24px 28px 18px;
+        border-bottom: 2px solid var(--hard);
+        background: rgba(251, 247, 237, 0.82);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(32px, 5vw, 76px);
+        line-height: 0.92;
+        letter-spacing: 0;
+      }
+
+      .subtitle {
+        margin: 12px 0 0;
+        max-width: 980px;
+        color: var(--muted);
+        line-height: 1.65;
+        font-size: 17px;
+      }
+
+      .toolbar {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+        padding: 12px 28px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(251, 247, 237, 0.78);
+      }
+
+      button,
+      select {
+        border: 1px solid var(--hard);
+        background: var(--paper);
+        color: var(--ink);
+        padding: 8px 11px;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      button:hover,
+      select:hover {
+        background: #eadfce;
+      }
+
+      .toolbar .hint {
+        margin-left: auto;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .canvas-wrap {
+        position: relative;
+        overflow: auto;
+        min-height: 0;
+        cursor: grab;
+        overscroll-behavior: contain;
+        user-select: none;
+      }
+
+      .canvas-wrap.is-panning {
+        cursor: grabbing;
+      }
+
+      .canvas-world {
+        position: relative;
+        width: 2210px;
+        height: 1173px;
+      }
+
+      .canvas {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 2600px;
+        height: 1380px;
+        transform-origin: 0 0;
+      }
+
+      svg.edges {
+        position: absolute;
+        inset: 0;
+        width: 2600px;
+        height: 1380px;
+        pointer-events: none;
+        overflow: visible;
+      }
+
+      .edge-path {
+        fill: none;
+        stroke: rgba(47, 42, 35, 0.42);
+        stroke-width: 2;
+      }
+
+      .edge-path.dim {
+        opacity: 0.14;
+      }
+
+      .edge-path.hot {
+        stroke: var(--rust);
+        stroke-width: 3;
+        opacity: 1;
+      }
+
+      .edge-label {
+        font-size: 13px;
+        fill: var(--muted);
+        paint-order: stroke;
+        stroke: var(--bg);
+        stroke-width: 5px;
+      }
+
+      .edge-label.dim {
+        opacity: 0.18;
+      }
+
+      .edge-label.hot {
+        fill: var(--rust);
+        font-weight: 700;
+        opacity: 1;
+      }
+
+      .node {
+        position: absolute;
+        width: 270px;
+        min-height: 128px;
+        border: 2px solid var(--hard);
+        background: var(--paper);
+        box-shadow: 8px 8px 0 var(--shadow);
+        padding: 14px;
+        cursor: pointer;
+        user-select: text;
+        transition:
+          transform 140ms ease,
+          box-shadow 140ms ease,
+          opacity 140ms ease,
+          background 140ms ease;
+      }
+
+      .node:hover {
+        transform: translate(-2px, -2px);
+        box-shadow: 11px 11px 0 var(--shadow);
+      }
+
+      .node.active {
+        border-color: var(--rust);
+        box-shadow: 10px 10px 0 rgba(154, 52, 18, 0.24);
+      }
+
+      .node.dim {
+        opacity: 0.32;
+      }
+
+      .node.boot {
+        background: var(--soft-blue);
+      }
+
+      .node.api {
+        background: var(--soft-teal);
+      }
+
+      .node.core {
+        background: var(--soft-rust);
+      }
+
+      .node.event {
+        background: var(--soft-green);
+      }
+
+      .node.child {
+        width: 230px;
+        min-height: 112px;
+        border-style: dashed;
+        box-shadow: 5px 5px 0 rgba(29, 24, 18, 0.11);
+      }
+
+      .node .tag {
+        display: inline-block;
+        margin-bottom: 10px;
+        border: 1px solid currentColor;
+        padding: 3px 6px;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+      }
+
+      .node h2 {
+        margin: 0;
+        font-size: 21px;
+        line-height: 1.12;
+        letter-spacing: 0;
+      }
+
+      .node p {
+        margin: 10px 0 0;
+        color: var(--muted);
+        line-height: 1.42;
+        font-size: 14px;
+      }
+
+      .node .file {
+        margin-top: 10px;
+        font-size: 11px;
+        color: var(--hard);
+        word-break: break-word;
+      }
+
+      aside.inspector {
+        border-left: 2px solid var(--hard);
+        background: rgba(251, 247, 237, 0.94);
+        overflow: auto;
+        padding: 22px;
+      }
+
+      .panel-title {
+        margin: 0;
+        font-size: 30px;
+        line-height: 1;
+      }
+
+      .panel-kind {
+        margin: 8px 0 18px;
+        color: var(--rust);
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .panel-text {
+        color: var(--muted);
+        line-height: 1.6;
+        margin: 0 0 18px;
+      }
+
+      .detail {
+        border-top: 1px solid var(--line);
+        padding: 15px 0;
+      }
+
+      .detail h3 {
+        margin: 0 0 10px;
+        font-size: 16px;
+      }
+
+      .detail ul {
+        margin: 0;
+        padding-left: 18px;
+        line-height: 1.75;
+        color: var(--muted);
+      }
+
+      .detail pre {
+        margin: 0;
+        background: #eadfce;
+        padding: 12px;
+        white-space: pre-wrap;
+        color: #231f19;
+        font-size: 12px;
+        line-height: 1.55;
+        overflow-x: auto;
+      }
+
+      .legend {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin: 18px 0 0;
+      }
+
+      .legend span {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .swatch {
+        width: 16px;
+        height: 16px;
+        border: 1px solid var(--hard);
+      }
+
+      .boot-swatch {
+        background: var(--soft-blue);
+      }
+
+      .api-swatch {
+        background: var(--soft-teal);
+      }
+
+      .core-swatch {
+        background: var(--soft-rust);
+      }
+
+      .event-swatch {
+        background: var(--soft-green);
+      }
+
+      @media (max-width: 1020px) {
+        .shell {
+          grid-template-columns: 1fr;
+          grid-template-rows: 58vh 42vh;
+        }
+
+        aside.inspector {
+          border-left: 0;
+          border-top: 2px solid var(--hard);
+        }
+
+        .toolbar .hint {
+          margin-left: 0;
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <div class="left">
+        <header>
+          <h1>app-server 调用画布</h1>
+          <p class="subtitle">
+            这不是文件顺序图，而是一个可点击的 runtime 关系图。先看大节点之间的主链路，
+            再点开节点看参数、返回值、内部调用和它跟其他部分的关系。
+          </p>
+        </header>
+        <div class="toolbar">
+          <button id="resetFocus" type="button">重置聚焦</button>
+          <button id="expandSelected" type="button">展开当前节点</button>
+          <button id="collapseChildren" type="button">收起细节</button>
+          <button id="fitView" type="button">适合窗口</button>
+          <label>
+            缩放
+            <select id="zoom">
+              <option value="0.5">50%</option>
+              <option value="0.58">58%</option>
+              <option value="0.72">72%</option>
+              <option value="0.85" selected>85%</option>
+              <option value="1">100%</option>
+              <option value="1.18">118%</option>
+              <option value="1.35">135%</option>
+            </select>
+          </label>
+          <span class="hint">点击节点聚焦；拖动画布空白处移动；双击节点展开内部部件。</span>
+        </div>
+        <div class="canvas-wrap" id="canvasWrap">
+          <div class="canvas-world" id="canvasWorld">
+            <div class="canvas" id="canvas">
+              <svg class="edges" id="edges" viewBox="0 0 2600 1380"></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+      <aside class="inspector" id="inspector"></aside>
+    </main>
+
+    <script>
+      const nodes = [
+        {
+          id: "cli",
+          kind: "boot",
+          x: 80,
+          y: 120,
+          title: "CLI AppServer",
+          tag: "entry",
+          file: "codex-rs/cli/src/main.rs",
+          summary: "用户运行 codex app-server 后，CLI 只做参数解析和子命令分发。",
+          params: [
+            "Subcommand::AppServer(app_server_cli)",
+            "root_config_overrides",
+            "listen transport",
+            "auth settings",
+          ],
+          calls: ["run_main_with_transport(...)"],
+          returns: ["启动 app-server runtime"],
+          snippet:
+            "Some(Subcommand::AppServer(app_server_cli)) =>\n  codex_app_server::run_main_with_transport(...)",
+        },
+        {
+          id: "run-main",
+          kind: "boot",
+          x: 410,
+          y: 120,
+          title: "run_main_with_transport",
+          tag: "runtime bootstrap",
+          file: "codex-rs/app-server/src/lib.rs",
+          summary:
+            "app-server 的启动总线。它把启动参数变成运行时组件：环境、配置、认证、transport、processor。",
+          params: [
+            "arg0_paths",
+            "cli_config_overrides",
+            "loader_overrides",
+            "default_analytics_enabled",
+            "transport",
+            "session_source",
+            "auth",
+          ],
+          calls: [
+            "EnvironmentManager::new",
+            "ConfigManager::new",
+            "AuthManager::shared_from_config",
+            "start_stdio_connection / start_websocket_acceptor",
+            "MessageProcessor::new",
+          ],
+          returns: ["一个持续运行的 app-server 进程"],
+          children: [
+            {
+              id: "env-manager",
+              title: "EnvironmentManager",
+              tag: "environment",
+              summary: "管理 local/remote 执行环境，后续 shell、文件系统、sandbox 会依赖它。",
+              file: "codex-rs/exec-server/src/environment.rs",
+              params: ["ExecServerRuntimePaths", "CODEX_EXEC_SERVER_URL"],
+              calls: ["default_environment()", "local_environment()", "get_environment(id)"],
+              returns: ["Environment"],
+            },
+            {
+              id: "channels",
+              title: "Runtime Channels",
+              tag: "queues",
+              summary: "app-server 内部的三条消息通道：transport events、outgoing messages、outbound control。",
+              file: "codex-rs/app-server/src/lib.rs",
+              params: ["CHANNEL_CAPACITY = 128"],
+              calls: ["mpsc::channel::<TransportEvent>", "mpsc::channel::<OutgoingEnvelope>"],
+              returns: ["tx/rx pairs"],
+            },
+            {
+              id: "config-manager",
+              title: "ConfigManager",
+              tag: "config",
+              summary: "合并 config.toml、CLI override、request override、cloud requirements，得到最终 Config。",
+              file: "codex-rs/app-server/src/config_manager.rs",
+              params: ["codex_home", "cli_overrides", "loader_overrides", "thread_config_loader"],
+              calls: ["load_latest_config", "load_with_overrides", "load_for_cwd"],
+              returns: ["codex_core::config::Config"],
+            },
+          ],
+          snippet:
+            "run_main_with_transport_options(...) {\n  EnvironmentManager::new(...)\n  ConfigManager::new(...)\n  start transport\n  MessageProcessor::new(...)\n}",
+        },
+        {
+          id: "transport",
+          kind: "boot",
+          x: 760,
+          y: 120,
+          title: "Transport Layer",
+          tag: "stdio / socket / ws",
+          file: "codex-rs/app-server/src/transport/mod.rs",
+          summary:
+            "只负责连接和 JSON-RPC 消息进出，不理解 thread/turn 业务语义。",
+          params: ["AppServerTransport::Stdio", "UnixSocket", "WebSocket", "Off"],
+          calls: ["start_stdio_connection", "start_control_socket_acceptor", "start_websocket_acceptor"],
+          returns: ["TransportEvent::ConnectionOpened", "IncomingMessage", "ConnectionClosed"],
+          snippet:
+            "enum AppServerTransport {\n  Stdio,\n  UnixSocket { socket_path },\n  WebSocket { bind_address },\n  Off,\n}",
+        },
+        {
+          id: "message-processor",
+          kind: "api",
+          x: 1100,
+          y: 120,
+          title: "MessageProcessor",
+          tag: "request gate",
+          file: "codex-rs/app-server/src/message_processor.rs",
+          summary:
+            "连接级 gate：解析 JSON-RPC，处理 initialize，检查连接是否初始化和 experimental API 权限。",
+          params: ["connection_id", "JSONRPCRequest", "AppServerTransport", "ConnectionSessionState"],
+          calls: ["handle_client_request", "dispatch_initialized_client_request"],
+          returns: ["send_response / send_error / dispatch to CodexMessageProcessor"],
+          children: [
+            {
+              id: "initialize",
+              title: "initialize",
+              tag: "handshake",
+              summary: "记录客户端身份、版本、experimentalApi、通知过滤偏好。",
+              file: "codex-rs/app-server/src/message_processor.rs",
+              params: ["clientInfo.name", "clientInfo.version", "capabilities.experimentalApi"],
+              calls: ["session.initialize", "set_default_originator", "track_initialize"],
+              returns: ["InitializeResponse { userAgent, codexHome, platform }"],
+            },
+            {
+              id: "request-gate",
+              title: "request gate",
+              tag: "validation",
+              summary: "非 initialize 请求必须通过 initialized 检查，实验 API 也在这里拦截。",
+              file: "codex-rs/app-server/src/message_processor.rs",
+              params: ["ClientRequest", "ConnectionSessionState"],
+              calls: ["codex_request.experimental_reason()", "codex_request.serialization_scope()"],
+              returns: ["queued initialized request"],
+            },
+          ],
+          snippet:
+            "process_request(...) -> JSON -> ClientRequest\nif Initialize: session.initialize(...)\nelse: check initialized + gate -> dispatch",
+        },
+        {
+          id: "codex-message-processor",
+          kind: "api",
+          x: 1450,
+          y: 120,
+          title: "CodexMessageProcessor",
+          tag: "business router",
+          file: "codex-rs/app-server/src/codex_message_processor.rs",
+          summary:
+            "业务 router。把 ClientRequest enum 分发到 thread_start、turn_start、resume、MCP、config、fs 等 handler。",
+          params: ["ClientRequest", "connection_id", "app_server_client_name", "request_context"],
+          calls: ["thread_start", "turn_start", "thread_resume", "review_start"],
+          returns: ["handler-specific responses and notifications"],
+          snippet:
+            "match request {\n  ClientRequest::ThreadStart { .. } => self.thread_start(...)\n  ClientRequest::TurnStart { .. } => self.turn_start(...)\n}",
+        },
+        {
+          id: "thread-start",
+          kind: "api",
+          x: 1800,
+          y: 80,
+          title: "thread_start",
+          tag: "create session",
+          file: "codex-rs/app-server/src/codex_message_processor.rs",
+          summary:
+            "创建长期会话。把 ThreadStartParams 变成 ConfigOverrides，再创建 core CodexThread。",
+          params: [
+            "model / model_provider / service_tier",
+            "cwd",
+            "approval_policy / approvals_reviewer",
+            "sandbox / permissions",
+            "base_instructions / developer_instructions",
+            "dynamic_tools / environments",
+          ],
+          calls: ["build_thread_config_overrides", "ConfigManager::load_with_overrides", "ThreadManager::start_thread_with_options"],
+          returns: ["ThreadStartResponse", "ThreadStarted notification"],
+          children: [
+            {
+              id: "config-overrides",
+              title: "ConfigOverrides",
+              tag: "request -> config",
+              summary: "把 API 参数转成 core config builder 能理解的类型安全覆盖项。",
+              file: "codex-rs/app-server/src/codex_message_processor.rs",
+              params: ["model", "cwd", "sandbox", "permissions", "instructions"],
+              calls: ["apply_permission_profile_selection_to_config_overrides"],
+              returns: ["ConfigOverrides"],
+            },
+            {
+              id: "thread-start-task",
+              title: "thread_start_task",
+              tag: "async work",
+              summary: "后台执行真正的 thread 创建，避免阻塞 request router。",
+              file: "codex-rs/app-server/src/codex_message_processor.rs",
+              params: ["ConfigManager", "ConfigOverrides", "dynamic_tools", "request_trace"],
+              calls: ["load_with_overrides", "start_thread_with_options", "ensure_conversation_listener_task"],
+              returns: ["ThreadStartResponse"],
+            },
+          ],
+          snippet:
+            "ThreadStartParams\n  -> build_thread_config_overrides\n  -> load final Config\n  -> ThreadManager::start_thread_with_options",
+        },
+        {
+          id: "thread-manager",
+          kind: "core",
+          x: 2150,
+          y: 80,
+          title: "ThreadManager",
+          tag: "core lifecycle",
+          file: "codex-rs/core/src/thread_manager.rs",
+          summary:
+            "core thread 生命周期管理器。负责 start、resume、fork、get、shutdown。",
+          params: ["Config", "ThreadStore", "InitialHistory", "dynamic_tools", "environments"],
+          calls: ["spawn_thread_with_source", "Codex::spawn"],
+          returns: ["NewThread { thread_id, thread, session_configured }"],
+          snippet:
+            "start_thread_with_options(options)\n  -> spawn_thread_with_source(...)\n  -> Codex::spawn(...)",
+        },
+        {
+          id: "codex-spawn",
+          kind: "core",
+          x: 2150,
+          y: 340,
+          title: "Codex::spawn",
+          tag: "session init",
+          file: "codex-rs/core/src/session/mod.rs",
+          summary:
+            "创建 Session、加载模型信息、skills、plugins、AGENTS.md、exec policy，并启动 submission_loop。",
+          params: ["CodexSpawnArgs { config, auth_manager, models_manager, environment_manager, initial_history }"],
+          calls: ["Session::new", "tokio::spawn(submission_loop)"],
+          returns: ["CodexSpawnOk { codex, thread_id }"],
+          snippet:
+            "let (tx_sub, rx_sub) = async_channel::bounded(...)\nlet session = Session::new(...).await\nspawn submission_loop(session, config, rx_sub)",
+        },
+        {
+          id: "turn-start",
+          kind: "api",
+          x: 1800,
+          y: 500,
+          title: "turn_start",
+          tag: "submit task",
+          file: "codex-rs/app-server/src/codex_message_processor.rs",
+          summary:
+            "接收用户输入，映射成 core input，构造 TurnContext，包装成 Op，提交到 core queue。",
+          params: ["thread_id", "input", "cwd/model/permissions overrides", "output_schema"],
+          calls: ["validate_v2_input_limit", "load_thread", "V2UserInput::into_core", "validate_turn_context_overrides", "submit_core_op"],
+          returns: ["TurnStartResponse { turn.status = InProgress }"],
+          children: [
+            {
+              id: "input-map",
+              title: "V2UserInput::into_core",
+              tag: "input mapping",
+              summary: "外部 API 输入转 core 内部输入。Text、Image、LocalImage、Skill、Mention 都在这里转换。",
+              file: "codex-rs/app-server-protocol/src/protocol/v2.rs",
+              params: ["UserInput::Text / Image / LocalImage / Skill / Mention"],
+              calls: ["Into<CoreUserInput>"],
+              returns: ["codex_protocol::user_input::UserInput"],
+            },
+            {
+              id: "turn-context",
+              title: "TurnContext",
+              tag: "execution semantics",
+              summary: "本次 turn 的执行语义：模型、工作目录、权限、工具、环境、instructions。",
+              file: "codex-rs/core/src/session/turn_context.rs",
+              params: ["thread defaults", "turn overrides"],
+              calls: ["validate_turn_context_overrides", "new_turn_with_sub_id"],
+              returns: ["SessionSettingsUpdate / TurnContext"],
+            },
+          ],
+          snippet:
+            "input + optional overrides\n  -> core input\n  -> TurnContext\n  -> Op::UserInput / Op::UserInputWithTurnContext",
+        },
+        {
+          id: "op-queue",
+          kind: "core",
+          x: 2150,
+          y: 610,
+          title: "Op Queue",
+          tag: "runtime input",
+          file: "codex-rs/core/src/session/mod.rs",
+          summary:
+            "agent runtime 的真正入口。所有动作都变成 Op 后进入 submission queue。",
+          params: ["Submission { id, op, trace }"],
+          calls: ["tx_sub.send(sub)", "submission_loop(rx_sub)"],
+          returns: ["turn id / submission id"],
+          snippet:
+            "Op::UserInput\nOp::UserInputWithTurnContext\nOp::Interrupt\nOp::Compact\nOp::Shutdown",
+        },
+        {
+          id: "core-loop",
+          kind: "core",
+          x: 2150,
+          y: 860,
+          title: "Core Turn Loop",
+          tag: "run_turn",
+          file: "codex-rs/core/src/session/turn.rs",
+          summary:
+            "真正执行 agent：构造 prompt，调用模型，解析 tool call，执行工具，把结果送回模型，直到完成。",
+          params: ["Session", "TurnContext", "UserInput", "CancellationToken"],
+          calls: ["run_turn", "ModelClient", "ToolRouter", "Tool Executors"],
+          returns: ["EventMsg stream"],
+          snippet:
+            "run_turn(sess, turn_context, input, ...)\n  model -> tool calls -> tool results -> model -> final answer",
+        },
+        {
+          id: "listener",
+          kind: "event",
+          x: 1460,
+          y: 860,
+          title: "Thread Listener",
+          tag: "event bridge",
+          file: "codex-rs/app-server/src/codex_message_processor.rs",
+          summary:
+            "读取 core EventMsg，更新 ThreadState，并翻译成 app-server notification。",
+          params: ["conversation_id", "CodexThread", "ThreadState", "subscribed connections"],
+          calls: ["conversation.next_event", "track_current_turn_event", "apply_bespoke_event_handling"],
+          returns: ["ServerNotification"],
+          snippet:
+            "loop {\n  event = conversation.next_event()\n  thread_state.track_current_turn_event(...)\n  apply_bespoke_event_handling(...)\n}",
+        },
+        {
+          id: "thread-state",
+          kind: "event",
+          x: 1100,
+          y: 860,
+          title: "ThreadStateManager",
+          tag: "subscription state",
+          file: "codex-rs/app-server/src/thread_state.rs",
+          summary:
+            "维护 connection 和 thread 的订阅关系，以及当前 active turn 的摘要。",
+          params: ["connection_id", "thread_id", "ThreadState"],
+          calls: ["try_ensure_connection_subscribed", "subscribed_connection_ids", "track_current_turn_event"],
+          returns: ["connection ids for a thread"],
+          snippet:
+            "thread_ids_by_connection\nthreads[thread_id].connection_ids\ncurrent_turn_history",
+        },
+        {
+          id: "outgoing",
+          kind: "event",
+          x: 760,
+          y: 860,
+          title: "OutgoingMessageSender",
+          tag: "response bus",
+          file: "codex-rs/app-server/src/outgoing_message.rs",
+          summary:
+            "统一发送 response、error、notification，也管理 server -> client request 的 callback。",
+          params: ["ConnectionRequestId", "ServerNotification", "OutgoingEnvelope"],
+          calls: ["send_response", "send_error", "send_server_notification"],
+          returns: ["JSON-RPC messages to client"],
+          snippet:
+            "OutgoingEnvelope::ToConnection\nOutgoingEnvelope::Broadcast",
+        },
+        {
+          id: "client-ui",
+          kind: "event",
+          x: 410,
+          y: 860,
+          title: "Client UI",
+          tag: "consumer",
+          file: "VS Code / Desktop / custom client",
+          summary:
+            "收到 thread/turn response 和持续 notification，用于展示流式文本、工具状态、命令输出和完成状态。",
+          params: ["JSON-RPC response", "ServerNotification stream"],
+          calls: ["render message delta", "render tool status", "show approval prompt"],
+          returns: ["user-visible agent experience"],
+          snippet:
+            "turn/start response is not final answer;\nnotifications drive the UI.",
+        },
+      ];
+
+      const edges = [
+        ["cli", "run-main", "starts"],
+        ["run-main", "transport", "opens"],
+        ["run-main", "message-processor", "builds"],
+        ["transport", "message-processor", "IncomingMessage"],
+        ["message-processor", "codex-message-processor", "ClientRequest"],
+        ["codex-message-processor", "thread-start", "ThreadStart"],
+        ["thread-start", "thread-manager", "start thread"],
+        ["thread-manager", "codex-spawn", "spawn core"],
+        ["codex-spawn", "op-queue", "creates tx_sub"],
+        ["codex-message-processor", "turn-start", "TurnStart"],
+        ["turn-start", "op-queue", "Op + TurnContext"],
+        ["op-queue", "core-loop", "consume Op"],
+        ["core-loop", "listener", "EventMsg"],
+        ["listener", "thread-state", "update state"],
+        ["thread-state", "listener", "subscribers"],
+        ["listener", "outgoing", "notification"],
+        ["outgoing", "client-ui", "JSON-RPC"],
+        ["thread-start", "listener", "attach"],
+      ];
+
+      const childEdges = [
+        ["run-main", "env-manager", "creates"],
+        ["run-main", "channels", "creates"],
+        ["run-main", "config-manager", "creates"],
+        ["message-processor", "initialize", "handles"],
+        ["message-processor", "request-gate", "checks"],
+        ["thread-start", "config-overrides", "builds"],
+        ["thread-start", "thread-start-task", "spawns"],
+        ["turn-start", "input-map", "maps"],
+        ["turn-start", "turn-context", "builds"],
+        ["turn-context", "op-queue", "context in Op"],
+        ["config-manager", "thread-start-task", "loads Config"],
+        ["thread-start-task", "thread-manager", "calls"],
+      ];
+
+      const state = {
+        selected: "run-main",
+        expanded: new Set(),
+        zoom: 0.85,
+      };
+
+      const WORLD_WIDTH = 2600;
+      const WORLD_HEIGHT = 1380;
+      const nodeById = new Map(nodes.map((node) => [node.id, node]));
+      const canvasWrap = document.getElementById("canvasWrap");
+      const canvasWorld = document.getElementById("canvasWorld");
+      const canvas = document.getElementById("canvas");
+      const svg = document.getElementById("edges");
+      const inspector = document.getElementById("inspector");
+      const zoomSelect = document.getElementById("zoom");
+      const fitViewButton = document.getElementById("fitView");
+
+      function visibleNodes() {
+        const list = [...nodes];
+        for (const parent of nodes) {
+          if (!state.expanded.has(parent.id) || !parent.children) {
+            continue;
+          }
+          parent.children.forEach((child, index) => {
+            list.push({
+              ...child,
+              kind: parent.kind,
+              parent: parent.id,
+              x: parent.x + 14 + index * 248,
+              y: parent.y + 176,
+              child: true,
+            });
+          });
+        }
+        return list;
+      }
+
+      function visibleEdges() {
+        const base = [...edges];
+        for (const [from, to, label] of childEdges) {
+          if (state.expanded.has(from) || nodeById.has(from)) {
+            base.push([from, to, label]);
+          }
+        }
+        return base;
+      }
+
+      function allVisibleNodeMap() {
+        return new Map(visibleNodes().map((node) => [node.id, node]));
+      }
+
+      function relatedIds(selected) {
+        const related = new Set([selected]);
+        for (const [from, to] of visibleEdges()) {
+          if (from === selected) {
+            related.add(to);
+          }
+          if (to === selected) {
+            related.add(from);
+          }
+        }
+        const node = allVisibleNodeMap().get(selected);
+        if (node?.parent) {
+          related.add(node.parent);
+        }
+        return related;
+      }
+
+      function render() {
+        syncWorldSize();
+        canvas.querySelectorAll(".node").forEach((node) => node.remove());
+        svg.innerHTML = "";
+        const visible = visibleNodes();
+        const visibleMap = new Map(visible.map((node) => [node.id, node]));
+        const selectedRelated = relatedIds(state.selected);
+
+        for (const [from, to, label] of visibleEdges()) {
+          if (!visibleMap.has(from) || !visibleMap.has(to)) {
+            continue;
+          }
+          renderEdge(visibleMap.get(from), visibleMap.get(to), label, selectedRelated);
+        }
+
+        for (const node of visible) {
+          const el = document.createElement("button");
+          el.type = "button";
+          el.className = [
+            "node",
+            node.kind,
+            node.child ? "child" : "",
+            node.id === state.selected ? "active" : "",
+            state.selected && !selectedRelated.has(node.id) ? "dim" : "",
+          ]
+            .filter(Boolean)
+            .join(" ");
+          el.style.left = `${node.x}px`;
+          el.style.top = `${node.y}px`;
+          el.innerHTML = `
+            <span class="tag">${escapeHtml(node.tag)}</span>
+            <h2>${escapeHtml(node.title)}</h2>
+            <p>${escapeHtml(node.summary)}</p>
+            <div class="file mono">${escapeHtml(node.file || "")}</div>
+          `;
+          el.addEventListener("click", () => {
+            state.selected = node.id;
+            render();
+          });
+          el.addEventListener("dblclick", () => {
+            const parent = nodeById.get(node.id);
+            if (parent?.children) {
+              toggleExpanded(node.id);
+            }
+          });
+          canvas.appendChild(el);
+        }
+
+        renderInspector(visibleMap.get(state.selected) || nodeById.get("run-main"));
+      }
+
+      function syncWorldSize() {
+        canvasWorld.style.width = `${WORLD_WIDTH * state.zoom}px`;
+        canvasWorld.style.height = `${WORLD_HEIGHT * state.zoom}px`;
+        canvas.style.transform = `scale(${state.zoom})`;
+      }
+
+      function setZoom(nextZoom, anchor = "center") {
+        const previousZoom = state.zoom;
+        const next = Math.max(0.45, Math.min(1.6, nextZoom));
+        if (Math.abs(previousZoom - next) < 0.001) {
+          return;
+        }
+        const rect = canvasWrap.getBoundingClientRect();
+        const anchorX =
+          anchor === "pointer" && lastPointer
+            ? lastPointer.x - rect.left
+            : rect.width / 2;
+        const anchorY =
+          anchor === "pointer" && lastPointer
+            ? lastPointer.y - rect.top
+            : rect.height / 2;
+        const worldX = (canvasWrap.scrollLeft + anchorX) / previousZoom;
+        const worldY = (canvasWrap.scrollTop + anchorY) / previousZoom;
+        state.zoom = next;
+        zoomSelect.value = closestZoomOption(next);
+        render();
+        canvasWrap.scrollLeft = worldX * next - anchorX;
+        canvasWrap.scrollTop = worldY * next - anchorY;
+      }
+
+      function closestZoomOption(value) {
+        const options = [...zoomSelect.options].map((option) => Number(option.value));
+        return String(
+          options.reduce((best, option) =>
+            Math.abs(option - value) < Math.abs(best - value) ? option : best
+          )
+        );
+      }
+
+      function fitView() {
+        const rect = canvasWrap.getBoundingClientRect();
+        const nextZoom = Math.min(
+          1,
+          Math.max(0.5, Math.min(rect.width / WORLD_WIDTH, rect.height / WORLD_HEIGHT) * 0.94)
+        );
+        state.zoom = nextZoom;
+        zoomSelect.value = closestZoomOption(nextZoom);
+        render();
+        canvasWrap.scrollLeft = Math.max(0, (WORLD_WIDTH * nextZoom - rect.width) / 2);
+        canvasWrap.scrollTop = Math.max(0, (WORLD_HEIGHT * nextZoom - rect.height) / 2);
+      }
+
+      function renderEdge(from, to, label, related) {
+        const x1 = from.x + 270;
+        const y1 = from.y + 64;
+        const x2 = to.x;
+        const y2 = to.y + 64;
+        const mid = x1 + (x2 - x1) * 0.5;
+        const hot = from.id === state.selected || to.id === state.selected;
+        const dim = state.selected && (!related.has(from.id) || !related.has(to.id));
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`);
+        path.setAttribute("class", ["edge-path", hot ? "hot" : "", dim ? "dim" : ""].join(" "));
+        svg.appendChild(path);
+
+        const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        text.setAttribute("x", String(mid));
+        text.setAttribute("y", String((y1 + y2) / 2 - 8));
+        text.setAttribute("text-anchor", "middle");
+        text.setAttribute("class", ["edge-label", hot ? "hot" : "", dim ? "dim" : ""].join(" "));
+        text.textContent = label;
+        svg.appendChild(text);
+      }
+
+      function renderInspector(node) {
+        if (!node) {
+          return;
+        }
+        const canExpand = Boolean(nodeById.get(node.id)?.children);
+        inspector.innerHTML = `
+          <h2 class="panel-title">${escapeHtml(node.title)}</h2>
+          <div class="panel-kind">${escapeHtml(node.tag)} / ${escapeHtml(node.kind)}</div>
+          <p class="panel-text">${escapeHtml(node.summary)}</p>
+          <div class="detail">
+            <h3>代码入口</h3>
+            <pre>${escapeHtml(node.file || "not a source node")}</pre>
+          </div>
+          <div class="detail">
+            <h3>输入参数 / 状态</h3>
+            ${list(node.params)}
+          </div>
+          <div class="detail">
+            <h3>下游调用</h3>
+            ${list(node.calls)}
+          </div>
+          <div class="detail">
+            <h3>返回 / 产物</h3>
+            ${list(node.returns)}
+          </div>
+          <div class="detail">
+            <h3>简化代码形态</h3>
+            <pre>${escapeHtml(node.snippet || "这个节点是展开后的概念节点。")}</pre>
+          </div>
+          ${
+            canExpand
+              ? `<div class="detail"><button type="button" id="panelExpand">${state.expanded.has(node.id) ? "收起内部部件" : "展开内部部件"}</button></div>`
+              : ""
+          }
+          <div class="legend">
+            <span><i class="swatch boot-swatch"></i>启动/基础设施</span>
+            <span><i class="swatch api-swatch"></i>API/路由层</span>
+            <span><i class="swatch core-swatch"></i>core/runtime</span>
+            <span><i class="swatch event-swatch"></i>事件/输出</span>
+          </div>
+        `;
+        const panelExpand = document.getElementById("panelExpand");
+        if (panelExpand) {
+          panelExpand.addEventListener("click", () => toggleExpanded(node.id));
+        }
+      }
+
+      function list(items) {
+        if (!items || items.length === 0) {
+          return "<p class='panel-text'>无</p>";
+        }
+        return `<ul>${items.map((item) => `<li><code>${escapeHtml(item)}</code></li>`).join("")}</ul>`;
+      }
+
+      function toggleExpanded(id) {
+        if (state.expanded.has(id)) {
+          state.expanded.delete(id);
+        } else {
+          state.expanded.add(id);
+        }
+        state.selected = id;
+        render();
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;");
+      }
+
+      document.getElementById("resetFocus").addEventListener("click", () => {
+        state.selected = "";
+        render();
+      });
+
+      document.getElementById("expandSelected").addEventListener("click", () => {
+        if (nodeById.get(state.selected)?.children) {
+          state.expanded.add(state.selected);
+          render();
+        }
+      });
+
+      document.getElementById("collapseChildren").addEventListener("click", () => {
+        state.expanded.clear();
+        render();
+      });
+
+      zoomSelect.addEventListener("change", () => {
+        setZoom(Number(zoomSelect.value));
+      });
+
+      fitViewButton.addEventListener("click", fitView);
+
+      let panStart = null;
+      let lastPointer = null;
+
+      canvasWrap.addEventListener("pointermove", (event) => {
+        lastPointer = { x: event.clientX, y: event.clientY };
+        if (!panStart) {
+          return;
+        }
+        canvasWrap.scrollLeft = panStart.scrollLeft - (event.clientX - panStart.x);
+        canvasWrap.scrollTop = panStart.scrollTop - (event.clientY - panStart.y);
+      });
+
+      canvasWrap.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0 || event.target.closest(".node")) {
+          return;
+        }
+        panStart = {
+          x: event.clientX,
+          y: event.clientY,
+          scrollLeft: canvasWrap.scrollLeft,
+          scrollTop: canvasWrap.scrollTop,
+        };
+        canvasWrap.classList.add("is-panning");
+        canvasWrap.setPointerCapture(event.pointerId);
+      });
+
+      canvasWrap.addEventListener("pointerup", endPan);
+      canvasWrap.addEventListener("pointercancel", endPan);
+      canvasWrap.addEventListener("pointerleave", (event) => {
+        if (panStart && event.buttons === 0) {
+          endPan(event);
+        }
+      });
+
+      function endPan(event) {
+        if (!panStart) {
+          return;
+        }
+        panStart = null;
+        canvasWrap.classList.remove("is-panning");
+        if (event?.pointerId !== undefined && canvasWrap.hasPointerCapture(event.pointerId)) {
+          canvasWrap.releasePointerCapture(event.pointerId);
+        }
+      }
+
+      canvasWrap.addEventListener(
+        "wheel",
+        (event) => {
+          if (!event.metaKey && !event.ctrlKey) {
+            return;
+          }
+          event.preventDefault();
+          const direction = event.deltaY > 0 ? -1 : 1;
+          setZoom(state.zoom + direction * 0.08, "pointer");
+        },
+        { passive: false }
+      );
+
+      render();
+      requestAnimationFrame(() => {
+        canvasWrap.scrollLeft = 120;
+        canvasWrap.scrollTop = 60;
+      });
+    </script>
+  </body>
+</html>

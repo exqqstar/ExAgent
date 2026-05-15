@@ -9,13 +9,17 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 pub use crate::app_server::protocol::{
-    AgentRunResponse, CollectParams as CollectRequest, CollectResponse,
-    EventsReplayParams as EventsReplayRequest, EventsReplayResponse, ForkParams as ForkRequest,
-    InspectParams as InspectRequest, InspectResponse, RunParams as RunRequest,
+    AgentRunResponse, BoundaryOp, BoundaryOpResponse, CollectParams as CollectRequest,
+    CollectResponse, EventsReplayParams as EventsReplayRequest, EventsReplayResponse,
+    ForkParams as ForkRequest, InspectParams as InspectRequest, InspectResponse,
+    RunParams as RunRequest, ThreadReadParams as ThreadReadRequest, ThreadReadResponse,
+    ThreadResumeParams as ThreadResumeRequest, ThreadResumeResponse,
     ThreadSpawnChildParams as ThreadSpawnChildRequest, ThreadSpawnChildResponse,
     ThreadStartParams as ThreadStartRequest, ThreadStartResponse,
+    TurnInterruptParams as TurnInterruptRequest, TurnInterruptResponse,
     TurnStartParams as TurnStartRequest, TurnStartResponse,
 };
+use crate::app_server::AppServerError;
 use crate::app_server::{AppServerBoundary, AppServerService};
 use crate::runtime::{
     RuntimeController, ThreadStartRequest as RuntimeThreadStartRequest, TurnContextRequest,
@@ -140,8 +144,14 @@ pub fn build_router(boundary: Arc<dyn AppServerBoundary>) -> Router {
         .route("/inspect", post(inspect_children))
         .route("/collect", post(collect_session))
         .route("/thread/start", post(thread_start))
+        .route("/thread/read", post(thread_read))
+        .route("/thread/resume", post(thread_resume))
         .route("/turn/start", post(turn_start))
+        .route("/turn/interrupt", post(turn_interrupt))
+        .route("/thread/op", post(thread_op))
+        .route("/thread/spawn_child", post(thread_spawn_child))
         .route("/thread_spawn_child", post(thread_spawn_child))
+        .route("/events/replay", post(events_replay))
         .route("/events_replay", post(events_replay))
         .with_state(ApiState {
             boundary,
@@ -282,11 +292,39 @@ async fn thread_start(
     json_result(state.boundary.thread_start(request).await)
 }
 
+async fn thread_read(
+    State(state): State<ApiState>,
+    Json(request): Json<ThreadReadRequest>,
+) -> impl IntoResponse {
+    json_result::<ThreadReadResponse>(state.boundary.thread_read(request).await)
+}
+
+async fn thread_resume(
+    State(state): State<ApiState>,
+    Json(request): Json<ThreadResumeRequest>,
+) -> impl IntoResponse {
+    json_result::<ThreadResumeResponse>(state.boundary.thread_resume(request).await)
+}
+
 async fn turn_start(
     State(state): State<ApiState>,
     Json(request): Json<TurnStartRequest>,
 ) -> impl IntoResponse {
     json_result(state.boundary.turn_start(request).await)
+}
+
+async fn turn_interrupt(
+    State(state): State<ApiState>,
+    Json(request): Json<TurnInterruptRequest>,
+) -> impl IntoResponse {
+    json_result::<TurnInterruptResponse>(state.boundary.turn_interrupt(request).await)
+}
+
+async fn thread_op(
+    State(state): State<ApiState>,
+    Json(request): Json<BoundaryOp>,
+) -> impl IntoResponse {
+    json_result::<BoundaryOpResponse>(state.boundary.submit_boundary_op(request).await)
 }
 
 async fn thread_spawn_child(
@@ -317,6 +355,17 @@ fn json_result<T: Serialize>(result: Result<T>) -> axum::response::Response {
 }
 
 fn status_for_error(err: &anyhow::Error) -> StatusCode {
+    match err.downcast_ref::<AppServerError>() {
+        Some(AppServerError::InvalidRequest(_)) => StatusCode::BAD_REQUEST,
+        Some(AppServerError::ThreadNotFound(_)) => StatusCode::NOT_FOUND,
+        Some(AppServerError::ThreadBusy(_)) => StatusCode::CONFLICT,
+        Some(AppServerError::TurnRejected { .. }) => StatusCode::CONFLICT,
+        Some(AppServerError::TurnInterrupted { .. }) => StatusCode::CONFLICT,
+        None => runtime_error_status(err),
+    }
+}
+
+fn runtime_error_status(err: &anyhow::Error) -> StatusCode {
     if err.to_string().contains("thread not found") {
         StatusCode::NOT_FOUND
     } else {
@@ -341,9 +390,7 @@ fn turn_context_request(
     }
 }
 
-fn thread_start_api_response(
-    result: crate::runtime::ThreadStartResult,
-) -> ThreadStartApiResponse {
+fn thread_start_api_response(result: crate::runtime::ThreadStartResult) -> ThreadStartApiResponse {
     ThreadStartApiResponse {
         thread: ThreadApiResponse {
             session_id: result.session_id,

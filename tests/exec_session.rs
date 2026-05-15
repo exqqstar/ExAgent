@@ -1,8 +1,8 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use exagent::config::AgentConfig;
-use exagent::events::{ExecOutputStream, RuntimeEventKind};
+use exagent::events::{ExecOutputStream, RuntimeEvent, RuntimeEventKind};
 use exagent::exec_session::ExecSessionManager;
 use exagent::policy::PolicyManager;
 use exagent::registry::{ToolContext, ToolRegistry};
@@ -27,6 +27,20 @@ fn test_context() -> (tempfile::TempDir, SessionId, ToolContext) {
         policy: Arc::new(PolicyManager::default()),
     };
     (dir, session_id, ctx)
+}
+
+fn has_exec_output_event(
+    replay: &[RuntimeEvent],
+    expected_stream: &ExecOutputStream,
+    expected_chunk: &str,
+) -> bool {
+    replay.iter().any(|event| {
+        matches!(
+            &event.kind,
+            RuntimeEventKind::ExecOutput { stream, chunk, .. }
+                if stream == expected_stream && chunk.contains(expected_chunk)
+        )
+    })
 }
 
 #[tokio::test]
@@ -55,8 +69,6 @@ async fn persistent_exec_session_accepts_stdin_across_multiple_calls() {
         .to_string();
     assert_eq!(started.meta.as_ref().unwrap()["lifecycle"], "running");
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     registry
         .execute(
             ToolCall {
@@ -71,22 +83,31 @@ async fn persistent_exec_session_accepts_stdin_across_multiple_calls() {
         )
         .await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let meta = loop {
+        let polled = registry
+            .execute(
+                ToolCall {
+                    id: "call_poll".into(),
+                    name: "run_command".into(),
+                    arguments: json!({
+                        "exec_session_id": exec_session_id
+                    }),
+                },
+                Some(&ctx),
+            )
+            .await;
+        let meta = polled.meta.unwrap();
+        let stdout = meta["stdout"].as_str().unwrap();
+        if stdout.contains("ready") && stdout.contains("echo:phase2") {
+            break meta;
+        }
+        if Instant::now() >= deadline {
+            break meta;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
 
-    let polled = registry
-        .execute(
-            ToolCall {
-                id: "call_poll".into(),
-                name: "run_command".into(),
-                arguments: json!({
-                    "exec_session_id": started.meta.unwrap()["exec_session_id"]
-                }),
-            },
-            Some(&ctx),
-        )
-        .await;
-
-    let meta = polled.meta.unwrap();
     assert_eq!(meta["lifecycle"], "running");
     assert!(meta["stdout"].as_str().unwrap().contains("ready"));
     assert!(meta["stdout"].as_str().unwrap().contains("echo:phase2"));
@@ -112,25 +133,30 @@ async fn persistent_exec_session_streams_output_into_runtime_events() {
         )
         .await;
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let replay = loop {
+        let replay = replay_session(dir.path(), &session_id).unwrap();
+        if has_exec_output_event(&replay, &ExecOutputStream::Stdout, "stdout-line")
+            && has_exec_output_event(&replay, &ExecOutputStream::Stderr, "stderr-line")
+        {
+            break replay;
+        }
+        if Instant::now() >= deadline {
+            break replay;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
 
-    let replay = replay_session(dir.path(), &session_id).unwrap();
-    assert!(replay.iter().any(|event| matches!(
-        &event.kind,
-        RuntimeEventKind::ExecOutput {
-            stream: ExecOutputStream::Stdout,
-            chunk,
-            ..
-        } if chunk.contains("stdout-line")
-    )));
-    assert!(replay.iter().any(|event| matches!(
-        &event.kind,
-        RuntimeEventKind::ExecOutput {
-            stream: ExecOutputStream::Stderr,
-            chunk,
-            ..
-        } if chunk.contains("stderr-line")
-    )));
+    assert!(has_exec_output_event(
+        &replay,
+        &ExecOutputStream::Stdout,
+        "stdout-line"
+    ));
+    assert!(has_exec_output_event(
+        &replay,
+        &ExecOutputStream::Stderr,
+        "stderr-line"
+    ));
 }
 
 #[tokio::test]

@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
+use crate::app_server::protocol::TurnContextOverrides;
+use crate::app_server::AppServerError;
 use crate::config::AgentConfig;
+use crate::session::SessionSnapshot;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeOverrides {
@@ -13,6 +16,48 @@ pub struct RuntimeOverrides {
 pub struct OverridePolicy;
 
 impl OverridePolicy {
+    pub fn merge_thread_start(
+        base: &AgentConfig,
+        overrides: RuntimeOverrides,
+    ) -> Result<AgentConfig> {
+        Self::apply(base, overrides)
+    }
+
+    pub fn merge_thread_read(
+        base: &AgentConfig,
+        workspace_root: Option<String>,
+    ) -> Result<AgentConfig> {
+        Self::apply_workspace_only(base, workspace_root)
+    }
+
+    pub fn merge_thread_resume(
+        base: &AgentConfig,
+        workspace_root: Option<String>,
+    ) -> Result<AgentConfig> {
+        Self::apply_workspace_only(base, workspace_root)
+    }
+
+    pub fn merge_turn_start(
+        base: &AgentConfig,
+        workspace_root: Option<String>,
+    ) -> Result<AgentConfig> {
+        Self::apply_workspace_only(base, workspace_root)
+    }
+
+    pub fn merge_thread_spawn_child(
+        base: &AgentConfig,
+        workspace_root: Option<String>,
+    ) -> Result<AgentConfig> {
+        Self::apply_workspace_only(base, workspace_root)
+    }
+
+    pub fn merge_events_replay(
+        base: &AgentConfig,
+        workspace_root: Option<String>,
+    ) -> Result<AgentConfig> {
+        Self::apply_workspace_only(base, workspace_root)
+    }
+
     pub fn apply(base: &AgentConfig, overrides: RuntimeOverrides) -> Result<AgentConfig> {
         let mut config = base.clone();
         let workspace_root = match overrides.workspace_root.as_deref() {
@@ -40,6 +85,19 @@ impl OverridePolicy {
                 cwd: None,
             },
         )
+    }
+
+    pub fn apply_turn_context(
+        snapshot: &SessionSnapshot,
+        overrides: TurnContextOverrides,
+    ) -> Result<SessionSnapshot> {
+        let mut snapshot = snapshot.clone();
+
+        if let Some(raw_cwd) = overrides.cwd.as_deref() {
+            snapshot.cwd = canonicalize_from_root(&snapshot.workspace_root, raw_cwd)?;
+        }
+
+        Ok(snapshot)
     }
 }
 
@@ -76,7 +134,9 @@ fn canonicalize_from_root(root: &Path, raw: &str) -> Result<PathBuf> {
     let candidate = canonicalize_existing(&candidate)?;
 
     if !candidate.starts_with(root) {
-        bail!("cwd must stay within workspace_root");
+        bail!(AppServerError::InvalidRequest(
+            "cwd must stay within workspace_root".into()
+        ));
     }
 
     Ok(candidate)

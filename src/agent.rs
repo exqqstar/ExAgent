@@ -95,6 +95,16 @@ impl Agent {
         session_id: &SessionId,
         user_prompt: &str,
     ) -> Result<AgentRunOutput> {
+        self.resume_with_turn_cwd(session_id, user_prompt, None)
+            .await
+    }
+
+    pub async fn resume_with_turn_cwd(
+        &self,
+        session_id: &SessionId,
+        user_prompt: &str,
+        turn_cwd: Option<PathBuf>,
+    ) -> Result<AgentRunOutput> {
         let paths = crate::transcript::session_paths(&self.config.workspace_root, session_id);
         let mut snapshot: SessionSnapshot = crate::transcript::read_json(&paths.snapshot_path)?;
         snapshot.normalize_lineage();
@@ -103,7 +113,7 @@ impl Agent {
             .push(ConversationMessage::user(user_prompt));
         crate::transcript::write_json(&paths.snapshot_path, &snapshot)?;
 
-        self.run_session(snapshot).await
+        self.run_session_with_turn_cwd(snapshot, turn_cwd).await
     }
 
     pub async fn fork_session(
@@ -144,11 +154,19 @@ impl Agent {
         crate::orchestration::collect_session(&self.config.workspace_root, session_id)
     }
 
-    async fn run_session(&self, mut snapshot: SessionSnapshot) -> Result<AgentRunOutput> {
+    async fn run_session(&self, snapshot: SessionSnapshot) -> Result<AgentRunOutput> {
+        self.run_session_with_turn_cwd(snapshot, None).await
+    }
+
+    async fn run_session_with_turn_cwd(
+        &self,
+        mut snapshot: SessionSnapshot,
+        turn_cwd: Option<PathBuf>,
+    ) -> Result<AgentRunOutput> {
         snapshot.normalize_lineage();
         let mut session_config = self.config.clone();
         session_config.workspace_root = snapshot.workspace_root.clone();
-        session_config.cwd = snapshot.cwd.clone();
+        session_config.cwd = turn_cwd.unwrap_or_else(|| snapshot.cwd.clone());
 
         let session_id = snapshot.session_id.clone();
         let paths = crate::transcript::session_paths(&session_config.workspace_root, &session_id);

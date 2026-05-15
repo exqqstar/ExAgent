@@ -1,0 +1,713 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex app-server Flow Notes</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #171717;
+        --muted: #6b6257;
+        --line: #d9d0c3;
+        --panel: #fffaf1;
+        --paper: #f5efe4;
+        --code: #26211b;
+        --accent: #0f766e;
+        --accent-2: #9a3412;
+        --soft: #e8dccb;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background:
+          linear-gradient(90deg, rgba(23, 23, 23, 0.035) 1px, transparent 1px) 0 0 / 44px
+            44px,
+          linear-gradient(rgba(23, 23, 23, 0.025) 1px, transparent 1px) 0 0 / 44px 44px,
+          var(--paper);
+        color: var(--ink);
+        font-family:
+          ui-serif, Georgia, "Times New Roman", "Noto Serif SC", "Songti SC", serif;
+      }
+
+      a {
+        color: var(--accent);
+        text-decoration-thickness: 1px;
+        text-underline-offset: 3px;
+      }
+
+      code,
+      pre {
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans Mono CJK SC",
+          monospace;
+      }
+
+      .page {
+        width: min(1500px, calc(100vw - 48px));
+        margin: 0 auto;
+        padding: 36px 0 64px;
+      }
+
+      header {
+        display: grid;
+        grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+        gap: 28px;
+        align-items: end;
+        border-bottom: 2px solid var(--ink);
+        padding-bottom: 28px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(42px, 7vw, 104px);
+        line-height: 0.9;
+        letter-spacing: 0;
+        font-weight: 800;
+      }
+
+      .deck {
+        color: var(--muted);
+        font-size: 18px;
+        line-height: 1.7;
+        margin: 0;
+      }
+
+      .scenario {
+        margin-top: 22px;
+        border: 1px solid var(--line);
+        background: rgba(255, 250, 241, 0.72);
+        padding: 18px 20px;
+      }
+
+      .scenario strong {
+        color: var(--accent-2);
+      }
+
+      .scenario pre {
+        margin: 12px 0 0;
+        white-space: pre-wrap;
+        color: var(--code);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .map {
+        margin-top: 34px;
+        display: grid;
+        gap: 34px;
+      }
+
+      section {
+        border-top: 2px solid var(--ink);
+        padding-top: 22px;
+      }
+
+      .section-head {
+        display: grid;
+        grid-template-columns: 92px minmax(0, 1fr);
+        gap: 18px;
+        align-items: start;
+        margin-bottom: 18px;
+      }
+
+      .index {
+        border: 2px solid var(--ink);
+        width: 70px;
+        height: 70px;
+        display: grid;
+        place-items: center;
+        font-size: 28px;
+        font-weight: 800;
+        background: var(--panel);
+      }
+
+      h2 {
+        font-size: clamp(28px, 3.8vw, 52px);
+        line-height: 1;
+        margin: 0 0 10px;
+        letter-spacing: 0;
+      }
+
+      .summary {
+        color: var(--muted);
+        line-height: 1.65;
+        margin: 0;
+        font-size: 17px;
+      }
+
+      .flow-layout {
+        display: grid;
+        grid-template-columns: minmax(680px, 1.35fr) minmax(340px, 0.65fr);
+        gap: 20px;
+        align-items: start;
+      }
+
+      .diagram-block,
+      .notes,
+      .source-list {
+        border: 1px solid var(--line);
+        background: rgba(255, 250, 241, 0.82);
+      }
+
+      .diagram-toolbar {
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        align-items: center;
+        min-height: 46px;
+        border-bottom: 1px solid var(--line);
+        padding: 10px 12px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      button {
+        border: 1px solid var(--ink);
+        background: var(--panel);
+        color: var(--ink);
+        padding: 7px 10px;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      button:hover {
+        background: var(--soft);
+      }
+
+      .diagram-canvas {
+        overflow: auto;
+        padding: 20px;
+        min-height: 360px;
+      }
+
+      .mermaid {
+        min-width: 1040px;
+      }
+
+      .diagram-block.is-fullscreen {
+        position: fixed;
+        inset: 18px;
+        z-index: 20;
+        background: var(--paper);
+        box-shadow: 0 0 0 9999px rgba(23, 23, 23, 0.62);
+        display: grid;
+        grid-template-rows: auto 1fr;
+      }
+
+      .diagram-block.is-fullscreen .diagram-canvas {
+        min-height: 0;
+      }
+
+      .notes {
+        padding: 18px;
+      }
+
+      .notes h3 {
+        margin: 0 0 14px;
+        font-size: 18px;
+      }
+
+      .step {
+        border-top: 1px solid var(--line);
+        padding: 13px 0;
+      }
+
+      .step:first-of-type {
+        border-top: 0;
+        padding-top: 0;
+      }
+
+      .step b {
+        display: block;
+        color: var(--accent-2);
+        margin-bottom: 6px;
+      }
+
+      .step p {
+        margin: 0;
+        line-height: 1.58;
+        color: var(--muted);
+      }
+
+      .code-row {
+        margin-top: 8px;
+        color: var(--code);
+        font-size: 12px;
+        line-height: 1.5;
+        background: #efe3d1;
+        padding: 8px 10px;
+        overflow-x: auto;
+      }
+
+      .source-list {
+        margin-top: 20px;
+        padding: 16px 18px;
+      }
+
+      .source-list h3 {
+        margin: 0 0 12px;
+      }
+
+      .source-list ul {
+        margin: 0;
+        padding-left: 20px;
+        line-height: 1.8;
+      }
+
+      .source-list code {
+        background: #efe3d1;
+        padding: 2px 5px;
+      }
+
+      @media (max-width: 980px) {
+        .page {
+          width: min(100vw - 28px, 1500px);
+          padding-top: 22px;
+        }
+
+        header,
+        .flow-layout {
+          grid-template-columns: 1fr;
+        }
+
+        .section-head {
+          grid-template-columns: 1fr;
+        }
+
+        .index {
+          width: 56px;
+          height: 56px;
+          font-size: 22px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header>
+        <div>
+          <h1>app-server<br />真实链路图</h1>
+        </div>
+        <div>
+          <p class="deck">
+            这个页面用一个真实请求跑通 Codex app-server：从启动、initialize、thread/start、
+            turn/start，到 core 事件流回客户端。每张图右侧写当前节点发生了什么、携带什么参数、
+            对应代码入口在哪里。
+          </p>
+          <div class="scenario">
+            <strong>场景</strong>
+            <pre>Client: VS Code / Desktop / local controller
+Transport: stdio://
+cwd: /Users/enxiangqiu/Documents/New project 2
+Request: "给我讲讲 app-server"</pre>
+          </div>
+        </div>
+      </header>
+
+      <div class="map">
+        <section>
+          <div class="section-head">
+            <div class="index">01</div>
+            <div>
+              <h2>启动 app-server</h2>
+              <p class="summary">
+                CLI 只负责把启动参数传进来。真正的 runtime 在
+                <code>run_main_with_transport_options</code> 里构造：环境、配置、认证、数据库、transport
+                和消息处理器。
+              </p>
+            </div>
+          </div>
+          <div class="flow-layout">
+            <div class="diagram-block">
+              <div class="diagram-toolbar">
+                <span>启动阶段：从 CLI 到 MessageProcessor</span>
+                <button type="button" data-fullscreen>放大</button>
+              </div>
+              <div class="diagram-canvas">
+                <pre class="mermaid">
+flowchart TD
+  A["cli/main.rs<br/>Subcommand::AppServer"] --> B["run_main_with_transport(...)<br/>传入启动参数"]
+  B --> C["run_main_with_transport_options(...)<br/>构造 app-server runtime"]
+  C --> D["EnvironmentManager::new<br/>local / remote execution environments"]
+  C --> E["channels<br/>transport_event / outgoing / outbound_control"]
+  C --> F["ConfigManager::new<br/>config.toml + CLI override + request override"]
+  F --> G["load_latest_config<br/>得到基础 Config"]
+  C --> H["AuthManager + state db<br/>认证、SQLite、tracing、analytics"]
+  C --> I{"transport"}
+  I --> J["Stdio<br/>stdin/stdout JSONL"]
+  I --> K["UnixSocket<br/>本机控制 socket"]
+  I --> L["WebSocket<br/>实验性 ws://IP:PORT"]
+  I --> M["Off<br/>不开放本地入口"]
+  C --> N["outbound router task<br/>把消息发给正确连接"]
+  C --> O["processor task<br/>创建 MessageProcessor"]
+  O --> P["MessageProcessor::new<br/>内部创建 ThreadManager"]
+                </pre>
+              </div>
+            </div>
+            <aside class="notes">
+              <h3>这里发生了什么</h3>
+              <div class="step">
+                <b>入口参数</b>
+                <p>
+                  <code>arg0_paths</code> 给 core 找当前 codex 可执行文件和 sandbox helper；
+                  <code>cli_config_overrides</code> 是 <code>-c key=value</code>；
+                  <code>transport</code> 决定连接方式。
+                </p>
+              </div>
+              <div class="step">
+                <b>EnvironmentManager</b>
+                <p>后续 shell、文件系统和 sandbox 都需要知道在哪个 environment 里执行。</p>
+                <div class="code-row">EnvironmentManagerArgs::new(ExecServerRuntimePaths::from_optional_paths(...))</div>
+              </div>
+              <div class="step">
+                <b>ConfigManager</b>
+                <p>统一把全局 config、项目 config、CLI override、request override 合成最终 <code>Config</code>。</p>
+              </div>
+              <div class="step">
+                <b>MessageProcessor</b>
+                <p>连接和请求的总处理器。它会创建 <code>ThreadManager</code>，后面 thread/turn 都从这里进 core。</p>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section>
+          <div class="section-head">
+            <div class="index">02</div>
+            <div>
+              <h2>initialize 握手</h2>
+              <p class="summary">
+                每个连接必须先 initialize。app-server 在连接级别记录客户端身份、实验 API 开关、
+                通知过滤偏好，然后才允许后续 request 进入业务分发。
+              </p>
+            </div>
+          </div>
+          <div class="flow-layout">
+            <div class="diagram-block">
+              <div class="diagram-toolbar">
+                <span>initialize：连接身份和能力边界</span>
+                <button type="button" data-fullscreen>放大</button>
+              </div>
+              <div class="diagram-canvas">
+                <pre class="mermaid">
+flowchart TD
+  A["Client sends JSON-RPC<br/>method: initialize<br/>id: 1"] --> B["TransportEvent::IncomingMessage"]
+  B --> C["MessageProcessor::process_request"]
+  C --> D["serde_json -> ClientRequest::Initialize"]
+  D --> E["session.initialize(...)<br/>OnceLock 记录连接状态"]
+  E --> F["set_default_originator<br/>clientInfo.name -> upstream metadata"]
+  E --> G["USER_AGENT_SUFFIX<br/>client name + version"]
+  E --> H["analytics track_initialize"]
+  E --> I["InitializeResponse<br/>userAgent / codexHome / platform"]
+  I --> J["OutgoingMessageSender::send_response"]
+  J --> K["Client receives response"]
+                </pre>
+              </div>
+            </div>
+            <aside class="notes">
+              <h3>真实参数长这样</h3>
+              <div class="step">
+                <b>request</b>
+                <p><code>clientInfo.name</code> 标识调用方，<code>experimentalApi</code> 决定能否调用实验 API。</p>
+                <div class="code-row">{"id":1,"method":"initialize","params":{"clientInfo":{"name":"codex_vscode","version":"0.1.0"},"capabilities":{"experimentalApi":true}}}</div>
+              </div>
+              <div class="step">
+                <b>连接状态</b>
+                <p>状态存在 <code>ConnectionSessionState</code>，未初始化连接调用业务 API 会返回 <code>Not initialized</code>。</p>
+              </div>
+              <div class="step">
+                <b>通知过滤</b>
+                <p><code>optOutNotificationMethods</code> 让客户端拒收某些 notification，避免旧客户端处理不了新事件。</p>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section>
+          <div class="section-head">
+            <div class="index">03</div>
+            <div>
+              <h2>thread/start 创建 core session</h2>
+              <p class="summary">
+                <code>thread/start</code> 把外部 API 参数变成 <code>ConfigOverrides</code>，
+                加载最终 <code>Config</code>，再调用 <code>ThreadManager</code> 创建 core thread。
+              </p>
+            </div>
+          </div>
+          <div class="flow-layout">
+            <div class="diagram-block">
+              <div class="diagram-toolbar">
+                <span>thread/start：从 API 参数到 core thread</span>
+                <button type="button" data-fullscreen>放大</button>
+              </div>
+              <div class="diagram-canvas">
+                <pre class="mermaid">
+flowchart TD
+  A["ClientRequest::ThreadStart<br/>id: 2"] --> B["CodexMessageProcessor::thread_start"]
+  B --> C["解构 ThreadStartParams<br/>model / cwd / sandbox / permissions / instructions"]
+  C --> D["build_thread_config_overrides<br/>params -> ConfigOverrides"]
+  D --> E["thread_start_task<br/>后台任务中执行"]
+  E --> F["ConfigManager::load_with_overrides<br/>得到最终 Config"]
+  F --> G["validate environments<br/>validate dynamic tools"]
+  G --> H["ThreadManager::start_thread_with_options"]
+  H --> I["core Codex::spawn"]
+  I --> J["Session::new<br/>加载 model / skills / plugins / AGENTS.md / exec policy"]
+  J --> K["spawn submission_loop<br/>等待 core Op"]
+  H --> L["NewThread<br/>thread_id + CodexThread + session_configured"]
+  L --> M["ensure_conversation_listener_task<br/>当前连接订阅 thread events"]
+  M --> N["ThreadStartResponse"]
+  M --> O["ThreadStarted notification"]
+                </pre>
+              </div>
+            </div>
+            <aside class="notes">
+              <h3>这个请求携带什么</h3>
+              <div class="step">
+                <b>request</b>
+                <p>本例只给 <code>cwd</code> 和 <code>model</code>，其他都走配置默认值。</p>
+                <div class="code-row">{"id":2,"method":"thread/start","params":{"cwd":"/Users/enxiangqiu/Documents/New project 2","model":"gpt-5.2-codex"}}</div>
+              </div>
+              <div class="step">
+                <b>ConfigOverrides</b>
+                <p>覆盖项不会直接跑 agent，而是先参与构造最终 <code>Config</code>。</p>
+                <div class="code-row">model, model_provider, cwd, approval_policy, sandbox_mode, permissions, base_instructions...</div>
+              </div>
+              <div class="step">
+                <b>ThreadManager</b>
+                <p>它管理 core thread 生命周期：start、resume、fork、get、shutdown。</p>
+              </div>
+              <div class="step">
+                <b>listener</b>
+                <p>thread 创建后马上 attach listener，否则客户端收不到后续模型和工具事件。</p>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section>
+          <div class="section-head">
+            <div class="index">04</div>
+            <div>
+              <h2>turn/start 提交用户输入</h2>
+              <p class="summary">
+                <code>turn/start</code> 不直接等模型回答。它把用户输入转换成 core input，
+                构造 core <code>Op</code>，塞进 core 的 submission queue，然后立刻返回
+                <code>InProgress</code>。
+              </p>
+            </div>
+          </div>
+          <div class="flow-layout">
+            <div class="diagram-block">
+              <div class="diagram-toolbar">
+                <span>turn/start：外部 input 到 core Op</span>
+                <button type="button" data-fullscreen>放大</button>
+              </div>
+              <div class="diagram-canvas">
+                <pre class="mermaid">
+flowchart TD
+  A["ClientRequest::TurnStart<br/>id: 3"] --> B["CodexMessageProcessor::turn_start"]
+  B --> C["validate_v2_input_limit<br/>输入大小校验"]
+  C --> D["load_thread(threadId)<br/>找到 CodexThread"]
+  D --> E["V2UserInput::into_core<br/>wire input -> core input"]
+  E --> F["build TurnContext<br/>thread defaults + turn overrides"]
+  F --> G{"是否有 turn overrides"}
+  G -->|yes| H["validate_turn_context_overrides<br/>让 core 先验证配置变更"]
+  H --> I["Op::UserInputWithTurnContext<br/>items + TurnContext updates"]
+  G -->|no| J["Op::UserInput<br/>items + inherited context"]
+  I --> K["submit_core_op"]
+  J --> K
+  K --> L["CodexThread::submit_with_trace"]
+  L --> M["Codex::submit_with_trace<br/>生成 submission id / turn id"]
+  M --> N["tx_sub.send(Submission)<br/>Submission 包含 Op"]
+  N --> O["TurnStartResponse<br/>status: InProgress"]
+  N --> P["core submission_loop<br/>handlers -> new_turn_with_sub_id -> run_turn"]
+                </pre>
+              </div>
+            </div>
+            <aside class="notes">
+              <h3>真实 input</h3>
+              <div class="step">
+                <b>request</b>
+                <p>外部 API 用 <code>codex_app_server_protocol::UserInput</code> 表示输入。</p>
+                <div class="code-row">{"id":3,"method":"turn/start","params":{"threadId":"019a-example","input":[{"type":"text","text":"给我讲讲 app-server","textElements":[]}]}}</div>
+              </div>
+              <div class="step">
+                <b>into_core</b>
+                <p>把 API wire 类型转成 core 内部类型。现在字段很像，但这层隔离让外部 API 和 core 可以分别演进。</p>
+              </div>
+              <div class="step">
+                <b>validate overrides</b>
+                <p>如果这次 turn 临时换 cwd、model、permissions，先问 core 这些更新是否允许。</p>
+              </div>
+              <div class="step">
+                <b>submit_with_trace</b>
+                <p>生成 turn id，附带 trace，把 <code>Op</code> 发进 core queue。成功只代表排队成功。</p>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section>
+          <div class="section-head">
+            <div class="index">05</div>
+            <div>
+              <h2>事件流返回客户端</h2>
+              <p class="summary">
+                core 真正执行 turn 后会不断发 <code>EventMsg</code>。
+                app-server listener 读取这些事件，更新 thread 状态，再翻译成 JSON-RPC notification 推给客户端。
+              </p>
+            </div>
+          </div>
+          <div class="flow-layout">
+            <div class="diagram-block">
+              <div class="diagram-toolbar">
+                <span>core EventMsg -> app-server notification</span>
+                <button type="button" data-fullscreen>放大</button>
+              </div>
+              <div class="diagram-canvas">
+                <pre class="mermaid">
+flowchart TD
+  A["core run_turn<br/>模型调用、工具调用、命令执行"] --> B["Session sends EventMsg<br/>TurnStarted / AgentDelta / Tool / Exec / TurnComplete"]
+  B --> C["CodexThread::next_event"]
+  C --> D["listener task<br/>ensure_listener_task_running_task"]
+  D --> E["ThreadState::track_current_turn_event<br/>更新 active turn 摘要"]
+  D --> F["ThreadStateManager::subscribed_connection_ids<br/>找到订阅连接"]
+  E --> G["apply_bespoke_event_handling<br/>EventMsg -> ServerNotification"]
+  F --> G
+  G --> H["ThreadScopedOutgoingMessageSender"]
+  H --> I["OutgoingMessageSender<br/>ToConnection / Broadcast"]
+  I --> J["Client UI<br/>流式文本、工具状态、完成事件"]
+                </pre>
+              </div>
+            </div>
+            <aside class="notes">
+              <h3>为什么需要 listener</h3>
+              <div class="step">
+                <b>turn/start response 很短</b>
+                <p>它只返回 <code>TurnStartResponse { status: InProgress }</code>，不包含最终答案。</p>
+              </div>
+              <div class="step">
+                <b>模型输出是异步流</b>
+                <p>文本 delta、reasoning、工具调用、shell 输出、文件变更、错误和完成都通过 notification 发回。</p>
+              </div>
+              <div class="step">
+                <b>状态管理</b>
+                <p><code>ThreadStateManager</code> 维护 connection 和 thread 的订阅关系；<code>ThreadState</code> 维护当前 turn 摘要。</p>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section>
+          <div class="section-head">
+            <div class="index">06</div>
+            <div>
+              <h2>一张总图</h2>
+              <p class="summary">
+                如果只记一个心智模型，就是：initialize 建连接身份，thread/start 建 core session，
+                turn/start 提交 core Op，listener 把 core event 推回客户端。
+              </p>
+            </div>
+          </div>
+          <div class="diagram-block">
+            <div class="diagram-toolbar">
+              <span>完整真实链路</span>
+              <button type="button" data-fullscreen>放大</button>
+            </div>
+            <div class="diagram-canvas">
+              <pre class="mermaid">
+flowchart LR
+  A["Client<br/>initialize"] --> B["MessageProcessor<br/>连接状态 + capability gate"]
+  B --> C["thread/start"]
+  C --> D["ConfigOverrides<br/>request params -> config override"]
+  D --> E["ConfigManager<br/>load final Config"]
+  E --> F["ThreadManager<br/>start_thread_with_options"]
+  F --> G["Codex::spawn<br/>Session + submission_loop"]
+  G --> H["listener attached<br/>subscribe thread events"]
+  H --> I["Client receives threadId"]
+  I --> J["turn/start<br/>input text + optional overrides"]
+  J --> K["into_core<br/>wire input -> core input"]
+  K --> L["build TurnContext<br/>thread config + turn overrides"]
+  L --> M["build Op<br/>UserInput or UserInputWithTurnContext"]
+  M --> N["submit_with_trace<br/>tx_sub queue"]
+  N --> O["core run_turn"]
+  O --> P["EventMsg stream"]
+  P --> Q["listener translate"]
+  Q --> R["ServerNotification"]
+  R --> S["Client UI updates"]
+              </pre>
+            </div>
+          </div>
+        </section>
+
+        <div class="source-list">
+          <h3>代码入口</h3>
+          <ul>
+            <li><code>codex-rs/app-server/src/lib.rs</code>：<code>run_main_with_transport_options</code></li>
+            <li><code>codex-rs/app-server/src/transport/mod.rs</code>：<code>AppServerTransport</code></li>
+            <li><code>codex-rs/app-server/src/message_processor.rs</code>：<code>initialize</code>、request gate</li>
+            <li><code>codex-rs/app-server/src/codex_message_processor.rs</code>：<code>thread_start</code>、<code>turn_start</code>、listener</li>
+            <li><code>codex-rs/app-server/src/thread_state.rs</code>：connection 和 thread 的订阅状态</li>
+            <li><code>codex-rs/core/src/thread_manager.rs</code>：core thread 生命周期</li>
+            <li><code>codex-rs/core/src/session/mod.rs</code>：<code>Codex::spawn</code>、<code>submit_with_trace</code></li>
+            <li><code>codex-rs/core/src/session/turn.rs</code>：<code>run_turn</code></li>
+          </ul>
+        </div>
+      </div>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({
+        startOnLoad: true,
+        securityLevel: "loose",
+        theme: "base",
+        themeVariables: {
+          fontFamily:
+            'Georgia, "Times New Roman", "Noto Serif SC", "Songti SC", serif',
+          primaryColor: "#fffaf1",
+          primaryTextColor: "#171717",
+          primaryBorderColor: "#171717",
+          lineColor: "#6b6257",
+          secondaryColor: "#e8dccb",
+          tertiaryColor: "#f5efe4",
+          noteBkgColor: "#fffaf1",
+          noteTextColor: "#171717",
+          edgeLabelBackground: "#f5efe4",
+        },
+        flowchart: {
+          curve: "basis",
+          htmlLabels: true,
+          nodeSpacing: 46,
+          rankSpacing: 58,
+        },
+      });
+
+      document.querySelectorAll("[data-fullscreen]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const block = button.closest(".diagram-block");
+          const active = block.classList.toggle("is-fullscreen");
+          button.textContent = active ? "关闭" : "放大";
+        });
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") {
+          return;
+        }
+        document.querySelectorAll(".diagram-block.is-fullscreen").forEach((block) => {
+          block.classList.remove("is-fullscreen");
+          const button = block.querySelector("[data-fullscreen]");
+          if (button) {
+            button.textContent = "放大";
+          }
+        });
+      });
+    </script>
+  </body>
+</html>

@@ -5,12 +5,13 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use exagent::api::build_router;
 use exagent::app_server::protocol::{
-    AgentRunResponse, BoundaryOp, BoundaryOpResponse, CollectParams, CollectResponse,
-    EventsReplayParams, EventsReplayResponse, ForkParams, IgnoredOverrideField, InspectParams,
-    InspectResponse, RunParams, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadSpawnChildParams, ThreadSpawnChildResponse, ThreadStartParams,
-    ThreadStartResponse, ThreadStatus, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse,
+    AgentRunResponse, BoundaryCapability, BoundaryOp, BoundaryOpResponse, CollectParams,
+    CollectResponse, EventsReplayParams, EventsReplayResponse, ForkParams, IgnoredOverrideField,
+    InitializeResponse, InspectParams, InspectResponse, RunParams, ThreadReadParams,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadSpawnChildParams,
+    ThreadSpawnChildResponse, ThreadStartParams, ThreadStartResponse, ThreadStatus,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    BOUNDARY_PROTOCOL_VERSION,
 };
 use exagent::app_server::AppServerBoundary;
 use exagent::app_server::AppServerError;
@@ -149,8 +150,25 @@ impl AppServerBoundary for StubRunner {
         Ok(self.thread_spawn_child_response.clone())
     }
 
-    async fn submit_boundary_op(&self, _op: BoundaryOp) -> anyhow::Result<BoundaryOpResponse> {
-        panic!("submit_boundary_op should not be called in api adapter tests");
+    async fn submit_boundary_op(&self, op: BoundaryOp) -> anyhow::Result<BoundaryOpResponse> {
+        self.calls.lock().unwrap().push("submit_boundary_op".into());
+
+        match op {
+            BoundaryOp::Initialize(_) => Ok(BoundaryOpResponse::Initialized(InitializeResponse {
+                protocol_version: BOUNDARY_PROTOCOL_VERSION.to_string(),
+                supported_ops: vec![
+                    BoundaryCapability::Initialize,
+                    BoundaryCapability::ThreadStart,
+                    BoundaryCapability::ThreadResume,
+                    BoundaryCapability::ThreadSpawnChild,
+                    BoundaryCapability::ThreadRead,
+                    BoundaryCapability::TurnStart,
+                    BoundaryCapability::TurnInterrupt,
+                    BoundaryCapability::EventsReplay,
+                ],
+            })),
+            _ => panic!("unexpected submit_boundary_op call in api adapter tests"),
+        }
     }
 
     async fn events_replay(
@@ -554,19 +572,7 @@ async fn initialize_route_returns_protocol_capabilities() {
                 .method("POST")
                 .uri("/initialize")
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "client_info": {
-                            "name": "exagent-test-client",
-                            "version": "0.1.0"
-                        },
-                        "capabilities": {
-                            "sse": true,
-                            "interrupt": true
-                        }
-                    })
-                    .to_string(),
-                ))
+                .body(Body::from(json!({}).to_string()))
                 .unwrap(),
         )
         .await
@@ -577,33 +583,25 @@ async fn initialize_route_returns_protocol_capabilities() {
     assert_eq!(
         serde_json::from_slice::<Value>(&body).unwrap(),
         json!({
-            "protocol_version": "runtime_control/v1",
-            "server_capabilities": {
-                "sse": false,
-                "interrupt": false,
-                "compact": false,
-                "thread_lifecycle": true
-            },
-            "supported_event_types": [
-                "assistant_turn",
-                "tool_result",
-                "session_spawned",
-                "exec_output",
-                "approval_requested",
-                "approval_decision",
-                "compaction_written",
-                "structured_result_recorded",
-                "runtime_error"
+            "type": "initialized",
+            "protocol_version": BOUNDARY_PROTOCOL_VERSION,
+            "supported_ops": [
+                "initialize",
+                "thread_start",
+                "thread_resume",
+                "thread_spawn_child",
+                "thread_read",
+                "turn_start",
+                "turn_interrupt",
+                "events_replay"
             ]
         })
     );
 }
 
 #[tokio::test]
-async fn threads_route_starts_managed_thread() {
+async fn runtime_threads_route_is_not_public_boundary_surface() {
     let dir = tempdir().unwrap();
-    let nested = dir.path().join("nested");
-    std::fs::create_dir(&nested).unwrap();
     let app = build_router(Arc::new(StubRunner {
         response: AgentRunResponse {
             text: Some("unused".into()),
@@ -632,144 +630,6 @@ async fn threads_route_starts_managed_thread() {
                 .body(Body::from(
                     json!({
                         "workspace_root": dir.path(),
-                        "cwd": "nested",
-                        "model": "thread-model",
-                        "agent_role": "implementation",
-                        "instructions": ["use runtime queue"]
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let value = serde_json::from_slice::<Value>(&body).unwrap();
-    assert!(value["thread"]["session_id"]
-        .as_str()
-        .unwrap()
-        .starts_with("session-"));
-    assert_eq!(value["thread"]["status"], "idle");
-    assert_eq!(value["thread"]["context"]["model"], "thread-model");
-    assert_eq!(value["thread"]["context"]["agent_role"], "implementation");
-    assert_eq!(
-        value["thread"]["context"]["instructions"][0],
-        "use runtime queue"
-    );
-    assert_eq!(
-        value["thread"]["context"]["cwd"],
-        std::fs::canonicalize(nested).unwrap().display().to_string()
-    );
-}
-
-#[tokio::test]
-async fn thread_turns_route_queues_turn_for_managed_thread() {
-    let dir = tempdir().unwrap();
-    let app = build_router(Arc::new(StubRunner {
-        response: AgentRunResponse {
-            text: Some("unused".into()),
-            tool_calls: vec![],
-            session_id: SessionId::new("session_123"),
-            snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
-            events_path: ".exagent/sessions/session_123/events.jsonl".into(),
-        },
-        inspect_response: sample_inspect_response(),
-        collect_response: sample_collect_response(),
-        thread_start_response: sample_thread_start_response(),
-        thread_read_response: sample_thread_read_response(),
-        thread_resume_response: sample_thread_resume_response(),
-        turn_start_response: sample_turn_start_response(),
-        thread_spawn_child_response: sample_thread_spawn_child_response(),
-        events_replay_response: sample_events_replay_response(),
-        calls: Mutex::new(vec![]),
-    }));
-
-    let create_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/threads")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "workspace_root": dir.path()
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let create_body = to_bytes(create_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let session_id = serde_json::from_slice::<Value>(&create_body).unwrap()["thread"]["session_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let turn_response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/threads/{session_id}/turns"))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "input": [{"content": "continue the work"}]
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(turn_response.status(), StatusCode::OK);
-    let turn_body = to_bytes(turn_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value = serde_json::from_slice::<Value>(&turn_body).unwrap();
-    assert!(value["turn"]["turn_id"]
-        .as_str()
-        .unwrap()
-        .starts_with("turn_"));
-    assert_eq!(value["turn"]["status"], "queued");
-}
-
-#[tokio::test]
-async fn thread_turns_route_rejects_unknown_thread_id() {
-    let app = build_router(Arc::new(StubRunner {
-        response: AgentRunResponse {
-            text: Some("unused".into()),
-            tool_calls: vec![],
-            session_id: SessionId::new("session_123"),
-            snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
-            events_path: ".exagent/sessions/session_123/events.jsonl".into(),
-        },
-        inspect_response: sample_inspect_response(),
-        collect_response: sample_collect_response(),
-        thread_start_response: sample_thread_start_response(),
-        thread_read_response: sample_thread_read_response(),
-        thread_resume_response: sample_thread_resume_response(),
-        turn_start_response: sample_turn_start_response(),
-        thread_spawn_child_response: sample_thread_spawn_child_response(),
-        events_replay_response: sample_events_replay_response(),
-        calls: Mutex::new(vec![]),
-    }));
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/threads/missing_session/turns")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "input": [{"content": "continue the work"}]
                     })
                     .to_string(),
                 ))
@@ -779,11 +639,6 @@ async fn thread_turns_route_rejects_unknown_thread_id() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    assert!(serde_json::from_slice::<Value>(&body).unwrap()["error"]
-        .as_str()
-        .unwrap()
-        .contains("thread not found"));
 }
 
 #[tokio::test]

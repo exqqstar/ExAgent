@@ -142,6 +142,7 @@ collect -> collect
 
 HTTP code in `src/api.rs` is a transport adapter. The current app-server boundary V1 routes are:
 
+- `POST /initialize`
 - `POST /thread/start`
 - `POST /thread/read`
 - `POST /thread/resume`
@@ -151,9 +152,13 @@ HTTP code in `src/api.rs` is a transport adapter. The current app-server boundar
 - `POST /thread/spawn_child`
 - `POST /events/replay`
 
-`POST /initialize` belongs to the runtime-control HTTP surface. Boundary
-initialization is available by submitting `BoundaryOp::Initialize` to
-`POST /thread/op`.
+`POST /initialize` maps to `BoundaryOp::Initialize` and returns the tagged
+boundary response shape. `POST /thread/op` is still available as the generic
+protocol dispatch route for clients that submit tagged `BoundaryOp` payloads.
+
+The older runtime-control routes `POST /threads` and
+`POST /threads/{session_id}/turns` are intentionally not exposed as HTTP
+routes. Thread and turn lifecycle should enter through the app-server boundary.
 
 Compatibility aliases are still present:
 
@@ -217,8 +222,8 @@ cargo test
 
 Useful follow-ups that are intentionally outside V1:
 
-- client capabilities for a dedicated app-server boundary initialize route, if
-  V2 needs one separate from runtime-control initialize.
+- client capability negotiation in `initialize`, if GUI or streaming clients
+  need to advertise supported features.
 - richer tracing spans for `thread_start`, `turn_start`, `turn_interrupt`, and
   `thread_spawn_child`.
 - `events_subscribe` streaming.

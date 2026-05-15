@@ -261,6 +261,7 @@ The CLI may combine multiple protocol calls for convenience, but it should not b
 HTTP should be a transport adapter. The current V1 app-server boundary route names mirror the protocol names:
 
 ```text
+POST /initialize
 POST /thread/start
 POST /thread/read
 POST /thread/resume
@@ -271,7 +272,15 @@ POST /thread/spawn_child
 POST /events/replay
 ```
 
-`POST /initialize` is currently owned by the runtime-control HTTP surface. App-server boundary initialization is still available as `BoundaryOp::Initialize` through `POST /thread/op`.
+`POST /initialize` is the dedicated HTTP adapter for `BoundaryOp::Initialize`.
+`POST /thread/op` remains the generic protocol dispatch route for clients that
+want to submit tagged `BoundaryOp` payloads directly.
+
+The older runtime-control routes `POST /threads` and
+`POST /threads/{session_id}/turns` are not part of the public AppServer
+Runtime Boundary V1 surface. Runtime-control code may remain internally
+testable, but it must not be a competing HTTP entrypoint for thread and turn
+lifecycle.
 
 The legacy aliases `POST /thread_spawn_child` and `POST /events_replay` remain as compatibility routes, but new clients should use the slash form.
 

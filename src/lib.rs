@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod api;
+pub mod app_server;
 pub mod cli;
 pub mod config;
 pub mod events;

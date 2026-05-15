@@ -141,6 +141,22 @@ impl SessionSnapshot {
         }
     }
 
+    pub fn new_thread(session_id: SessionId, workspace_root: PathBuf, cwd: PathBuf) -> Self {
+        Self {
+            root_session_id: session_id.clone(),
+            session_id,
+            parent_session_id: None,
+            spawned_by_turn_id: None,
+            agent_role: AgentRole::Primary,
+            workspace_root,
+            cwd,
+            conversation: vec![],
+            open_exec_sessions: vec![],
+            latest_compaction: None,
+            pending_approvals: vec![],
+        }
+    }
+
     pub fn fork_child(
         &self,
         agent_role: AgentRole,

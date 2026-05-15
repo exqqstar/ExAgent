@@ -3,8 +3,16 @@ use std::sync::Mutex;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use exagent::api::{build_router, AgentRunResponse, AgentRunner, CollectResponse, InspectResponse};
+use exagent::api::build_router;
+use exagent::app_server::protocol::{
+    AgentRunResponse, CollectParams, CollectResponse, EventsReplayParams, EventsReplayResponse,
+    ForkParams, InspectParams, InspectResponse, RunParams, ThreadSpawnChildParams,
+    ThreadSpawnChildResponse, ThreadStartParams, ThreadStartResponse, TurnStartParams,
+    TurnStartResponse,
+};
+use exagent::app_server::AppServerBoundary;
 use exagent::cli::{parse_cli_command, CliCommand};
+use exagent::events::{RuntimeEvent, RuntimeEventKind};
 use exagent::orchestration::{
     ChildLifecycleStatus, ChildSessionSummary, CollectedChildSession, CollectedOutput,
     CollectedOutputKind,
@@ -13,7 +21,7 @@ use exagent::result_contract::{
     StructuredResultPayload, StructuredSessionResult, STRUCTURED_RESULT_SCHEMA_VERSION,
 };
 use exagent::session::AgentRole;
-use exagent::types::{SessionId, ToolCall, TurnId};
+use exagent::types::{EventId, SessionId, ToolCall, TurnId};
 use serde_json::{json, Value};
 use tempfile::tempdir;
 use tower::util::ServiceExt;
@@ -22,67 +30,102 @@ struct StubRunner {
     response: AgentRunResponse,
     inspect_response: InspectResponse,
     collect_response: CollectResponse,
+    thread_start_response: ThreadStartResponse,
+    turn_start_response: TurnStartResponse,
+    thread_spawn_child_response: ThreadSpawnChildResponse,
+    events_replay_response: EventsReplayResponse,
     calls: Mutex<Vec<String>>,
 }
 
 #[async_trait::async_trait]
-impl AgentRunner for StubRunner {
-    async fn run(
-        &self,
-        prompt: &str,
-        workspace_root: Option<&str>,
-        cwd: Option<&str>,
-        session_id: Option<&SessionId>,
-    ) -> anyhow::Result<AgentRunResponse> {
+impl AppServerBoundary for StubRunner {
+    async fn run(&self, params: RunParams) -> anyhow::Result<AgentRunResponse> {
         self.calls.lock().unwrap().push("run".into());
-        assert_eq!(prompt, "continue phase2");
-        assert_eq!(workspace_root, Some("."));
-        assert_eq!(cwd, Some("."));
-        assert_eq!(session_id.map(SessionId::as_str), Some("session_123"));
+        assert_eq!(params.prompt, "continue phase2");
+        assert_eq!(params.workspace_root.as_deref(), Some("."));
+        assert_eq!(params.cwd.as_deref(), Some("."));
+        assert_eq!(
+            params.session_id.as_ref().map(SessionId::as_str),
+            Some("session_123")
+        );
 
         Ok(self.response.clone())
     }
 
-    async fn fork(
-        &self,
-        parent_session_id: &SessionId,
-        agent_role: AgentRole,
-        prompt: &str,
-        workspace_root: Option<&str>,
-        spawned_by_turn_id: Option<&TurnId>,
-    ) -> anyhow::Result<AgentRunResponse> {
+    async fn fork(&self, params: ForkParams) -> anyhow::Result<AgentRunResponse> {
         self.calls.lock().unwrap().push("fork".into());
-        assert_eq!(parent_session_id.as_str(), "session_123");
-        assert_eq!(agent_role, AgentRole::Spec);
-        assert_eq!(prompt, "draft goals");
-        assert_eq!(workspace_root, Some("."));
-        assert_eq!(spawned_by_turn_id.map(TurnId::as_str), Some("turn_1"));
+        assert_eq!(params.parent_session_id.as_str(), "session_123");
+        assert_eq!(params.agent_role, AgentRole::Spec);
+        assert_eq!(params.prompt, "draft goals");
+        assert_eq!(params.workspace_root.as_deref(), Some("."));
+        assert_eq!(
+            params.spawned_by_turn_id.as_ref().map(TurnId::as_str),
+            Some("turn_1")
+        );
 
         Ok(self.response.clone())
     }
 
-    async fn inspect(
-        &self,
-        parent_session_id: &SessionId,
-        workspace_root: Option<&str>,
-    ) -> anyhow::Result<InspectResponse> {
+    async fn inspect(&self, params: InspectParams) -> anyhow::Result<InspectResponse> {
         self.calls.lock().unwrap().push("inspect".into());
-        assert_eq!(parent_session_id.as_str(), "session_parent");
-        assert_eq!(workspace_root, Some("."));
+        assert_eq!(params.parent_session_id.as_str(), "session_parent");
+        assert_eq!(params.workspace_root.as_deref(), Some("."));
 
         Ok(self.inspect_response.clone())
     }
 
-    async fn collect(
-        &self,
-        session_id: &SessionId,
-        workspace_root: Option<&str>,
-    ) -> anyhow::Result<CollectResponse> {
+    async fn collect(&self, params: CollectParams) -> anyhow::Result<CollectResponse> {
         self.calls.lock().unwrap().push("collect".into());
-        assert_eq!(session_id.as_str(), "session_child");
-        assert_eq!(workspace_root, Some("."));
+        assert_eq!(params.session_id.as_str(), "session_child");
+        assert_eq!(params.workspace_root.as_deref(), Some("."));
 
         Ok(self.collect_response.clone())
+    }
+
+    async fn thread_start(&self, params: ThreadStartParams) -> anyhow::Result<ThreadStartResponse> {
+        self.calls.lock().unwrap().push("thread_start".into());
+        assert_eq!(params.workspace_root.as_deref(), Some("."));
+        assert_eq!(params.cwd.as_deref(), Some("nested"));
+
+        Ok(self.thread_start_response.clone())
+    }
+
+    async fn turn_start(&self, params: TurnStartParams) -> anyhow::Result<TurnStartResponse> {
+        self.calls.lock().unwrap().push("turn_start".into());
+        assert_eq!(params.thread_id.as_str(), "session_123");
+        assert_eq!(params.prompt, "continue phase2");
+        assert_eq!(params.workspace_root.as_deref(), Some("."));
+
+        Ok(self.turn_start_response.clone())
+    }
+
+    async fn thread_spawn_child(
+        &self,
+        params: ThreadSpawnChildParams,
+    ) -> anyhow::Result<ThreadSpawnChildResponse> {
+        self.calls.lock().unwrap().push("thread_spawn_child".into());
+        assert_eq!(params.parent_thread_id.as_str(), "session_123");
+        assert_eq!(params.agent_role, AgentRole::Spec);
+        assert_eq!(params.prompt, "draft goals");
+        assert_eq!(params.workspace_root.as_deref(), Some("."));
+        assert_eq!(params.cwd.as_deref(), Some("ignored"));
+        assert_eq!(
+            params.spawned_by_turn_id.as_ref().map(TurnId::as_str),
+            Some("turn_1")
+        );
+
+        Ok(self.thread_spawn_child_response.clone())
+    }
+
+    async fn events_replay(
+        &self,
+        params: EventsReplayParams,
+    ) -> anyhow::Result<EventsReplayResponse> {
+        self.calls.lock().unwrap().push("events_replay".into());
+        assert_eq!(params.thread_id.as_str(), "session_123");
+        assert_eq!(params.workspace_root.as_deref(), Some("."));
+
+        Ok(self.events_replay_response.clone())
     }
 }
 
@@ -91,48 +134,55 @@ struct ForkIgnoresCwdRunner {
 }
 
 #[async_trait::async_trait]
-impl AgentRunner for ForkIgnoresCwdRunner {
-    async fn run(
-        &self,
-        _prompt: &str,
-        _workspace_root: Option<&str>,
-        _cwd: Option<&str>,
-        _session_id: Option<&SessionId>,
-    ) -> anyhow::Result<AgentRunResponse> {
+impl AppServerBoundary for ForkIgnoresCwdRunner {
+    async fn run(&self, _params: RunParams) -> anyhow::Result<AgentRunResponse> {
         panic!("run should not be called in fork test");
     }
 
-    async fn fork(
-        &self,
-        parent_session_id: &SessionId,
-        agent_role: AgentRole,
-        prompt: &str,
-        workspace_root: Option<&str>,
-        spawned_by_turn_id: Option<&TurnId>,
-    ) -> anyhow::Result<AgentRunResponse> {
-        assert_eq!(parent_session_id.as_str(), "session_123");
-        assert_eq!(agent_role, AgentRole::Spec);
-        assert_eq!(prompt, "draft goals");
-        assert_eq!(workspace_root, Some("."));
-        assert_eq!(spawned_by_turn_id.map(TurnId::as_str), Some("turn_1"));
+    async fn fork(&self, params: ForkParams) -> anyhow::Result<AgentRunResponse> {
+        assert_eq!(params.parent_session_id.as_str(), "session_123");
+        assert_eq!(params.agent_role, AgentRole::Spec);
+        assert_eq!(params.prompt, "draft goals");
+        assert_eq!(params.workspace_root.as_deref(), Some("."));
+        assert_eq!(
+            params.spawned_by_turn_id.as_ref().map(TurnId::as_str),
+            Some("turn_1")
+        );
 
         Ok(self.response.clone())
     }
 
-    async fn inspect(
-        &self,
-        _parent_session_id: &SessionId,
-        _workspace_root: Option<&str>,
-    ) -> anyhow::Result<InspectResponse> {
+    async fn inspect(&self, _params: InspectParams) -> anyhow::Result<InspectResponse> {
         panic!("inspect should not be called in fork test");
     }
 
-    async fn collect(
-        &self,
-        _session_id: &SessionId,
-        _workspace_root: Option<&str>,
-    ) -> anyhow::Result<CollectResponse> {
+    async fn collect(&self, _params: CollectParams) -> anyhow::Result<CollectResponse> {
         panic!("collect should not be called in fork test");
+    }
+
+    async fn thread_start(
+        &self,
+        _params: ThreadStartParams,
+    ) -> anyhow::Result<ThreadStartResponse> {
+        panic!("thread_start should not be called in fork test");
+    }
+
+    async fn turn_start(&self, _params: TurnStartParams) -> anyhow::Result<TurnStartResponse> {
+        panic!("turn_start should not be called in fork test");
+    }
+
+    async fn thread_spawn_child(
+        &self,
+        _params: ThreadSpawnChildParams,
+    ) -> anyhow::Result<ThreadSpawnChildResponse> {
+        panic!("thread_spawn_child should not be called in fork test");
+    }
+
+    async fn events_replay(
+        &self,
+        _params: EventsReplayParams,
+    ) -> anyhow::Result<EventsReplayResponse> {
+        panic!("events_replay should not be called in fork test");
     }
 }
 
@@ -148,6 +198,10 @@ async fn health_route_returns_ok() {
         },
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
         calls: Mutex::new(vec![]),
     }));
 
@@ -420,6 +474,10 @@ async fn run_route_accepts_existing_session_id() {
         },
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
         calls: Mutex::new(vec![]),
     }));
 
@@ -477,6 +535,10 @@ async fn fork_route_accepts_parent_session_id_and_agent_role() {
         },
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
         calls: Mutex::new(vec![]),
     }));
 
@@ -568,6 +630,10 @@ async fn inspect_route_accepts_parent_session_id() {
         },
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
         calls: Mutex::new(vec![]),
     }));
 
@@ -620,6 +686,10 @@ async fn collect_route_accepts_child_session_id() {
         },
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
         calls: Mutex::new(vec![]),
     }));
 
@@ -680,6 +750,10 @@ async fn collect_route_serializes_structured_result() {
         },
         inspect_response: sample_inspect_response(),
         collect_response: sample_collect_response_with_structured_result(),
+        thread_start_response: sample_thread_start_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
         calls: Mutex::new(vec![]),
     }));
 
@@ -742,6 +816,206 @@ async fn collect_route_serializes_structured_result() {
                     "tool_call_id": null
                 }
             }
+        })
+    );
+}
+
+#[tokio::test]
+async fn thread_start_route_accepts_workspace_and_cwd() {
+    let app = build_router(Arc::new(StubRunner {
+        response: sample_run_response("unused"),
+        inspect_response: sample_inspect_response(),
+        collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
+        calls: Mutex::new(vec![]),
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/thread/start")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "workspace_root": ".",
+                        "cwd": "nested"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({
+            "thread_id": "session_123",
+            "snapshot_path": ".exagent/sessions/session_123/snapshot.json",
+            "events_path": ".exagent/sessions/session_123/events.jsonl"
+        })
+    );
+}
+
+#[tokio::test]
+async fn turn_start_route_accepts_thread_id_and_prompt() {
+    let app = build_router(Arc::new(StubRunner {
+        response: sample_run_response("unused"),
+        inspect_response: sample_inspect_response(),
+        collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
+        calls: Mutex::new(vec![]),
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/turn/start")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "thread_id": "session_123",
+                        "prompt": "continue phase2",
+                        "workspace_root": "."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({
+            "thread_id": "session_123",
+            "turn_id": "turn_1",
+            "output": {
+                "text": "turn complete",
+                "tool_calls": [],
+                "session_id": "session_123",
+                "snapshot_path": ".exagent/sessions/session_123/snapshot.json",
+                "events_path": ".exagent/sessions/session_123/events.jsonl"
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn thread_spawn_child_route_accepts_parent_role_and_prompt() {
+    let app = build_router(Arc::new(StubRunner {
+        response: sample_run_response("unused"),
+        inspect_response: sample_inspect_response(),
+        collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
+        calls: Mutex::new(vec![]),
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/thread_spawn_child")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "parent_thread_id": "session_123",
+                        "agent_role": "spec",
+                        "prompt": "draft goals",
+                        "workspace_root": ".",
+                        "cwd": "ignored",
+                        "spawned_by_turn_id": "turn_1"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({
+            "parent_thread_id": "session_123",
+            "child_thread_id": "session_child",
+            "agent_role": "spec",
+            "output": {
+                "text": "child complete",
+                "tool_calls": [],
+                "session_id": "session_child",
+                "snapshot_path": ".exagent/sessions/session_child/snapshot.json",
+                "events_path": ".exagent/sessions/session_child/events.jsonl"
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn events_replay_route_returns_runtime_events() {
+    let app = build_router(Arc::new(StubRunner {
+        response: sample_run_response("unused"),
+        inspect_response: sample_inspect_response(),
+        collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
+        calls: Mutex::new(vec![]),
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/events_replay")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "thread_id": "session_123",
+                        "workspace_root": "."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({
+            "thread_id": "session_123",
+            "events": [{
+                "event_id": "evt_1",
+                "session_id": "session_123",
+                "turn_id": "turn_1",
+                "kind": {
+                    "type": "assistant_turn",
+                    "turn": {
+                        "text": "turn complete",
+                        "tool_calls": []
+                    }
+                }
+            }]
         })
     );
 }
@@ -812,6 +1086,64 @@ fn parse_cli_collect_command_reads_child_session_id() {
             session_id: SessionId::new("session_child"),
         }
     );
+}
+
+fn sample_run_response(text: &str) -> AgentRunResponse {
+    AgentRunResponse {
+        text: Some(text.into()),
+        tool_calls: vec![],
+        session_id: SessionId::new("session_123"),
+        snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
+        events_path: ".exagent/sessions/session_123/events.jsonl".into(),
+    }
+}
+
+fn sample_thread_start_response() -> ThreadStartResponse {
+    ThreadStartResponse {
+        thread_id: SessionId::new("session_123"),
+        snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
+        events_path: ".exagent/sessions/session_123/events.jsonl".into(),
+    }
+}
+
+fn sample_turn_start_response() -> TurnStartResponse {
+    TurnStartResponse {
+        thread_id: SessionId::new("session_123"),
+        turn_id: TurnId::new("turn_1"),
+        output: sample_run_response("turn complete"),
+    }
+}
+
+fn sample_thread_spawn_child_response() -> ThreadSpawnChildResponse {
+    ThreadSpawnChildResponse {
+        parent_thread_id: SessionId::new("session_123"),
+        child_thread_id: SessionId::new("session_child"),
+        agent_role: AgentRole::Spec,
+        output: AgentRunResponse {
+            text: Some("child complete".into()),
+            tool_calls: vec![],
+            session_id: SessionId::new("session_child"),
+            snapshot_path: ".exagent/sessions/session_child/snapshot.json".into(),
+            events_path: ".exagent/sessions/session_child/events.jsonl".into(),
+        },
+    }
+}
+
+fn sample_events_replay_response() -> EventsReplayResponse {
+    EventsReplayResponse {
+        thread_id: SessionId::new("session_123"),
+        events: vec![RuntimeEvent {
+            event_id: EventId::new("evt_1"),
+            session_id: SessionId::new("session_123"),
+            turn_id: Some(TurnId::new("turn_1")),
+            kind: RuntimeEventKind::AssistantTurn {
+                turn: exagent::types::AssistantTurn {
+                    text: Some("turn complete".into()),
+                    tool_calls: vec![],
+                },
+            },
+        }],
+    }
 }
 
 fn sample_summary() -> ChildSessionSummary {

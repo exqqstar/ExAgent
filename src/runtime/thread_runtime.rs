@@ -383,6 +383,7 @@ struct ThreadRuntimeLoop {
 
 impl ThreadRuntimeLoop {
     async fn run(mut self) {
+        let _stopped = self.session.stopped_guard();
         while let Some(submission) = self.op_rx.recv().await {
             match submission.op {
                 ThreadOp::Shutdown => {
@@ -406,7 +407,6 @@ impl ThreadRuntimeLoop {
                 }
             }
         }
-        self.session.mark_stopped();
     }
 }
 

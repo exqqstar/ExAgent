@@ -90,6 +90,23 @@ pub(crate) struct ThreadSessionLiveState {
     status: ThreadRuntimeStatus,
 }
 
+/// Marks the thread as stopped from `Drop`, so the runtime loop reports
+/// termination even if a handler panics and the explicit end-of-loop path is
+/// skipped.
+pub(crate) struct ThreadSessionStoppedGuard {
+    status_tx: watch::Sender<ThreadRuntimeStatus>,
+    live_state: Arc<Mutex<ThreadSessionLiveState>>,
+}
+
+impl Drop for ThreadSessionStoppedGuard {
+    fn drop(&mut self) {
+        if let Ok(mut live_state) = self.live_state.lock() {
+            live_state.status = ThreadRuntimeStatus::Stopped;
+        }
+        let _ = self.status_tx.send(ThreadRuntimeStatus::Stopped);
+    }
+}
+
 impl ThreadSession {
     pub fn new(options: ThreadSessionOptions) -> anyhow::Result<Self> {
         let ThreadSessionOptions {
@@ -134,8 +151,11 @@ impl ThreadSession {
         self.live_state.clone()
     }
 
-    pub fn mark_stopped(&self) {
-        self.set_status(ThreadRuntimeStatus::Stopped);
+    pub(crate) fn stopped_guard(&self) -> ThreadSessionStoppedGuard {
+        ThreadSessionStoppedGuard {
+            status_tx: self.status_tx.clone(),
+            live_state: self.live_state.clone(),
+        }
     }
 
     pub(crate) fn set_status(&self, status: ThreadRuntimeStatus) {

@@ -1,15 +1,17 @@
+use async_trait::async_trait;
 use exagent::agent::Agent;
 use exagent::config::AgentConfig;
 use exagent::events::{RuntimeEvent, RuntimeEventKind};
-use exagent::llm::MockLlm;
+use exagent::llm::{LlmClient, MockLlm};
 use exagent::registry::ToolRegistry;
 use exagent::runtime::thread_runtime::{
     AgentFactory, ThreadOpResult, ThreadRuntime, ThreadRuntimeOptions, ThreadRuntimeStatus,
 };
 use exagent::runtime::thread_session::{ThreadSession, ThreadSessionOptions};
 use exagent::session::SessionSnapshot;
-use exagent::types::{AssistantTurn, EventId, SessionId, TurnId};
+use exagent::types::{AssistantTurn, ConversationMessage, EventId, SessionId, TurnId};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::tempdir;
 
 #[test]
@@ -224,4 +226,56 @@ fn agent_factory(turns: Vec<AssistantTurn>) -> AgentFactory {
             ToolRegistry::new(),
         ))
     })
+}
+
+struct PanicLlm;
+
+#[async_trait]
+impl LlmClient for PanicLlm {
+    async fn complete(
+        &self,
+        _messages: &[ConversationMessage],
+        _tools: &[serde_json::Value],
+    ) -> anyhow::Result<AssistantTurn> {
+        panic!("simulated llm panic to verify StoppedGuard");
+    }
+}
+
+#[tokio::test]
+async fn thread_runtime_marks_stopped_when_loop_handler_panics() {
+    let dir = tempdir().unwrap();
+    let thread_id = SessionId::new("session_runtime_panic_guard");
+    let config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        ..AgentConfig::default()
+    };
+    let snapshot = SessionSnapshot::new_thread(
+        thread_id.clone(),
+        config.workspace_root.clone(),
+        config.cwd.clone(),
+    );
+    let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
+    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+
+    let panicking_factory: AgentFactory =
+        Arc::new(move |config| Ok(Agent::new(config, Box::new(PanicLlm), ToolRegistry::new())));
+    let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
+        thread_id.clone(),
+        config,
+        panicking_factory,
+    ))
+    .expect("spawn runtime");
+
+    // Submitting user input triggers the panic inside the loop. We expect the
+    // completion oneshot to be dropped (sender lost during unwinding), so the
+    // await returns Err -- but the important guarantee is below.
+    let _ = runtime
+        .submit_user_input_and_wait(TurnId::new("turn_panic_1"), "trigger panic".into(), None)
+        .await;
+
+    tokio::time::timeout(Duration::from_secs(2), runtime.wait_until_terminated())
+        .await
+        .expect("StoppedGuard must report termination even when a handler panics");
+    assert_eq!(runtime.status(), ThreadRuntimeStatus::Stopped);
 }

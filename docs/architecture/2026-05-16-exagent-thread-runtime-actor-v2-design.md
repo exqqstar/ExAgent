@@ -39,7 +39,7 @@ CLI / HTTP / future GUI
        dispatches mailbox ops
   -> ThreadSession
        owns per-thread execution state
-       calls Agent
+       holds live Agent + snapshot
        emits RuntimeEvent
        persists snapshot + events.jsonl
 ```
@@ -284,14 +284,22 @@ Responsibilities:
 - Hold runtime execution inputs:
   - thread id
   - `AgentConfig`
-  - agent factory
+  - live `Agent`
+  - in-memory `SessionSnapshot`
+  - transcript/event paths
+  - next event cursor
   - live event broadcaster
   - status watch sender
 - Handle processed internal ops such as `ThreadOp::UserInput`.
 - Update runtime status around a turn.
-- Call `Agent` with clean runtime input.
+- Advance turns against the live in-memory snapshot.
 - Append lifecycle events and broadcast persisted agent events.
 - Report shutdown and interrupt results back through `ThreadOpResult`.
+
+`ThreadSession` loads the durable snapshot when the runtime is spawned and
+keeps that snapshot in memory while the thread is live. Disk remains the
+recovery and replay surface; normal turn execution should not reconstruct the
+agent state from disk for every user input.
 
 The first implementation is intentionally small:
 
@@ -499,6 +507,6 @@ ThreadManager
   -> ThreadRuntime handle
   -> runtime mailbox
   -> ThreadSession
-  -> clean Agent turn input
+  -> live snapshot + clean Agent turn input
   -> event stream
 ```

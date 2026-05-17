@@ -278,9 +278,9 @@ want to submit tagged `BoundaryOp` payloads directly.
 
 The older runtime-control routes `POST /threads` and
 `POST /threads/{session_id}/turns` are not part of the public AppServer
-Runtime Boundary V1 surface. Runtime-control code may remain internally
-testable, but it must not be a competing HTTP entrypoint for thread and turn
-lifecycle.
+Runtime Boundary V1 surface. The legacy runtime-control prototype has been
+removed so thread and turn lifecycle cannot enter through a competing runtime
+path.
 
 The legacy aliases `POST /thread_spawn_child` and `POST /events_replay` remain as compatibility routes, but new clients should use the slash form.
 

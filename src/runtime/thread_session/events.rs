@@ -3,20 +3,23 @@ use super::ThreadSession;
 use anyhow::Result;
 
 use crate::events::{RuntimeEvent, RuntimeEventKind};
+use crate::types::EventId;
 use crate::types::{SessionId, TurnId};
 
 impl ThreadSession {
     pub(crate) fn append_and_broadcast(
-        &self,
+        &mut self,
         turn_id: Option<&TurnId>,
         kind: RuntimeEventKind,
     ) -> Result<RuntimeEvent> {
-        let event = crate::transcript::append_runtime_event(
-            &self.config.workspace_root,
-            &self.thread_id,
-            turn_id,
+        let event = RuntimeEvent {
+            event_id: EventId::new(format!("evt_{}", self.next_event_index)),
+            session_id: self.thread_id.clone(),
+            turn_id: turn_id.cloned(),
             kind,
-        )?;
+        };
+        self.next_event_index += 1;
+        crate::transcript::append_json_line(&self.paths.events_path, &event)?;
         let _ = self.event_tx.send(event.clone());
         Ok(event)
     }

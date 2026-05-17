@@ -158,7 +158,8 @@ protocol dispatch route for clients that submit tagged `BoundaryOp` payloads.
 
 The older runtime-control routes `POST /threads` and
 `POST /threads/{session_id}/turns` are intentionally not exposed as HTTP
-routes. Thread and turn lifecycle should enter through the app-server boundary.
+routes. The legacy runtime-control prototype has been removed, so thread and
+turn lifecycle enters through the app-server boundary.
 
 Compatibility aliases are still present:
 

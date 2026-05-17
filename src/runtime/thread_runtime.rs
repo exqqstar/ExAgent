@@ -80,21 +80,16 @@ pub struct ThreadSubmission {
 pub struct ThreadRuntimeOptions {
     pub thread_id: SessionId,
     pub config: AgentConfig,
-    agent_factory: Option<AgentFactory>,
+    agent_factory: AgentFactory,
 }
 
 impl ThreadRuntimeOptions {
-    pub fn new(thread_id: SessionId, config: AgentConfig) -> Self {
+    pub fn new(thread_id: SessionId, config: AgentConfig, agent_factory: AgentFactory) -> Self {
         Self {
             thread_id,
             config,
-            agent_factory: None,
+            agent_factory,
         }
-    }
-
-    pub fn with_agent_factory(mut self, agent_factory: AgentFactory) -> Self {
-        self.agent_factory = Some(agent_factory);
-        self
     }
 }
 
@@ -120,13 +115,13 @@ impl ThreadRuntime {
             active_turn: Arc::new(Mutex::new(None)),
         });
 
+        let session = ThreadSession::new(
+            ThreadSessionOptions::new(options.thread_id, options.config, options.agent_factory)
+                .with_event_tx(event_tx)
+                .with_status_tx(status_tx),
+        )?;
+
         spawn_runtime_loop(async move {
-            let session = ThreadSession::new(
-                ThreadSessionOptions::new(options.thread_id, options.config)
-                    .with_agent_factory(options.agent_factory)
-                    .with_event_tx(event_tx)
-                    .with_status_tx(status_tx),
-            );
             ThreadRuntimeLoop { op_rx, session }.run().await;
         });
 

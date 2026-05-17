@@ -4,8 +4,7 @@ use exagent::agent::Agent;
 use exagent::config::AgentConfig;
 use exagent::llm::{LlmClient, MockLlm};
 use exagent::registry::ToolRegistry;
-use exagent::runtime::{RuntimeExecution, RuntimeOp, RuntimeOpExecutor, TurnContext, UserInput};
-use exagent::session::{AgentRole, SessionSnapshot};
+use exagent::session::SessionSnapshot;
 use exagent::tools::write_file::WriteFileTool;
 use exagent::types::{
     AssistantTurn, ConversationMessage, MessageRole, SessionId, ToolCall, TurnId,
@@ -78,7 +77,7 @@ async fn agent_feeds_tool_errors_back_into_next_turn() {
 }
 
 #[tokio::test]
-async fn agent_executes_runtime_user_input_op_with_existing_session_id() {
+async fn agent_resume_with_turn_id_runs_existing_thread_snapshot() {
     let dir = tempdir().unwrap();
     let llm = MockLlm::new(vec![AssistantTurn {
         text: Some("runtime done".into()),
@@ -92,36 +91,25 @@ async fn agent_executes_runtime_user_input_op_with_existing_session_id() {
     let agent = Agent::new(config, Box::new(llm), ToolRegistry::new());
     let session_id = SessionId::new("session_runtime_1");
     let turn_id = TurnId::new("turn_runtime_1");
+    let snapshot = SessionSnapshot::new_thread(
+        session_id.clone(),
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+    );
+    let paths = exagent::transcript::session_paths(dir.path(), &session_id);
+    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
 
     let result = agent
-        .execute_op(
+        .resume_with_turn_id_cwd(
             &session_id,
-            RuntimeOp::UserInput {
-                turn_id: turn_id.clone(),
-                input: vec![UserInput {
-                    content: "execute through runtime op".into(),
-                }],
-                context: TurnContext {
-                    model: "runtime-model".into(),
-                    workspace_root: dir.path().to_path_buf(),
-                    cwd: dir.path().to_path_buf(),
-                    policy_mode: exagent::policy::PolicyMode::Off,
-                    agent_role: AgentRole::Primary,
-                    instructions: vec![],
-                },
-            },
+            "execute through runtime op",
+            turn_id.clone(),
+            None,
         )
         .await
         .unwrap();
 
-    assert_eq!(
-        result,
-        RuntimeExecution {
-            session_id: session_id.clone(),
-            turn_id: Some(turn_id),
-            status: "completed".into(),
-        }
-    );
+    assert_eq!(result.final_turn.text.as_deref(), Some("runtime done"));
 
     let snapshot = exagent::transcript::read_session_snapshot(dir.path(), &session_id).unwrap();
     assert_eq!(snapshot.session_id, session_id);
@@ -133,10 +121,15 @@ async fn agent_executes_runtime_user_input_op_with_existing_session_id() {
         .conversation
         .iter()
         .any(|message| message.content == "runtime done"));
+    let events =
+        exagent::transcript::read_session_events(dir.path(), &snapshot.session_id).unwrap();
+    assert!(events
+        .iter()
+        .any(|event| event.turn_id.as_ref() == Some(&turn_id)));
 }
 
 #[tokio::test]
-async fn agent_runtime_user_input_op_resumes_existing_session_state() {
+async fn agent_resume_with_turn_id_resumes_existing_session_state() {
     let dir = tempdir().unwrap();
     let llm = MockLlm::new(vec![
         AssistantTurn {
@@ -155,38 +148,29 @@ async fn agent_runtime_user_input_op_resumes_existing_session_state() {
     };
     let agent = Agent::new(config, Box::new(llm), ToolRegistry::new());
     let session_id = SessionId::new("session_runtime_resume");
-    let context = TurnContext {
-        model: "runtime-model".into(),
-        workspace_root: dir.path().to_path_buf(),
-        cwd: dir.path().to_path_buf(),
-        policy_mode: exagent::policy::PolicyMode::Off,
-        agent_role: AgentRole::Primary,
-        instructions: vec![],
-    };
+    let snapshot = SessionSnapshot::new_thread(
+        session_id.clone(),
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+    );
+    let paths = exagent::transcript::session_paths(dir.path(), &session_id);
+    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
 
     agent
-        .execute_op(
+        .resume_with_turn_id_cwd(
             &session_id,
-            RuntimeOp::UserInput {
-                turn_id: TurnId::new("turn_runtime_1"),
-                input: vec![UserInput {
-                    content: "first input".into(),
-                }],
-                context: context.clone(),
-            },
+            "first input",
+            TurnId::new("turn_runtime_1"),
+            None,
         )
         .await
         .unwrap();
     agent
-        .execute_op(
+        .resume_with_turn_id_cwd(
             &session_id,
-            RuntimeOp::UserInput {
-                turn_id: TurnId::new("turn_runtime_2"),
-                input: vec![UserInput {
-                    content: "second input".into(),
-                }],
-                context,
-            },
+            "second input",
+            TurnId::new("turn_runtime_2"),
+            None,
         )
         .await
         .unwrap();
@@ -202,54 +186,6 @@ async fn agent_runtime_user_input_op_resumes_existing_session_state() {
     assert!(contents.contains(&"first done"));
     assert!(contents.contains(&"second input"));
     assert!(contents.contains(&"second done"));
-}
-
-#[tokio::test]
-async fn agent_runtime_user_input_rejects_snapshot_workspace_mismatch() {
-    let dir = tempdir().unwrap();
-    let other_dir = tempdir().unwrap();
-    let llm = MockLlm::new(vec![AssistantTurn {
-        text: Some("should not run".into()),
-        tool_calls: vec![],
-    }]);
-    let config = AgentConfig {
-        workspace_root: dir.path().to_path_buf(),
-        cwd: dir.path().to_path_buf(),
-        ..AgentConfig::default()
-    };
-    let agent = Agent::new(config, Box::new(llm), ToolRegistry::new());
-    let session_id = SessionId::new("session_runtime_mismatch");
-    let snapshot = SessionSnapshot::new_root(
-        session_id.clone(),
-        other_dir.path().to_path_buf(),
-        other_dir.path().to_path_buf(),
-        "original input",
-    );
-    let paths = exagent::transcript::session_paths(dir.path(), &session_id);
-    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
-
-    let err = agent
-        .execute_op(
-            &session_id,
-            RuntimeOp::UserInput {
-                turn_id: TurnId::new("turn_runtime_1"),
-                input: vec![UserInput {
-                    content: "continue through wrong workspace".into(),
-                }],
-                context: TurnContext {
-                    model: "runtime-model".into(),
-                    workspace_root: dir.path().to_path_buf(),
-                    cwd: dir.path().to_path_buf(),
-                    policy_mode: exagent::policy::PolicyMode::Off,
-                    agent_role: AgentRole::Primary,
-                    instructions: vec![],
-                },
-            },
-        )
-        .await
-        .unwrap_err();
-
-    assert!(err.to_string().contains("workspace_root mismatch"));
 }
 
 #[derive(Default)]

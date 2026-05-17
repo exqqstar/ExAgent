@@ -15,19 +15,52 @@ use tempfile::tempdir;
 
 #[test]
 fn thread_session_can_be_constructed_as_runtime_state_owner() {
+    let dir = tempdir().unwrap();
     let thread_id = SessionId::new("session_thread_session_construct");
-    let config = AgentConfig::default();
-    let session = ThreadSession::new(ThreadSessionOptions::new(thread_id.clone(), config));
+    let config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        ..AgentConfig::default()
+    };
+    let snapshot = SessionSnapshot::new_thread(
+        thread_id.clone(),
+        config.workspace_root.clone(),
+        config.cwd.clone(),
+    );
+    let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
+    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+    let session = ThreadSession::new(ThreadSessionOptions::new(
+        thread_id.clone(),
+        config,
+        agent_factory(vec![]),
+    ))
+    .expect("create thread session");
 
     assert_eq!(session.thread_id(), &thread_id);
 }
 
 #[tokio::test]
 async fn thread_runtime_starts_idle_and_accepts_shutdown_op() {
+    let dir = tempdir().unwrap();
     let thread_id = SessionId::new("session_runtime_test");
-    let config = AgentConfig::default();
-    let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(thread_id.clone(), config))
-        .expect("spawn runtime");
+    let config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        ..AgentConfig::default()
+    };
+    let snapshot = SessionSnapshot::new_thread(
+        thread_id.clone(),
+        config.workspace_root.clone(),
+        config.cwd.clone(),
+    );
+    let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
+    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+    let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
+        thread_id.clone(),
+        config,
+        agent_factory(vec![]),
+    ))
+    .expect("spawn runtime");
 
     assert_eq!(runtime.thread_id(), &thread_id);
     assert_eq!(runtime.status(), ThreadRuntimeStatus::Idle);
@@ -61,17 +94,11 @@ async fn thread_runtime_runs_user_input_through_agent_and_records_turn_lifecycle
         text: Some("runtime turn complete".into()),
         tool_calls: vec![],
     };
-    let agent_factory: AgentFactory = Arc::new(move |config| {
-        Ok(Agent::new(
-            config,
-            Box::new(MockLlm::new(vec![final_turn.clone()])),
-            ToolRegistry::new(),
-        ))
-    });
-    let runtime = ThreadRuntime::spawn(
-        ThreadRuntimeOptions::new(thread_id.clone(), config.clone())
-            .with_agent_factory(agent_factory),
-    )
+    let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
+        thread_id.clone(),
+        config.clone(),
+        agent_factory(vec![final_turn]),
+    ))
     .expect("spawn runtime");
 
     let result = runtime
@@ -101,4 +128,14 @@ async fn thread_runtime_runs_user_input_through_agent_and_records_turn_lifecycle
     assert!(matches!(replay[2].kind, RuntimeEventKind::TurnCompleted));
     assert_eq!(replay[0].turn_id.as_ref(), Some(&turn_id));
     assert_eq!(replay[2].turn_id.as_ref(), Some(&turn_id));
+}
+
+fn agent_factory(turns: Vec<AssistantTurn>) -> AgentFactory {
+    Arc::new(move |config| {
+        Ok(Agent::new(
+            config,
+            Box::new(MockLlm::new(turns.clone())),
+            ToolRegistry::new(),
+        ))
+    })
 }

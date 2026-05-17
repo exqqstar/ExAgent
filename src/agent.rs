@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -10,7 +10,6 @@ use crate::llm::LlmClient;
 use crate::orchestration::{ChildSessionSummary, CollectedChildSession};
 use crate::policy::PolicyManager;
 use crate::registry::{ToolContext, ToolRegistry};
-use crate::runtime::{RuntimeExecution, RuntimeOp, RuntimeOpExecutor, TurnContext};
 use crate::session::{
     AgentRole, ApprovalId, ApprovalStatus, ExecSessionId, ExecSessionRef, ExecSessionStatus,
     PendingApproval, SessionSnapshot,
@@ -30,6 +29,7 @@ pub struct AgentRunOutput {
     pub session_id: SessionId,
     pub snapshot_path: PathBuf,
     pub events_path: PathBuf,
+    pub events: Vec<RuntimeEvent>,
 }
 
 impl Agent {
@@ -133,10 +133,17 @@ impl Agent {
         snapshot
             .conversation
             .push(ConversationMessage::user(user_prompt));
-        crate::transcript::write_json(&paths.snapshot_path, &snapshot)?;
+        let mut next_event_index =
+            crate::transcript::read_session_events(&self.config.workspace_root, session_id)?.len()
+                + 1;
 
-        self.run_session_with_turn_cwd(snapshot, runtime_turn_id, turn_cwd)
-            .await
+        self.run_session_snapshot(
+            &mut snapshot,
+            runtime_turn_id,
+            turn_cwd,
+            &mut next_event_index,
+        )
+        .await
     }
 
     pub async fn fork_session(
@@ -187,6 +194,42 @@ impl Agent {
         runtime_turn_id: Option<TurnId>,
         turn_cwd: Option<PathBuf>,
     ) -> Result<AgentRunOutput> {
+        let paths =
+            crate::transcript::session_paths(&snapshot.workspace_root, &snapshot.session_id);
+        let mut next_event_index =
+            crate::transcript::read_json_lines::<RuntimeEvent>(&paths.events_path)?.len() + 1;
+        self.run_session_snapshot(
+            &mut snapshot,
+            runtime_turn_id,
+            turn_cwd,
+            &mut next_event_index,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_live_turn(
+        &self,
+        snapshot: &mut SessionSnapshot,
+        user_prompt: &str,
+        turn_id: TurnId,
+        turn_cwd: Option<PathBuf>,
+        next_event_index: &mut usize,
+    ) -> Result<AgentRunOutput> {
+        snapshot.normalize_lineage();
+        snapshot
+            .conversation
+            .push(ConversationMessage::user(user_prompt));
+        self.run_session_snapshot(snapshot, Some(turn_id), turn_cwd, next_event_index)
+            .await
+    }
+
+    async fn run_session_snapshot(
+        &self,
+        snapshot: &mut SessionSnapshot,
+        runtime_turn_id: Option<TurnId>,
+        turn_cwd: Option<PathBuf>,
+        next_event_index: &mut usize,
+    ) -> Result<AgentRunOutput> {
         snapshot.normalize_lineage();
         let mut session_config = self.config.clone();
         session_config.workspace_root = snapshot.workspace_root.clone();
@@ -197,6 +240,7 @@ impl Agent {
         crate::transcript::write_json(&paths.snapshot_path, &snapshot)?;
 
         let mut messages = snapshot.conversation.clone();
+        let mut events = Vec::new();
 
         let base_ctx = ToolContext {
             config: session_config.clone(),
@@ -210,11 +254,6 @@ impl Agent {
             .filter(|message| matches!(message.role, MessageRole::Assistant))
             .count()
             + 1;
-        let mut next_event_index =
-            crate::transcript::read_session_events(&session_config.workspace_root, &session_id)?
-                .len()
-                + 1;
-
         for _ in 0..self.config.max_turns {
             let turn = self
                 .llm
@@ -228,13 +267,14 @@ impl Agent {
                 turn_id
             };
             let assistant_event = RuntimeEvent {
-                event_id: EventId::new(format!("evt_{next_event_index}")),
+                event_id: EventId::new(format!("evt_{}", *next_event_index)),
                 session_id: session_id.clone(),
                 turn_id: Some(turn_id.clone()),
                 kind: RuntimeEventKind::AssistantTurn { turn: turn.clone() },
             };
-            next_event_index += 1;
+            *next_event_index += 1;
             crate::transcript::append_json_line(&paths.events_path, &assistant_event)?;
+            events.push(assistant_event);
 
             if turn.text.is_some() || !turn.tool_calls.is_empty() {
                 let assistant_message =
@@ -250,6 +290,7 @@ impl Agent {
                     session_id,
                     snapshot_path: paths.snapshot_path,
                     events_path: paths.events_path,
+                    events,
                 });
             }
 
@@ -257,18 +298,19 @@ impl Agent {
                 let mut ctx = base_ctx.clone();
                 ctx.turn_id = Some(turn_id.clone());
                 let result = self.registry.execute(call, Some(&ctx)).await;
-                apply_exec_session_update(&mut snapshot, &result);
-                apply_pending_approval_update(&mut snapshot, &result);
+                apply_exec_session_update(snapshot, &result);
+                apply_pending_approval_update(snapshot, &result);
                 let tool_event = RuntimeEvent {
-                    event_id: EventId::new(format!("evt_{next_event_index}")),
+                    event_id: EventId::new(format!("evt_{}", *next_event_index)),
                     session_id: session_id.clone(),
                     turn_id: Some(turn_id.clone()),
                     kind: RuntimeEventKind::ToolResult {
                         result: result.clone(),
                     },
                 };
-                next_event_index += 1;
+                *next_event_index += 1;
                 crate::transcript::append_json_line(&paths.events_path, &tool_event)?;
+                events.push(tool_event);
 
                 let tool_message = ConversationMessage::tool(
                     result.tool_call_id.clone(),
@@ -285,95 +327,6 @@ impl Agent {
             self.config.max_turns
         ))
     }
-}
-
-#[async_trait::async_trait]
-impl RuntimeOpExecutor for Agent {
-    async fn execute_op(&self, session_id: &SessionId, op: RuntimeOp) -> Result<RuntimeExecution> {
-        match op {
-            RuntimeOp::UserInput {
-                turn_id,
-                input,
-                context,
-            } => {
-                let prompt = input
-                    .into_iter()
-                    .map(|item| item.content)
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                if prompt.trim().is_empty() {
-                    return Err(anyhow!("runtime user input cannot be empty"));
-                }
-
-                let paths = crate::transcript::session_paths(&context.workspace_root, session_id);
-                let snapshot = if paths.snapshot_path.exists() {
-                    let mut snapshot: SessionSnapshot =
-                        crate::transcript::read_json(&paths.snapshot_path)?;
-                    snapshot.normalize_lineage();
-                    validate_runtime_context_matches_snapshot(&snapshot, &context)?;
-                    snapshot
-                        .conversation
-                        .push(ConversationMessage::user(prompt));
-                    crate::transcript::write_json(&paths.snapshot_path, &snapshot)?;
-                    snapshot
-                } else {
-                    SessionSnapshot::new_root(
-                        session_id.clone(),
-                        context.workspace_root,
-                        context.cwd,
-                        prompt,
-                    )
-                };
-                self.run_session_with_turn_cwd(snapshot, Some(turn_id.clone()), None)
-                    .await?;
-
-                Ok(RuntimeExecution {
-                    session_id: session_id.clone(),
-                    turn_id: Some(turn_id),
-                    status: "completed".into(),
-                })
-            }
-            RuntimeOp::Interrupt { .. }
-            | RuntimeOp::Compact
-            | RuntimeOp::Shutdown
-            | RuntimeOp::SetThreadName { .. } => {
-                Err(anyhow!("runtime op is not executable by Agent yet"))
-            }
-        }
-    }
-}
-
-fn validate_runtime_context_matches_snapshot(
-    snapshot: &SessionSnapshot,
-    context: &TurnContext,
-) -> Result<()> {
-    if !paths_match(&snapshot.workspace_root, &context.workspace_root) {
-        return Err(anyhow!(
-            "workspace_root mismatch for session {}: snapshot={}, context={}",
-            snapshot.session_id.as_str(),
-            snapshot.workspace_root.display(),
-            context.workspace_root.display()
-        ));
-    }
-
-    if !paths_match(&snapshot.cwd, &context.cwd) {
-        return Err(anyhow!(
-            "cwd mismatch for session {}: snapshot={}, context={}",
-            snapshot.session_id.as_str(),
-            snapshot.cwd.display(),
-            context.cwd.display()
-        ));
-    }
-
-    Ok(())
-}
-
-fn paths_match(left: &Path, right: &Path) -> bool {
-    canonical_or_original(left) == canonical_or_original(right)
-}
-
-fn canonical_or_original(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn apply_exec_session_update(snapshot: &mut SessionSnapshot, result: &crate::types::ToolResult) {

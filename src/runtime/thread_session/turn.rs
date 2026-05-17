@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 
 use super::{RuntimeInterrupt, ThreadSession};
 use crate::events::RuntimeEventKind;
@@ -9,7 +9,7 @@ use crate::types::TurnId;
 
 impl ThreadSession {
     pub(crate) async fn handle_user_input(
-        &self,
+        &mut self,
         turn_id: TurnId,
         prompt: String,
         turn_context: Option<ThreadTurnContext>,
@@ -24,7 +24,7 @@ impl ThreadSession {
     }
 
     async fn handle_user_input_inner(
-        &self,
+        &mut self,
         turn_id: TurnId,
         prompt: String,
         turn_context: Option<ThreadTurnContext>,
@@ -33,16 +33,17 @@ impl ThreadSession {
         self.append_and_broadcast(Some(&turn_id), RuntimeEventKind::TurnStarted)?;
         let broadcasted_event_count = self.persisted_event_count(&self.thread_id)?;
 
-        let agent_factory = self
-            .agent_factory
-            .as_ref()
-            .ok_or_else(|| anyhow!("thread runtime has no agent factory"))?;
-        let agent = agent_factory(self.config.clone())?;
         let turn_cwd = turn_context.and_then(|context| context.cwd);
         let output = if let Some(interrupt) = interrupt {
             let runtime_turn_id = turn_id.clone();
             tokio::select! {
-                result = agent.resume_with_turn_id_cwd(&self.thread_id, &prompt, runtime_turn_id, turn_cwd) => {
+                result = self.agent.run_live_turn(
+                    &mut self.snapshot,
+                    &prompt,
+                    runtime_turn_id,
+                    turn_cwd,
+                    &mut self.next_event_index,
+                ) => {
                     match result {
                         Ok(output) => output,
                         Err(err) => {
@@ -69,8 +70,15 @@ impl ThreadSession {
                 }
             }
         } else {
-            let result = agent
-                .resume_with_turn_id_cwd(&self.thread_id, &prompt, turn_id.clone(), turn_cwd)
+            let result = self
+                .agent
+                .run_live_turn(
+                    &mut self.snapshot,
+                    &prompt,
+                    turn_id.clone(),
+                    turn_cwd,
+                    &mut self.next_event_index,
+                )
                 .await;
             match result {
                 Ok(output) => output,
@@ -86,7 +94,9 @@ impl ThreadSession {
             }
         };
 
-        self.broadcast_events_since(broadcasted_event_count)?;
+        for event in &output.events {
+            let _ = self.event_tx.send(event.clone());
+        }
         self.append_and_broadcast(Some(&turn_id), RuntimeEventKind::TurnCompleted)?;
 
         Ok(ThreadOpResult::UserInput { turn_id, output })
@@ -95,6 +105,7 @@ impl ThreadSession {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use tempfile::tempdir;
@@ -137,10 +148,12 @@ mod tests {
                 ToolRegistry::new(),
             ))
         });
-        let session = ThreadSession::new(
-            ThreadSessionOptions::new(thread_id.clone(), config.clone())
-                .with_agent_factory(Some(agent_factory)),
-        );
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config.clone(),
+            agent_factory,
+        ))
+        .expect("create thread session");
 
         let result = session
             .handle_user_input(turn_id.clone(), "continue".into(), None, None)
@@ -165,5 +178,98 @@ mod tests {
         assert!(matches!(replay[2].kind, RuntimeEventKind::TurnCompleted));
         assert_eq!(replay[0].turn_id.as_ref(), Some(&turn_id));
         assert_eq!(replay[2].turn_id.as_ref(), Some(&turn_id));
+    }
+
+    #[tokio::test]
+    async fn thread_session_reuses_live_agent_and_snapshot_across_turns() {
+        let dir = tempdir().unwrap();
+        let thread_id = SessionId::new("session_thread_session_live_state");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        let snapshot = SessionSnapshot::new_thread(
+            thread_id.clone(),
+            config.workspace_root.clone(),
+            config.cwd.clone(),
+        );
+        let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
+        crate::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let factory_call_counter = factory_calls.clone();
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            factory_call_counter.fetch_add(1, Ordering::SeqCst);
+            Ok(Agent::new(
+                config,
+                Box::new(MockLlm::new(vec![
+                    AssistantTurn {
+                        text: Some("first turn complete".into()),
+                        tool_calls: vec![],
+                    },
+                    AssistantTurn {
+                        text: Some("second turn complete".into()),
+                        tool_calls: vec![],
+                    },
+                ])),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config.clone(),
+            agent_factory,
+        ))
+        .expect("create thread session");
+
+        let first = session
+            .handle_user_input(TurnId::new("turn_1"), "first input".into(), None, None)
+            .await
+            .expect("first turn");
+        let second = session
+            .handle_user_input(TurnId::new("turn_2"), "second input".into(), None, None)
+            .await
+            .expect("second turn");
+
+        let ThreadOpResult::UserInput {
+            output: first_output,
+            ..
+        } = first
+        else {
+            panic!("expected first user input result");
+        };
+        let ThreadOpResult::UserInput {
+            output: second_output,
+            ..
+        } = second
+        else {
+            panic!("expected second user input result");
+        };
+        assert_eq!(
+            first_output.final_turn.text.as_deref(),
+            Some("first turn complete")
+        );
+        assert_eq!(
+            second_output.final_turn.text.as_deref(),
+            Some("second turn complete")
+        );
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+
+        let snapshot = crate::transcript::read_session_snapshot(&config.workspace_root, &thread_id)
+            .expect("read snapshot");
+        let contents = snapshot
+            .conversation
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contents,
+            vec![
+                "first input",
+                "first turn complete",
+                "second input",
+                "second turn complete"
+            ]
+        );
     }
 }

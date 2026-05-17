@@ -11,7 +11,7 @@
 Implemented decisions:
 
 - `ThreadRuntime` owns the live actor mailbox, event broadcaster, status watch channel, and active-turn interrupt handle.
-- `ThreadSession` owns the per-thread state and handlers for turn lifecycle and event emission.
+- `ThreadSession` owns the per-thread live state, including the in-memory snapshot, live Agent, event cursor, and handlers for turn lifecycle and event emission.
 - `ThreadManager` owns the process-level runtime registry and no longer calls `Agent::resume*` for public `turn/start`.
 - `turn/start` returns `TurnStatus::InProgress`; final output is read from live/replayed events.
 - `initialize.supported_ops` maps to serializable `BoundaryOp` variants; streaming surfaces are advertised separately through `supported_streams`.
@@ -36,7 +36,7 @@ Target V2 state:
 - `ThreadManager` owns `loaded_threads: HashMap<SessionId, Arc<ThreadRuntime>>`.
 - `ThreadRuntime` is a live thread handle with `submit`, `subscribe_events`, `status`, and `shutdown`.
 - `ThreadRuntimeLoop` serializes `ThreadSubmission` values and dispatches `ThreadOp`.
-- `ThreadSession` owns per-thread execution state and handles `ThreadOp::UserInput`.
+- `ThreadSession` owns per-thread live execution state and handles `ThreadOp::UserInput` without reconstructing Agent state from disk per turn.
 - `turn/start` submits `ThreadOp::UserInput` and returns `TurnStatus::InProgress`.
 - CLI waits on live events until turn completion, then prints final assistant text.
 
@@ -928,7 +928,7 @@ Landed defaults:
 - Return `InProgress` once a turn is accepted by the runtime.
 - Reject concurrent turns in V2 unless an explicit queue is added later.
 - Keep replay and subscribe separate, but let `events/subscribe(after_event_id)` replay the gap before switching to live events.
-- Treat `events.jsonl` as the single source of truth; live `broadcast` is best-effort and may drop on `Lagged`. Streaming clients reconnect by replaying from the last seen event id, then subscribing with that cursor.
+- Treat the live `ThreadSession` state as authoritative while a runtime is loaded. Persisted `snapshot.json` and `events.jsonl` are the recovery and replay surface; live `broadcast` is best-effort and clients reconnect by replaying from the last seen event id before subscribing with that cursor.
 - Normalize `TurnContextOverrides` into `ThreadTurnContext` at `ThreadManager`. `ThreadOp::UserInput` holds the internal type so `thread_runtime.rs` does not depend on protocol DTOs.
 - Keep active-turn interrupt state inside `ThreadRuntime`, not `ThreadManager`.
 - Keep turn lifecycle and event append/broadcast logic inside `ThreadSession`, not `ThreadRuntimeLoop`.

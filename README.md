@@ -1,6 +1,6 @@
 # ExAgent
 
-ExAgent is a Rust-based agent runtime that adds durable session state, replayable events, approval-gated tool execution, and thin multi-session orchestration on top of an LLM tool loop.
+ExAgent is a Rust-based agent runtime that adds durable thread state, replayable events, approval-gated tool execution, live event delivery, and a small app-server boundary on top of an LLM tool loop.
 
 ## Why This Exists
 
@@ -10,47 +10,56 @@ Many agent demos stop at "prompt in, tool call out". ExAgent focuses on the runt
 - append-only `events.jsonl` history for replay and auditability
 - persistent exec sessions for long-lived subprocess workflows
 - approval-gated command execution for risky shell actions
-- thin orchestration primitives for child-session `fork`, `inspect`, and `collect`
-- typed result contracts for `spec`, `test`, and `judge` roles
+- thread and turn lifecycle operations behind a typed boundary
+- live event subscription for UI and CLI clients
 
 This repository is intentionally scoped as runtime infrastructure, not as a full autonomous planner or production sandbox.
 
 ## Current Capabilities
 
-- Run and resume LLM-backed agent sessions
+- Start, resume, read, and advance LLM-backed runtime threads
 - Persist session state under `.exagent/sessions/<session_id>/`
 - Replay assistant turns and tool results from the event log
+- Subscribe to live runtime events over HTTP SSE
+- Interrupt active turns or pending approval waits
 - Keep interactive subprocesses alive across turns
 - Expose CLI and HTTP API entrypoints
-- Discover child sessions and collect their latest useful output
-- Record typed structured results for non-writer review roles
 
 ## Architecture
 
-The runtime keeps one execution kernel and layers orchestration around it instead of replacing it with a planner.
+The runtime keeps one execution kernel and exposes it through a small app-server boundary. Loaded threads are handled by a long-lived runtime actor; disk remains the replay and recovery store.
 
 ```mermaid
 flowchart TB
     CLI["CLI"]
     API["HTTP API"]
-    Agent["Agent::run_session(...)"]
+    Boundary["AppServerService"]
+    Manager["ThreadManager"]
+    Runtime["ThreadRuntime"]
+    Session["ThreadSession"]
+    Agent["Agent::run_live_turn(...)"]
     Registry["ToolRegistry"]
-    Tools["read_file / write_file / run_command / record_structured_result"]
+    Tools["read_file / write_file / run_command"]
     Snapshot["snapshot.json"]
     Events["events.jsonl"]
 
-    CLI --> Agent
-    API --> Agent
-    Agent --> Registry
+    CLI --> Boundary
+    API --> Boundary
+    Boundary --> Manager
+    Manager --> Runtime
+    Runtime --> Session
+    Session --> Agent
     Registry --> Tools
-    Agent --> Snapshot
-    Agent --> Events
+    Agent --> Registry
+    Session --> Snapshot
+    Session --> Events
 ```
 
 Key persistence rule:
 
 - `snapshot.json` stores current recoverable state
 - `events.jsonl` stores replayable runtime facts
+- while a thread is loaded, `ThreadSession` is the live source of truth
 
 ## Quickstart
 
@@ -88,60 +97,72 @@ cargo run -- api
 
 By default the API listens on `127.0.0.1:3000`.
 
-### 4. Create a root session
+### 4. Confirm protocol capabilities
 
 ```bash
-curl -s http://127.0.0.1:3000/run \
+curl -s http://127.0.0.1:3000/initialize \
+  -H 'content-type: application/json' \
+  -d '{}'
+```
+
+The response reports `appserver-runtime-boundary-v2` and the supported operations.
+
+### 5. Start a thread
+
+```bash
+curl -s http://127.0.0.1:3000/thread/start \
   -H 'content-type: application/json' \
   -d '{
-    "prompt": "Inspect this Rust workspace and summarize the runtime architecture.",
     "workspace_root": ".",
     "cwd": "."
   }'
 ```
 
-The response includes:
+Save `thread.id` from the response.
 
-- `session_id`
-- `snapshot_path`
-- `events_path`
-- assistant text and tool calls
+### 6. Subscribe to events
 
-### 5. Fork a child session
+In another terminal, subscribe before starting a turn:
 
 ```bash
-curl -s http://127.0.0.1:3000/fork \
+curl -N -s http://127.0.0.1:3000/events/subscribe \
   -H 'content-type: application/json' \
   -d '{
-    "parent_session_id": "<root-session-id>",
-    "agent_role": "spec",
-    "prompt": "Draft goals, non-goals, and acceptance criteria for the next runtime milestone.",
+    "thread_id": "<thread-id>",
+    "workspace_root": "."
+  }'
+```
+
+The stream first sends persisted events after the optional cursor, then switches to live `RuntimeEvent` values.
+
+### 7. Start a turn
+
+```bash
+curl -s http://127.0.0.1:3000/turn/start \
+  -H 'content-type: application/json' \
+  -d '{
+    "thread_id": "<thread-id>",
+    "prompt": "Inspect this Rust workspace and summarize the runtime architecture.",
+    "workspace_root": "."
+  }'
+```
+
+`turn/start` accepts work and returns an in-progress turn. The final assistant output arrives through `events/subscribe` or can be recovered later with `events/replay`.
+
+### 8. Replay events
+
+```bash
+curl -s http://127.0.0.1:3000/events/replay \
+  -H 'content-type: application/json' \
+  -d '{
+    "thread_id": "<thread-id>",
     "workspace_root": ".",
-    "spawned_by_turn_id": "turn_1"
-  }'
-```
-
-### 6. Inspect and collect child work
-
-```bash
-curl -s http://127.0.0.1:3000/inspect \
-  -H 'content-type: application/json' \
-  -d '{
-    "parent_session_id": "<root-session-id>",
-    "workspace_root": "."
-  }'
-```
-
-```bash
-curl -s http://127.0.0.1:3000/collect \
-  -H 'content-type: application/json' \
-  -d '{
-    "session_id": "<child-session-id>",
-    "workspace_root": "."
+    "include_snapshot": true
   }'
 ```
 
 For a longer walkthrough, see [docs/demo/exagent-walkthrough.md](docs/demo/exagent-walkthrough.md).
+For the client protocol contract, see [docs/protocol/app-server-boundary-v2.md](docs/protocol/app-server-boundary-v2.md).
 
 ## CLI Entry Points
 
@@ -150,12 +171,10 @@ The CLI is useful for direct local runs:
 ```bash
 cargo run -- "Summarize this workspace"
 cargo run -- resume <session_id> "Continue the previous session"
-cargo run -- fork <parent_session_id> spec "Draft milestone goals"
-cargo run -- inspect <parent_session_id>
-cargo run -- collect <child_session_id>
+cargo run -- api
 ```
 
-The HTTP API is the easiest way to get machine-readable session metadata.
+The CLI is a convenience adapter over the same thread, turn, and event boundary. The HTTP API is the easiest way to get machine-readable thread state and event streams.
 
 ## Built-In Tools
 
@@ -164,7 +183,6 @@ The default tool registry currently includes:
 - `read_file`
 - `write_file`
 - `run_command`
-- `record_structured_result`
 
 ## Project Status
 
@@ -174,15 +192,18 @@ Implemented today:
 - event-based replay
 - persistent exec sessions
 - policy and approval flow
-- thin multi-session orchestration
-- typed structured review contracts
+- app-server runtime boundary v2
+- thread-scoped runtime actor
+- live event subscription
 
 Explicit non-goals today:
 
 - no autonomous planner
-- no mailbox-based coordination
+- no runtime-native child thread orchestration yet
 - no reduce/join scheduler
 - no production-grade sandbox isolation
+- no cross-process active-turn locking
+- no token-delta LLM streaming
 
 ## Why Rust
 
@@ -195,15 +216,16 @@ Rust is a good fit here because the project is runtime infrastructure, not a one
 
 ## Repository Layout
 
-- [src](src): runtime, API, tools, orchestration, persistence
-- [tests](tests): integration coverage for agent loop, replay, policy, exec sessions, API, and orchestration
+- [src](src): runtime, API, tools, app-server boundary, persistence
+- [tests](tests): integration coverage for agent loop, replay, policy, exec sessions, API, and thread runtime
 - [docs/plans](docs/plans): design notes, roadmap, and implementation plans
 - [docs/architecture](docs/architecture): architecture and interview-oriented summaries
+- [docs/protocol](docs/protocol): client-facing protocol notes
 
 Recommended reading:
 
-- [Phase 3 Current-State Learning Guide](docs/plans/2026-04-15-exagent-phase3-current-state-learning-guide.md)
-- [Phase 3 Roadmap And Working Model](docs/plans/2026-04-15-exagent-phase3-roadmap-and-working-model-design.md)
+- [App-Server Boundary v2 Protocol Notes](docs/protocol/app-server-boundary-v2.md)
+- [Thread Runtime Actor Design](docs/architecture/2026-05-16-exagent-thread-runtime-actor-v2-design.md)
 
 ## License
 

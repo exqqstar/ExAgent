@@ -1,24 +1,29 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::broadcast;
 
 use crate::agent::{Agent, AgentRunOutput};
 use crate::app_server::override_policy::{OverridePolicy, RuntimeOverrides};
 use crate::app_server::protocol::{
     AgentRunResponse, BoundaryCapability, BoundaryOp, BoundaryOpResponse, CollectParams,
-    CollectResponse, EventsReplayParams, EventsReplayResponse, ForkParams, IgnoredOverrideField,
-    InitializeParams, InitializeResponse, InspectParams, InspectResponse, ReplaySnapshotView,
-    RunParams, RuntimeEventKindFilter, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadSpawnChildParams, ThreadSpawnChildResponse, ThreadStartParams,
-    ThreadStartResponse, ThreadStatus, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse, TurnState, TurnStatus, BOUNDARY_PROTOCOL_VERSION,
+    CollectResponse, EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, ForkParams,
+    IgnoredOverrideField, InitializeParams, InitializeResponse, InspectParams, InspectResponse,
+    ReplaySnapshotView, RunParams, RuntimeEventKindFilter, ThreadItem, ThreadReadParams,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadSpawnChildParams,
+    ThreadSpawnChildResponse, ThreadStartParams, ThreadStartResponse, ThreadStatus, ThreadView,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnState,
+    TurnStatus, TurnView, BOUNDARY_PROTOCOL_VERSION,
+};
+use crate::app_server::thread_runtime::{
+    AgentFactory, ThreadOpResult, ThreadRuntime, ThreadRuntimeOptions, ThreadTurnContext,
 };
 use crate::app_server::AppServerError;
 use crate::config::AgentConfig;
-use crate::events::RuntimeEventKind;
+use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::exec_session::ExecSessionManager;
 use crate::llm::{LlmClient, OpenAiCompatibleLlm};
 use crate::policy::PolicyManager;
@@ -67,11 +72,31 @@ impl LlmClient for SharedLlmClient {
     }
 }
 
-#[derive(Clone)]
-struct ActiveTurnRecord {
+pub struct StartThreadOptions {
+    pub config: AgentConfig,
+    pub initial_history: InitialHistory,
+}
+
+pub enum InitialHistory {
+    New,
+    Resume { thread_id: SessionId },
+}
+
+pub struct NewThread {
+    pub thread_id: SessionId,
+    #[allow(dead_code)]
+    pub runtime: Arc<ThreadRuntime>,
+    pub snapshot_path: PathBuf,
+    pub events_path: PathBuf,
+}
+
+struct TurnStartRun {
+    output: AgentRunOutput,
+}
+
+struct TurnStartStarted {
+    thread_id: SessionId,
     turn_id: TurnId,
-    interrupt_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    interrupted: Arc<Notify>,
 }
 
 pub struct ThreadManager {
@@ -80,7 +105,7 @@ pub struct ThreadManager {
     registry_factory: RegistryFactory,
     exec_sessions: Arc<ExecSessionManager>,
     policy: Arc<PolicyManager>,
-    active_turns: Arc<Mutex<HashMap<String, ActiveTurnRecord>>>,
+    loaded_threads: Arc<Mutex<HashMap<String, Arc<ThreadRuntime>>>>,
 }
 
 impl Default for ThreadManager {
@@ -97,7 +122,7 @@ impl ThreadManager {
             registry_factory: Arc::new(crate::default_tool_registry),
             exec_sessions: Arc::new(ExecSessionManager::default()),
             policy: Arc::new(PolicyManager::default()),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
+            loaded_threads: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -117,7 +142,7 @@ impl ThreadManager {
             registry_factory: Arc::new(registry_factory),
             exec_sessions: Arc::new(ExecSessionManager::default()),
             policy: Arc::new(PolicyManager::default()),
-            active_turns: Arc::new(Mutex::new(HashMap::new())),
+            loaded_threads: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -131,26 +156,25 @@ impl ThreadManager {
                     cwd: params.cwd,
                 })?
                 .thread
-                .thread_id
+                .id
             }
             None => {
                 self.thread_start(ThreadStartParams {
                     workspace_root: workspace_root.clone(),
                     cwd: params.cwd,
                 })?
-                .thread_id
+                .thread
+                .id
             }
         };
 
-        Ok(self
-            .turn_start(TurnStartParams {
-                thread_id,
-                prompt: params.prompt,
-                workspace_root,
-                turn_context: None,
-            })
-            .await?
-            .output)
+        self.turn_start_and_wait(TurnStartParams {
+            thread_id,
+            prompt: params.prompt,
+            workspace_root,
+            turn_context: None,
+        })
+        .await
     }
 
     pub fn initialize(&self, _params: InitializeParams) -> InitializeResponse {
@@ -166,6 +190,7 @@ impl ThreadManager {
                 BoundaryCapability::TurnInterrupt,
                 BoundaryCapability::EventsReplay,
             ],
+            supported_streams: vec![BoundaryCapability::EventsSubscribe],
         }
     }
 
@@ -211,16 +236,20 @@ impl ThreadManager {
                 cwd: params.cwd,
             },
         )?;
-        let thread_id = crate::transcript::new_session_id();
-        let snapshot =
-            SessionSnapshot::new_thread(thread_id.clone(), config.workspace_root, config.cwd);
-        let paths = crate::transcript::session_paths(&snapshot.workspace_root, &thread_id);
-        crate::transcript::write_json(&paths.snapshot_path, &snapshot)?;
+        let new_thread = self.start_thread_with_options(StartThreadOptions {
+            config,
+            initial_history: InitialHistory::New,
+        })?;
 
         Ok(ThreadStartResponse {
-            thread_id,
-            snapshot_path: paths.snapshot_path,
-            events_path: paths.events_path,
+            thread: ThreadView {
+                id: new_thread.thread_id,
+                status: ThreadStatus::Idle,
+                active_turn: None,
+                turns: vec![],
+                snapshot_path: new_thread.snapshot_path,
+                events_path: new_thread.events_path,
+            },
         })
     }
 
@@ -242,11 +271,11 @@ impl ThreadManager {
         let snapshot = crate::transcript::read_session_snapshot(workspace_root, &thread_id)?;
         let events = crate::transcript::read_session_events(workspace_root, &thread_id)?;
         let active_turn = self.active_turn_state(&thread_id);
-        let latest_turn = latest_turn_state(&events);
         let has_pending_approval = snapshot
             .pending_approvals
             .iter()
             .any(|approval| matches!(approval.status, crate::session::ApprovalStatus::Pending));
+        let latest_turn = latest_turn_state(&events);
         let status = if active_turn.is_some() {
             ThreadStatus::Running
         } else if has_pending_approval {
@@ -261,22 +290,31 @@ impl ThreadManager {
         };
 
         Ok(ThreadReadResponse {
-            thread_id,
-            status,
-            active_turn,
-            latest_turn,
-            snapshot_path: paths.snapshot_path,
-            events_path: paths.events_path,
+            thread: build_thread_view(
+                thread_id,
+                status,
+                active_turn,
+                events,
+                paths.snapshot_path,
+                paths.events_path,
+            ),
         })
     }
 
     pub fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse> {
         let ignored_overrides = ignored_resume_overrides(&params);
         let config = OverridePolicy::merge_thread_resume(&self.base_config, params.workspace_root)?;
-        let thread = self.thread_read_resolved(params.thread_id, &config.workspace_root)?;
+        let workspace_root = config.workspace_root.clone();
+        let new_thread = self.start_thread_with_options(StartThreadOptions {
+            config,
+            initial_history: InitialHistory::Resume {
+                thread_id: params.thread_id,
+            },
+        })?;
+        let thread = self.thread_read_resolved(new_thread.thread_id, &workspace_root)?;
 
         Ok(ThreadResumeResponse {
-            thread,
+            thread: thread.thread,
             ignored_overrides,
         })
     }
@@ -291,6 +329,11 @@ impl ThreadManager {
         }
     }
 
+    async fn turn_start_and_wait(&self, params: TurnStartParams) -> Result<AgentRunResponse> {
+        let TurnStartRun { output, .. } = self.run_turn_through_runtime(params).await?;
+        Ok(agent_run_response(output))
+    }
+
     pub async fn turn_interrupt(
         &self,
         params: TurnInterruptParams,
@@ -302,44 +345,22 @@ impl ThreadManager {
             return Err(AppServerError::ThreadNotFound(params.thread_id).into());
         }
 
-        let Some(record) = self.active_turn_record(&params.thread_id) else {
-            return self
-                .interrupt_waiting_approval_turn(params, &config.workspace_root)
-                .await;
-        };
-        if let Some(requested_turn_id) = params.turn_id.as_ref() {
-            if requested_turn_id != &record.turn_id {
-                return Err(AppServerError::TurnRejected {
+        if let Some(runtime) = self.runtime_for(&params.thread_id) {
+            if runtime.active_turn_id().is_some() {
+                let turn_id = runtime
+                    .interrupt_active_turn(params.turn_id.as_ref())
+                    .await?;
+                return Ok(TurnInterruptResponse {
                     thread_id: params.thread_id,
-                    reason: format!("active turn is {}", record.turn_id.as_str()),
-                }
-                .into());
+                    interrupted_turn: Some(TurnState {
+                        turn_id,
+                        status: TurnStatus::Interrupted,
+                    }),
+                });
             }
         }
-
-        let did_send_interrupt = record
-            .interrupt_tx
-            .lock()
-            .expect("active turn interrupt mutex poisoned")
-            .take()
-            .map(|interrupt_tx| interrupt_tx.send(()).is_ok())
-            .unwrap_or(false);
-        if !did_send_interrupt {
-            return Err(AppServerError::TurnRejected {
-                thread_id: params.thread_id,
-                reason: "active turn is already interrupting or completed".to_string(),
-            }
-            .into());
-        }
-        record.interrupted.notified().await;
-
-        Ok(TurnInterruptResponse {
-            thread_id: params.thread_id,
-            interrupted_turn: Some(TurnState {
-                turn_id: record.turn_id,
-                status: TurnStatus::Interrupted,
-            }),
-        })
+        self.interrupt_waiting_approval_turn(params, &config.workspace_root)
+            .await
     }
 
     async fn interrupt_waiting_approval_turn(
@@ -408,14 +429,24 @@ impl ThreadManager {
     }
 
     async fn turn_start_direct(&self, params: TurnStartParams) -> Result<TurnStartResponse> {
+        let TurnStartStarted {
+            thread_id, turn_id, ..
+        } = self.start_turn_in_background(params).await?;
+
+        Ok(TurnStartResponse {
+            thread_id,
+            turn: TurnView {
+                id: turn_id,
+                status: TurnStatus::InProgress,
+                items: vec![],
+            },
+        })
+    }
+
+    async fn run_turn_through_runtime(&self, params: TurnStartParams) -> Result<TurnStartRun> {
         let config = OverridePolicy::merge_turn_start(&self.base_config, params.workspace_root)?;
         let thread_id = params.thread_id;
         let turn_id = next_turn_id(&config.workspace_root, &thread_id)?;
-        let ActiveTurnReservation {
-            _guard: _active_turn,
-            interrupt_rx,
-            interrupted,
-        } = self.reserve_active_turn(&thread_id, turn_id.clone())?;
         let turn_cwd = if let Some(turn_context) = params.turn_context {
             let snapshot =
                 crate::transcript::read_session_snapshot(&config.workspace_root, &thread_id)?;
@@ -424,55 +455,47 @@ impl ThreadManager {
         } else {
             None
         };
-        crate::transcript::append_runtime_event(
-            &config.workspace_root,
-            &thread_id,
-            Some(&turn_id),
-            RuntimeEventKind::TurnStarted,
-        )?;
-        let agent = self.agent_for(config.clone())?;
-        let run_thread_id = thread_id.clone();
+        let runtime = self.ensure_runtime_loaded(&thread_id, config)?;
         let prompt = params.prompt;
-        let output = tokio::select! {
-            result = agent
-                .resume_with_turn_cwd(&run_thread_id, &prompt, turn_cwd)
-                => match result {
-                    Ok(output) => output,
-                    Err(err) => {
-                        let message = err.to_string();
-                        let _ = crate::transcript::append_runtime_event(
-                            &config.workspace_root,
-                            &thread_id,
-                            Some(&turn_id),
-                            RuntimeEventKind::RuntimeError { message },
-                        );
-                        return Err(err);
-                    }
-                },
-            _ = interrupt_rx => {
-                let append_result = crate::transcript::append_runtime_event(
-                    &config.workspace_root,
-                    &thread_id,
-                    Some(&turn_id),
-                    RuntimeEventKind::TurnInterrupted,
-                );
-                interrupted.notify_one();
-                append_result?;
-                return Err(AppServerError::TurnInterrupted { thread_id, turn_id }.into());
-            }
+        let result = runtime
+            .submit_user_input_and_wait(
+                turn_id.clone(),
+                prompt,
+                turn_cwd.map(|cwd| ThreadTurnContext { cwd: Some(cwd) }),
+            )
+            .await?;
+        let ThreadOpResult::UserInput { output, .. } = result else {
+            return Err(AppServerError::InvalidRequest(
+                "turn_start returned non-user-input runtime result".into(),
+            )
+            .into());
         };
-        crate::transcript::append_runtime_event(
-            &config.workspace_root,
-            &thread_id,
-            Some(&turn_id),
-            RuntimeEventKind::TurnCompleted,
-        )?;
 
-        Ok(TurnStartResponse {
-            thread_id,
-            turn_id,
-            output: agent_run_response(output),
-        })
+        Ok(TurnStartRun { output })
+    }
+
+    async fn start_turn_in_background(&self, params: TurnStartParams) -> Result<TurnStartStarted> {
+        let config = OverridePolicy::merge_turn_start(&self.base_config, params.workspace_root)?;
+        let thread_id = params.thread_id;
+        let turn_id = next_turn_id(&config.workspace_root, &thread_id)?;
+        let turn_cwd = if let Some(turn_context) = params.turn_context {
+            let snapshot =
+                crate::transcript::read_session_snapshot(&config.workspace_root, &thread_id)?;
+            let snapshot = OverridePolicy::apply_turn_context(&snapshot, turn_context)?;
+            Some(snapshot.cwd)
+        } else {
+            None
+        };
+        let runtime = self.ensure_runtime_loaded(&thread_id, config)?;
+        runtime
+            .submit_user_input(
+                turn_id.clone(),
+                params.prompt,
+                turn_cwd.map(|cwd| ThreadTurnContext { cwd: Some(cwd) }),
+            )
+            .await?;
+
+        Ok(TurnStartStarted { thread_id, turn_id })
     }
 
     pub async fn thread_spawn_child(
@@ -575,6 +598,20 @@ impl ThreadManager {
         })
     }
 
+    pub fn events_subscribe(
+        &self,
+        params: EventsSubscribeParams,
+    ) -> Result<broadcast::Receiver<RuntimeEvent>> {
+        let config =
+            OverridePolicy::merge_events_replay(&self.base_config, params.workspace_root.clone())?;
+        let paths = crate::transcript::session_paths(&config.workspace_root, &params.thread_id);
+        if !paths.snapshot_path.exists() {
+            return Err(AppServerError::ThreadNotFound(params.thread_id).into());
+        }
+        let runtime = self.ensure_runtime_loaded(&params.thread_id, config)?;
+        Ok(runtime.subscribe_events())
+    }
+
     fn agent_for(&self, config: AgentConfig) -> Result<Agent> {
         let llm = self.llm_factory.build(&config)?;
         Ok(Agent::with_runtime(
@@ -586,70 +623,101 @@ impl ThreadManager {
         ))
     }
 
-    fn active_turn_state(&self, thread_id: &SessionId) -> Option<TurnState> {
-        self.active_turn_record(thread_id).map(|record| TurnState {
-            turn_id: record.turn_id,
-            status: TurnStatus::Running,
+    fn runtime_agent_factory(&self) -> AgentFactory {
+        let llm_factory = self.llm_factory.clone();
+        let registry_factory = self.registry_factory.clone();
+        let exec_sessions = self.exec_sessions.clone();
+        let policy = self.policy.clone();
+
+        Arc::new(move |config: AgentConfig| {
+            let llm = llm_factory.build(&config)?;
+            Ok(Agent::with_runtime(
+                config,
+                llm,
+                (registry_factory)(),
+                exec_sessions.clone(),
+                policy.clone(),
+            ))
         })
     }
 
-    fn active_turn_record(&self, thread_id: &SessionId) -> Option<ActiveTurnRecord> {
-        self.active_turns
-            .lock()
-            .ok()
-            .and_then(|active_turns| active_turns.get(thread_id.as_str()).cloned())
+    fn start_thread_with_options(&self, options: StartThreadOptions) -> Result<NewThread> {
+        match options.initial_history {
+            InitialHistory::New => {
+                let thread_id = crate::transcript::new_session_id();
+                let snapshot = SessionSnapshot::new_thread(
+                    thread_id.clone(),
+                    options.config.workspace_root.clone(),
+                    options.config.cwd.clone(),
+                );
+                let paths = crate::transcript::session_paths(&snapshot.workspace_root, &thread_id);
+                crate::transcript::write_json(&paths.snapshot_path, &snapshot)?;
+                let runtime = self.ensure_runtime_loaded(&thread_id, options.config)?;
+
+                Ok(NewThread {
+                    thread_id,
+                    runtime,
+                    snapshot_path: paths.snapshot_path,
+                    events_path: paths.events_path,
+                })
+            }
+            InitialHistory::Resume { thread_id } => {
+                let paths =
+                    crate::transcript::session_paths(&options.config.workspace_root, &thread_id);
+                if !paths.snapshot_path.exists() {
+                    return Err(AppServerError::ThreadNotFound(thread_id).into());
+                }
+                let runtime = self.ensure_runtime_loaded(&thread_id, options.config)?;
+
+                Ok(NewThread {
+                    thread_id,
+                    runtime,
+                    snapshot_path: paths.snapshot_path,
+                    events_path: paths.events_path,
+                })
+            }
+        }
     }
 
-    fn reserve_active_turn(
+    fn ensure_runtime_loaded(
         &self,
         thread_id: &SessionId,
-        turn_id: TurnId,
-    ) -> Result<ActiveTurnReservation> {
-        let mut active_turns = self
-            .active_turns
+        config: AgentConfig,
+    ) -> Result<Arc<ThreadRuntime>> {
+        if let Some(runtime) = self.runtime_for(thread_id) {
+            return Ok(runtime);
+        }
+
+        let runtime = ThreadRuntime::spawn(
+            ThreadRuntimeOptions::new(thread_id.clone(), config)
+                .with_agent_factory(self.runtime_agent_factory()),
+        )?;
+        self.loaded_threads
             .lock()
-            .expect("active turn mutex poisoned");
-        if active_turns.contains_key(thread_id.as_str()) {
-            return Err(AppServerError::ThreadBusy(thread_id.clone()).into());
-        }
-        let (interrupt_tx, interrupt_rx) = oneshot::channel();
-        let interrupted = Arc::new(Notify::new());
-        active_turns.insert(
-            thread_id.as_str().to_string(),
-            ActiveTurnRecord {
-                turn_id,
-                interrupt_tx: Arc::new(Mutex::new(Some(interrupt_tx))),
-                interrupted: interrupted.clone(),
-            },
-        );
-
-        Ok(ActiveTurnReservation {
-            _guard: ActiveTurnGuard {
-                active_turns: self.active_turns.clone(),
-                thread_id: thread_id.as_str().to_string(),
-            },
-            interrupt_rx,
-            interrupted,
-        })
+            .expect("loaded threads mutex poisoned")
+            .insert(thread_id.as_str().to_string(), runtime.clone());
+        Ok(runtime)
     }
-}
 
-struct ActiveTurnReservation {
-    _guard: ActiveTurnGuard,
-    interrupt_rx: oneshot::Receiver<()>,
-    interrupted: Arc<Notify>,
-}
+    fn runtime_for(&self, thread_id: &SessionId) -> Option<Arc<ThreadRuntime>> {
+        self.loaded_threads
+            .lock()
+            .ok()
+            .and_then(|loaded_threads| loaded_threads.get(thread_id.as_str()).cloned())
+    }
 
-struct ActiveTurnGuard {
-    active_turns: Arc<Mutex<HashMap<String, ActiveTurnRecord>>>,
-    thread_id: String,
-}
+    #[cfg(test)]
+    fn is_thread_loaded(&self, thread_id: &SessionId) -> bool {
+        self.runtime_for(thread_id).is_some()
+    }
 
-impl Drop for ActiveTurnGuard {
-    fn drop(&mut self) {
-        if let Ok(mut active_turns) = self.active_turns.lock() {
-            active_turns.remove(&self.thread_id);
-        }
+    fn active_turn_state(&self, thread_id: &SessionId) -> Option<TurnState> {
+        self.runtime_for(thread_id)
+            .and_then(|runtime| runtime.active_turn_id())
+            .map(|turn_id| TurnState {
+                turn_id,
+                status: TurnStatus::InProgress,
+            })
     }
 }
 
@@ -703,7 +771,7 @@ fn latest_turn_state(events: &[crate::events::RuntimeEvent]) -> Option<TurnState
     events.iter().rev().find_map(|event| {
         let turn_id = event.turn_id.clone()?;
         let status = match &event.kind {
-            RuntimeEventKind::TurnStarted => TurnStatus::Running,
+            RuntimeEventKind::TurnStarted => TurnStatus::InProgress,
             RuntimeEventKind::TurnCompleted => TurnStatus::Completed,
             RuntimeEventKind::TurnInterrupted => TurnStatus::Interrupted,
             RuntimeEventKind::RuntimeError { .. } => TurnStatus::Failed,
@@ -714,10 +782,181 @@ fn latest_turn_state(events: &[crate::events::RuntimeEvent]) -> Option<TurnState
             | RuntimeEventKind::ApprovalDecision { .. }
             | RuntimeEventKind::SessionSpawned { .. }
             | RuntimeEventKind::CompactionWritten { .. }
-            | RuntimeEventKind::StructuredResultRecorded { .. } => TurnStatus::Running,
+            | RuntimeEventKind::StructuredResultRecorded { .. } => TurnStatus::InProgress,
         };
         Some(TurnState { turn_id, status })
     })
+}
+
+fn build_thread_view(
+    thread_id: SessionId,
+    status: ThreadStatus,
+    active_turn: Option<TurnState>,
+    events: Vec<RuntimeEvent>,
+    snapshot_path: PathBuf,
+    events_path: PathBuf,
+) -> ThreadView {
+    let mut turns = build_turn_views(events);
+    let active_turn_view = active_turn.map(|state| {
+        let index = ensure_turn_view(&mut turns, &state.turn_id);
+        turns[index].status = state.status;
+        turns[index].clone()
+    });
+
+    ThreadView {
+        id: thread_id,
+        status,
+        active_turn: active_turn_view,
+        turns,
+        snapshot_path,
+        events_path,
+    }
+}
+
+fn build_turn_views(events: Vec<RuntimeEvent>) -> Vec<TurnView> {
+    let mut turns = Vec::new();
+    let mut current_turn_id: Option<TurnId> = None;
+
+    for event in events {
+        match &event.kind {
+            RuntimeEventKind::TurnStarted => {
+                let Some(turn_id) = event.turn_id.clone() else {
+                    continue;
+                };
+                let index = ensure_turn_view(&mut turns, &turn_id);
+                turns[index].status = TurnStatus::InProgress;
+                current_turn_id = Some(turn_id);
+            }
+            RuntimeEventKind::TurnCompleted => {
+                let Some(turn_id) = event.turn_id.clone() else {
+                    continue;
+                };
+                let index = ensure_turn_view(&mut turns, &turn_id);
+                turns[index].status = TurnStatus::Completed;
+                if current_turn_id.as_ref() == Some(&turn_id) {
+                    current_turn_id = None;
+                }
+            }
+            RuntimeEventKind::TurnInterrupted => {
+                let Some(turn_id) = event.turn_id.clone() else {
+                    continue;
+                };
+                let index = ensure_turn_view(&mut turns, &turn_id);
+                turns[index].status = TurnStatus::Interrupted;
+                if current_turn_id.as_ref() == Some(&turn_id) {
+                    current_turn_id = None;
+                }
+            }
+            RuntimeEventKind::RuntimeError { .. } => {
+                if let Some(turn_id) = view_turn_id(&event, current_turn_id.as_ref()) {
+                    let index = ensure_turn_view(&mut turns, &turn_id);
+                    turns[index].status = TurnStatus::Failed;
+                    if let Some(item) = thread_item_from_event(&event.kind) {
+                        turns[index].items.push(item);
+                    }
+                }
+            }
+            RuntimeEventKind::ApprovalRequested { .. } => {
+                if let Some(turn_id) = view_turn_id(&event, current_turn_id.as_ref()) {
+                    let index = ensure_turn_view(&mut turns, &turn_id);
+                    turns[index].status = TurnStatus::WaitingApproval;
+                    if let Some(item) = thread_item_from_event(&event.kind) {
+                        turns[index].items.push(item);
+                    }
+                }
+            }
+            RuntimeEventKind::AssistantTurn { .. }
+            | RuntimeEventKind::ToolResult { .. }
+            | RuntimeEventKind::ExecOutput { .. }
+            | RuntimeEventKind::ApprovalDecision { .. }
+            | RuntimeEventKind::CompactionWritten { .. }
+            | RuntimeEventKind::StructuredResultRecorded { .. } => {
+                if let Some(turn_id) = view_turn_id(&event, current_turn_id.as_ref()) {
+                    let index = ensure_turn_view(&mut turns, &turn_id);
+                    if let Some(item) = thread_item_from_event(&event.kind) {
+                        turns[index].items.push(item);
+                    }
+                }
+            }
+            RuntimeEventKind::SessionSpawned { .. } => {}
+        }
+    }
+
+    turns
+}
+
+fn ensure_turn_view(turns: &mut Vec<TurnView>, turn_id: &TurnId) -> usize {
+    if let Some(index) = turns.iter().position(|turn| &turn.id == turn_id) {
+        return index;
+    }
+
+    turns.push(TurnView {
+        id: turn_id.clone(),
+        status: TurnStatus::InProgress,
+        items: vec![],
+    });
+    turns.len() - 1
+}
+
+fn view_turn_id(event: &RuntimeEvent, current_turn_id: Option<&TurnId>) -> Option<TurnId> {
+    current_turn_id.cloned().or_else(|| event.turn_id.clone())
+}
+
+fn thread_item_from_event(kind: &RuntimeEventKind) -> Option<ThreadItem> {
+    match kind {
+        RuntimeEventKind::AssistantTurn { turn } => Some(ThreadItem::AssistantMessage {
+            text: turn.text.clone(),
+        }),
+        RuntimeEventKind::ToolResult { result } => Some(ThreadItem::ToolResult {
+            name: result.tool_name.clone(),
+        }),
+        RuntimeEventKind::ExecOutput { chunk, .. } => Some(ThreadItem::ExecOutput {
+            text: chunk.clone(),
+        }),
+        RuntimeEventKind::ApprovalRequested {
+            tool_name, reason, ..
+        } => Some(ThreadItem::ApprovalRequested {
+            tool_name: tool_name.clone(),
+            reason: reason.clone(),
+        }),
+        RuntimeEventKind::ApprovalDecision { status, note, .. } => {
+            Some(ThreadItem::ApprovalDecision {
+                status: approval_status_name(status).to_string(),
+                note: note.clone(),
+            })
+        }
+        RuntimeEventKind::RuntimeError { message } => Some(ThreadItem::RuntimeError {
+            message: message.clone(),
+        }),
+        RuntimeEventKind::StructuredResultRecorded { result } => {
+            Some(ThreadItem::StructuredResult {
+                kind: structured_result_kind(result).to_string(),
+            })
+        }
+        RuntimeEventKind::CompactionWritten { .. } => Some(ThreadItem::CompactionWritten),
+        RuntimeEventKind::TurnStarted
+        | RuntimeEventKind::TurnCompleted
+        | RuntimeEventKind::TurnInterrupted
+        | RuntimeEventKind::SessionSpawned { .. } => None,
+    }
+}
+
+fn approval_status_name(status: &crate::session::ApprovalStatus) -> &'static str {
+    match status {
+        crate::session::ApprovalStatus::Pending => "pending",
+        crate::session::ApprovalStatus::Approved => "approved",
+        crate::session::ApprovalStatus::Denied => "denied",
+    }
+}
+
+fn structured_result_kind(
+    result: &crate::result_contract::StructuredSessionResult,
+) -> &'static str {
+    match &result.payload {
+        crate::result_contract::StructuredResultPayload::Spec { .. } => "spec",
+        crate::result_contract::StructuredResultPayload::Test { .. } => "test",
+        crate::result_contract::StructuredResultPayload::Judge { .. } => "judge",
+    }
 }
 
 fn filter_replay_events(
@@ -810,5 +1049,45 @@ fn agent_run_response(output: AgentRunOutput) -> AgentRunResponse {
         session_id: output.session_id,
         snapshot_path: output.snapshot_path,
         events_path: output.events_path,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tempfile::tempdir;
+
+    use crate::llm::MockLlm;
+
+    #[test]
+    fn thread_start_registers_loaded_runtime_and_thread_resume_reuses_it() {
+        let dir = tempdir().unwrap();
+        let manager = ThreadManager::with_llm(
+            AgentConfig::default(),
+            Box::new(MockLlm::new(vec![])),
+            || ToolRegistry::new(),
+        );
+
+        let started = manager
+            .thread_start(ThreadStartParams {
+                workspace_root: Some(dir.path().display().to_string()),
+                cwd: None,
+            })
+            .expect("thread start");
+        assert!(manager.is_thread_loaded(&started.thread.id));
+        let started_runtime = manager.runtime_for(&started.thread.id).unwrap();
+
+        let resumed = manager
+            .thread_resume(ThreadResumeParams {
+                thread_id: started.thread.id.clone(),
+                workspace_root: Some(dir.path().display().to_string()),
+                cwd: None,
+            })
+            .expect("thread resume");
+
+        assert_eq!(resumed.thread.id, started.thread.id);
+        let resumed_runtime = manager.runtime_for(&started.thread.id).unwrap();
+        assert!(Arc::ptr_eq(&started_runtime, &resumed_runtime));
     }
 }

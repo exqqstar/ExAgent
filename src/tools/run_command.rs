@@ -414,7 +414,7 @@ fn record_approval_request_event(
     let event = RuntimeEvent {
         event_id: event_id.clone(),
         session_id: approval.session_id.clone(),
-        turn_id: None,
+        turn_id: ctx.turn_id.clone(),
         kind: RuntimeEventKind::ApprovalRequested {
             approval_id: approval.approval_id.clone(),
             tool_name: approval.tool_name.clone(),
@@ -438,7 +438,7 @@ fn record_approval_decision_event(
     let event = RuntimeEvent {
         event_id: new_policy_event_id(),
         session_id: session_id.clone(),
-        turn_id: None,
+        turn_id: ctx.turn_id.clone(),
         kind: RuntimeEventKind::ApprovalDecision {
             approval_id: approval_id.clone(),
             status,

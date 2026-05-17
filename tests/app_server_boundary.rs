@@ -2,9 +2,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use exagent::app_server::protocol::{
     BoundaryCapability, BoundaryOp, BoundaryOpResponse, EventsReplayParams, IgnoredOverrideField,
-    InitializeParams, RunParams, ThreadReadParams, ThreadResumeParams, ThreadSpawnChildParams,
-    ThreadStartParams, ThreadStatus, TurnContextOverrides, TurnInterruptParams, TurnStartParams,
-    TurnStatus,
+    InitializeParams, RunParams, ThreadItem, ThreadReadParams, ThreadResumeParams,
+    ThreadSpawnChildParams, ThreadStartParams, ThreadStatus, TurnContextOverrides,
+    TurnInterruptParams, TurnStartParams, TurnStatus,
 };
 use exagent::app_server::{AppServerError, AppServerService};
 use exagent::config::AgentConfig;
@@ -100,8 +100,72 @@ fn assert_events_jsonl_is_valid(events_path: &std::path::Path) {
     }
 }
 
+async fn wait_for_turn_event(
+    service: &AppServerService,
+    thread_id: &SessionId,
+    turn_id: &TurnId,
+    predicate: impl Fn(&RuntimeEventKind) -> bool,
+) {
+    for _ in 0..200 {
+        let replay = service
+            .events_replay(events_replay_params(thread_id.clone()))
+            .unwrap();
+        if replay
+            .events
+            .iter()
+            .filter(|event| event.turn_id.as_ref() == Some(turn_id))
+            .any(|event| predicate(&event.kind))
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    panic!("timed out waiting for turn event");
+}
+
+async fn wait_for_turn_completed(
+    service: &AppServerService,
+    thread_id: &SessionId,
+    turn_id: &TurnId,
+) {
+    wait_for_turn_event(service, thread_id, turn_id, |kind| {
+        matches!(kind, RuntimeEventKind::TurnCompleted)
+    })
+    .await;
+}
+
+async fn wait_for_runtime_error(
+    service: &AppServerService,
+    thread_id: &SessionId,
+    turn_id: &TurnId,
+) {
+    wait_for_turn_event(service, thread_id, turn_id, |kind| {
+        matches!(kind, RuntimeEventKind::RuntimeError { .. })
+    })
+    .await;
+}
+
+async fn wait_for_thread_event(
+    service: &AppServerService,
+    thread_id: &SessionId,
+    predicate: impl Fn(&RuntimeEventKind) -> bool,
+) {
+    for _ in 0..200 {
+        let replay = service
+            .events_replay(events_replay_params(thread_id.clone()))
+            .unwrap();
+        if replay.events.iter().any(|event| predicate(&event.kind)) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    panic!("timed out waiting for thread event");
+}
+
 #[tokio::test]
-async fn initialize_boundary_advertises_v1_protocol_surface() {
+async fn initialize_boundary_advertises_v2_protocol_surface() {
     let service = AppServerService::with_llm(
         AgentConfig::default(),
         Box::new(MockLlm::new(vec![])),
@@ -118,7 +182,7 @@ async fn initialize_boundary_advertises_v1_protocol_surface() {
     };
     assert_eq!(
         initialized.protocol_version,
-        "appserver-runtime-boundary-v1"
+        "appserver-runtime-boundary-v2"
     );
     assert_eq!(
         initialized.supported_ops,
@@ -132,6 +196,10 @@ async fn initialize_boundary_advertises_v1_protocol_surface() {
             BoundaryCapability::TurnInterrupt,
             BoundaryCapability::EventsReplay,
         ]
+    );
+    assert_eq!(
+        initialized.supported_streams,
+        vec![BoundaryCapability::EventsSubscribe]
     );
 }
 
@@ -236,10 +304,10 @@ fn thread_start_applies_workspace_and_cwd_overrides() {
         .unwrap();
 
     let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(response.snapshot_path.as_ref()).unwrap();
-    assert_eq!(snapshot.session_id, response.thread_id);
+        exagent::transcript::read_json(response.thread.snapshot_path.as_ref()).unwrap();
+    assert_eq!(snapshot.session_id, response.thread.id);
     assert_eq!(snapshot.parent_session_id, None);
-    assert_eq!(snapshot.root_session_id, response.thread_id);
+    assert_eq!(snapshot.root_session_id, response.thread.id);
     assert_eq!(
         snapshot.workspace_root,
         std::fs::canonicalize(dir.path()).unwrap()
@@ -294,7 +362,7 @@ async fn turn_start_runs_existing_thread_non_streaming_and_events_replay_returns
         .unwrap();
     let turn = service
         .turn_start(TurnStartParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             prompt: "continue work".into(),
             workspace_root: None,
             turn_context: None,
@@ -302,14 +370,16 @@ async fn turn_start_runs_existing_thread_non_streaming_and_events_replay_returns
         .await
         .unwrap();
 
-    assert_eq!(turn.thread_id, thread.thread_id);
-    assert_eq!(turn.turn_id, TurnId::new("turn_1"));
-    assert_eq!(turn.output.text.as_deref(), Some("thread turn complete"));
+    assert_eq!(turn.thread_id, thread.thread.id);
+    assert_eq!(turn.turn.id, TurnId::new("turn_1"));
+    assert_eq!(turn.turn.status, TurnStatus::InProgress);
+
+    wait_for_turn_completed(&service, &thread.thread.id, &turn.turn.id).await;
 
     let replay = service
-        .events_replay(events_replay_params(thread.thread_id.clone()))
+        .events_replay(events_replay_params(thread.thread.id.clone()))
         .unwrap();
-    assert_eq!(replay.thread_id, thread.thread_id);
+    assert_eq!(replay.thread_id, thread.thread.id);
     assert_eq!(replay.events.len(), 3);
     assert!(matches!(
         &replay.events[0].kind,
@@ -323,9 +393,161 @@ async fn turn_start_runs_existing_thread_non_streaming_and_events_replay_returns
         &replay.events[2].kind,
         RuntimeEventKind::TurnCompleted
     ));
-    assert_eq!(replay.events[0].turn_id, Some(turn.turn_id.clone()));
-    assert_eq!(replay.events[1].turn_id, Some(turn.turn_id.clone()));
-    assert_eq!(replay.events[2].turn_id, Some(turn.turn_id));
+    assert_eq!(replay.events[0].turn_id, Some(turn.turn.id.clone()));
+    assert_eq!(replay.events[1].turn_id, Some(turn.turn.id.clone()));
+    assert_eq!(replay.events[2].turn_id, Some(turn.turn.id));
+}
+
+#[tokio::test]
+async fn thread_read_reconstructs_turn_view_from_replayed_events() {
+    let dir = tempdir().unwrap();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![
+            AssistantTurn {
+                text: Some("need tool".into()),
+                tool_calls: vec![ToolCall {
+                    id: "call_cwd_probe".into(),
+                    name: "cwd_probe".into(),
+                    arguments: serde_json::json!({}),
+                }],
+            },
+            AssistantTurn {
+                text: Some("tool done".into()),
+                tool_calls: vec![],
+            },
+        ])),
+        || {
+            let mut registry = ToolRegistry::new();
+            registry.register(CwdProbeTool {
+                observed_cwd: Arc::new(Mutex::new(None)),
+            });
+            registry
+        },
+    );
+
+    let thread = service
+        .thread_start(ThreadStartParams {
+            workspace_root: None,
+            cwd: None,
+        })
+        .unwrap();
+    let turn = service
+        .turn_start(TurnStartParams {
+            thread_id: thread.thread.id.clone(),
+            prompt: "run a tool".into(),
+            workspace_root: None,
+            turn_context: None,
+        })
+        .await
+        .unwrap();
+    wait_for_turn_completed(&service, &thread.thread.id, &turn.turn.id).await;
+
+    let replay = service
+        .events_replay(events_replay_params(thread.thread.id.clone()))
+        .unwrap();
+    assert_eq!(replay.events.len(), 5);
+    assert!(replay
+        .events
+        .iter()
+        .all(|event| event.turn_id.as_ref() == Some(&turn.turn.id)));
+
+    let read = service
+        .thread_read(ThreadReadParams {
+            thread_id: thread.thread.id,
+            workspace_root: None,
+        })
+        .unwrap();
+    assert_eq!(read.thread.turns.len(), 1);
+    let view = read.thread.turns.last().unwrap();
+    assert_eq!(view.id, turn.turn.id);
+    assert_eq!(view.status, TurnStatus::Completed);
+    assert_eq!(view.items.len(), 3);
+    assert!(matches!(
+        &view.items[0],
+        ThreadItem::AssistantMessage { text } if text.as_deref() == Some("need tool")
+    ));
+    assert!(matches!(
+        &view.items[1],
+        ThreadItem::ToolResult { name } if name == "cwd_probe"
+    ));
+    assert!(matches!(
+        &view.items[2],
+        ThreadItem::AssistantMessage { text } if text.as_deref() == Some("tool done")
+    ));
+}
+
+#[tokio::test]
+async fn events_subscribe_receives_live_turn_lifecycle_events() {
+    let dir = tempdir().unwrap();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![AssistantTurn {
+            text: Some("live event complete".into()),
+            tool_calls: vec![],
+        }])),
+        ToolRegistry::new,
+    );
+
+    let thread = service
+        .thread_start(ThreadStartParams {
+            workspace_root: None,
+            cwd: None,
+        })
+        .unwrap();
+    let mut events = service
+        .events_subscribe(exagent::app_server::protocol::EventsSubscribeParams {
+            thread_id: thread.thread.id.clone(),
+            workspace_root: None,
+            after_event_id: None,
+        })
+        .unwrap();
+
+    let turn = service
+        .turn_start(TurnStartParams {
+            thread_id: thread.thread.id.clone(),
+            prompt: "stream live events".into(),
+            workspace_root: None,
+            turn_context: None,
+        })
+        .await
+        .unwrap();
+
+    let first = events.recv().await.unwrap();
+    assert_eq!(first.turn_id.as_ref(), Some(&turn.turn.id));
+    assert!(matches!(first.kind, RuntimeEventKind::TurnStarted));
+    wait_for_turn_completed(&service, &thread.thread.id, &turn.turn.id).await;
+}
+
+#[test]
+fn events_subscribe_rejects_missing_thread() {
+    let dir = tempdir().unwrap();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![])),
+        ToolRegistry::new,
+    );
+
+    let err = service
+        .events_subscribe(exagent::app_server::protocol::EventsSubscribeParams {
+            thread_id: SessionId::new("missing-thread"),
+            workspace_root: None,
+            after_event_id: None,
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("thread not found: missing-thread"));
 }
 
 #[tokio::test]
@@ -354,9 +576,9 @@ async fn turn_start_applies_validated_context_override_with_user_input() {
             cwd: Some("original-cwd".into()),
         })
         .unwrap();
-    service
+    let turn = service
         .turn_start(TurnStartParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             prompt: "run from new cwd".into(),
             workspace_root: None,
             turn_context: Some(TurnContextOverrides {
@@ -365,9 +587,10 @@ async fn turn_start_applies_validated_context_override_with_user_input() {
         })
         .await
         .unwrap();
+    wait_for_turn_completed(&service, &thread.thread.id, &turn.turn.id).await;
 
     let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(thread.snapshot_path.as_ref()).unwrap();
+        exagent::transcript::read_json(thread.thread.snapshot_path.as_ref()).unwrap();
     assert_eq!(snapshot.cwd, std::fs::canonicalize(original_cwd).unwrap());
     assert!(snapshot
         .conversation
@@ -419,9 +642,9 @@ async fn turn_context_cwd_is_used_for_tools_without_becoming_thread_cwd() {
             cwd: Some("original-cwd".into()),
         })
         .unwrap();
-    service
+    let turn = service
         .turn_start(TurnStartParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             prompt: "probe cwd".into(),
             workspace_root: None,
             turn_context: Some(TurnContextOverrides {
@@ -430,13 +653,14 @@ async fn turn_context_cwd_is_used_for_tools_without_becoming_thread_cwd() {
         })
         .await
         .unwrap();
+    wait_for_turn_completed(&service, &thread.thread.id, &turn.turn.id).await;
 
     assert_eq!(
         *observed_cwd.lock().unwrap(),
         Some(std::fs::canonicalize(turn_cwd).unwrap())
     );
     let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(thread.snapshot_path.as_ref()).unwrap();
+        exagent::transcript::read_json(thread.thread.snapshot_path.as_ref()).unwrap();
     assert_eq!(snapshot.cwd, std::fs::canonicalize(original_cwd).unwrap());
 }
 
@@ -465,7 +689,7 @@ async fn turn_start_rejects_invalid_context_override_before_accepting_input() {
         .unwrap();
     let err = service
         .turn_start(TurnStartParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             prompt: "must not be accepted".into(),
             workspace_root: None,
             turn_context: Some(TurnContextOverrides {
@@ -479,10 +703,10 @@ async fn turn_start_rejects_invalid_context_override_before_accepting_input() {
         .contains("cwd must stay within workspace_root"));
 
     let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(thread.snapshot_path.as_ref()).unwrap();
+        exagent::transcript::read_json(thread.thread.snapshot_path.as_ref()).unwrap();
     assert!(snapshot.conversation.is_empty());
     let replay = service
-        .events_replay(events_replay_params(thread.thread_id))
+        .events_replay(events_replay_params(thread.thread.id))
         .unwrap();
     assert!(replay.events.is_empty());
 }
@@ -561,7 +785,7 @@ async fn thread_spawn_child_uses_parent_context_and_records_spawn_events() {
         .unwrap();
     let child = service
         .thread_spawn_child(ThreadSpawnChildParams {
-            parent_thread_id: parent.thread_id.clone(),
+            parent_thread_id: parent.thread.id.clone(),
             agent_role: AgentRole::Spec,
             prompt: "draft spec".into(),
             workspace_root: None,
@@ -571,7 +795,7 @@ async fn thread_spawn_child_uses_parent_context_and_records_spawn_events() {
         .await
         .unwrap();
 
-    assert_eq!(child.parent_thread_id, parent.thread_id);
+    assert_eq!(child.parent_thread_id, parent.thread.id);
     assert_eq!(child.agent_role, AgentRole::Spec);
     assert_eq!(child.output.text.as_deref(), Some("child complete"));
     assert_eq!(child.ignored_overrides, vec![IgnoredOverrideField::Cwd]);
@@ -580,9 +804,9 @@ async fn thread_spawn_child_uses_parent_context_and_records_spawn_events() {
         exagent::transcript::read_json(child.output.snapshot_path.as_ref()).unwrap();
     assert_eq!(
         child_snapshot.parent_session_id,
-        Some(parent.thread_id.clone())
+        Some(parent.thread.id.clone())
     );
-    assert_eq!(child_snapshot.root_session_id, parent.thread_id);
+    assert_eq!(child_snapshot.root_session_id, parent.thread.id);
     assert_eq!(
         child_snapshot.cwd,
         std::fs::canonicalize(parent_cwd).unwrap()
@@ -628,7 +852,7 @@ fn events_replay_returns_empty_list_for_new_thread() {
         .unwrap();
     let replay = service
         .events_replay(events_replay_params(SessionId::new(
-            thread.thread_id.as_str(),
+            thread.thread.id.as_str(),
         )))
         .unwrap();
 
@@ -656,7 +880,7 @@ fn events_replay_can_include_latest_snapshot_for_ui_reconstruction() {
         .unwrap();
     let replay = service
         .events_replay(EventsReplayParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             workspace_root: None,
             after_event_id: None,
             limit: None,
@@ -666,7 +890,7 @@ fn events_replay_can_include_latest_snapshot_for_ui_reconstruction() {
         .unwrap();
 
     let snapshot = replay.snapshot.expect("snapshot should be included");
-    assert_eq!(snapshot.thread_id, thread.thread_id);
+    assert_eq!(snapshot.thread_id, thread.thread.id);
     assert_eq!(snapshot.cwd, std::fs::canonicalize(dir.path()).unwrap());
     assert_eq!(snapshot.latest_compaction, None);
     assert_eq!(snapshot.open_exec_session_count, 0);
@@ -695,17 +919,17 @@ fn thread_read_reports_new_thread_as_idle_without_latest_turn() {
         .unwrap();
     let read = service
         .thread_read(ThreadReadParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             workspace_root: None,
         })
         .unwrap();
 
-    assert_eq!(read.thread_id, thread.thread_id);
-    assert_eq!(read.status, ThreadStatus::Idle);
-    assert_eq!(read.active_turn, None);
-    assert_eq!(read.latest_turn, None);
-    assert_eq!(read.snapshot_path, thread.snapshot_path);
-    assert_eq!(read.events_path, thread.events_path);
+    assert_eq!(read.thread.id, thread.thread.id);
+    assert_eq!(read.thread.status, ThreadStatus::Idle);
+    assert_eq!(read.thread.active_turn, None);
+    assert_eq!(read.thread.turns.last(), None);
+    assert_eq!(read.thread.snapshot_path, thread.thread.snapshot_path);
+    assert_eq!(read.thread.events_path, thread.thread.events_path);
 }
 
 #[test]
@@ -733,18 +957,18 @@ fn thread_resume_reads_persisted_thread_context_and_reports_ignored_cwd_override
         .unwrap();
     let resumed = service
         .thread_resume(ThreadResumeParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             workspace_root: None,
             cwd: Some("ignored-cwd".into()),
         })
         .unwrap();
 
-    assert_eq!(resumed.thread.thread_id, thread.thread_id);
+    assert_eq!(resumed.thread.id, thread.thread.id);
     assert_eq!(resumed.thread.status, ThreadStatus::Idle);
     assert_eq!(resumed.ignored_overrides, vec![IgnoredOverrideField::Cwd]);
 
     let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(thread.snapshot_path.as_ref()).unwrap();
+        exagent::transcript::read_json(thread.thread.snapshot_path.as_ref()).unwrap();
     assert_eq!(snapshot.cwd, std::fs::canonicalize(original_cwd).unwrap());
     assert_ne!(snapshot.cwd, ignored_cwd);
 }
@@ -780,14 +1004,14 @@ async fn legacy_run_resume_ignores_cwd_override_and_keeps_thread_snapshot_cwd() 
             prompt: "resume through legacy run".into(),
             workspace_root: None,
             cwd: Some("ignored-cwd".into()),
-            session_id: Some(thread.thread_id.clone()),
+            session_id: Some(thread.thread.id.clone()),
         })
         .await
         .unwrap();
 
     assert_eq!(output.text.as_deref(), Some("legacy resume complete"));
     let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(thread.snapshot_path.as_ref()).unwrap();
+        exagent::transcript::read_json(thread.thread.snapshot_path.as_ref()).unwrap();
     assert_eq!(snapshot.cwd, std::fs::canonicalize(original_cwd).unwrap());
     assert_ne!(snapshot.cwd, std::fs::canonicalize(ignored_cwd).unwrap());
 }
@@ -813,7 +1037,7 @@ async fn submit_boundary_op_dispatches_thread_read() {
         .unwrap();
     let response = service
         .submit_boundary_op(BoundaryOp::ThreadRead(ThreadReadParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             workspace_root: None,
         }))
         .await
@@ -822,8 +1046,8 @@ async fn submit_boundary_op_dispatches_thread_read() {
     let BoundaryOpResponse::ThreadRead(read) = response else {
         panic!("expected thread read response");
     };
-    assert_eq!(read.thread_id, thread.thread_id);
-    assert_eq!(read.status, ThreadStatus::Idle);
+    assert_eq!(read.thread.id, thread.thread.id);
+    assert_eq!(read.thread.status, ThreadStatus::Idle);
 }
 
 #[tokio::test]
@@ -850,8 +1074,8 @@ async fn submit_boundary_op_dispatches_thread_start() {
     let BoundaryOpResponse::ThreadStarted(started) = response else {
         panic!("expected thread start response");
     };
-    assert!(started.snapshot_path.exists());
-    assert!(started.events_path.ends_with("events.jsonl"));
+    assert!(started.thread.snapshot_path.exists());
+    assert!(started.thread.events_path.ends_with("events.jsonl"));
 }
 
 #[test]
@@ -914,7 +1138,7 @@ async fn submit_boundary_op_dispatches_turn_start() {
         .unwrap();
     let response = service
         .submit_boundary_op(BoundaryOp::TurnStart(TurnStartParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             prompt: "continue through op".into(),
             workspace_root: None,
             turn_context: None,
@@ -925,8 +1149,9 @@ async fn submit_boundary_op_dispatches_turn_start() {
     let BoundaryOpResponse::TurnStarted(turn) = response else {
         panic!("expected turn response");
     };
-    assert_eq!(turn.thread_id, thread.thread_id);
-    assert_eq!(turn.output.text.as_deref(), Some("op turn complete"));
+    assert_eq!(turn.thread_id, thread.thread.id);
+    assert_eq!(turn.turn.status, TurnStatus::InProgress);
+    wait_for_turn_completed(&service, &thread.thread.id, &turn.turn.id).await;
 }
 
 #[tokio::test]
@@ -951,19 +1176,20 @@ async fn submit_boundary_op_dispatches_events_replay_as_first_class_op() {
             cwd: None,
         })
         .unwrap();
-    service
+    let turn = service
         .turn_start(TurnStartParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             prompt: "produce replayable events".into(),
             workspace_root: None,
             turn_context: None,
         })
         .await
         .unwrap();
+    wait_for_turn_completed(&service, &thread.thread.id, &turn.turn.id).await;
 
     let response = service
         .submit_boundary_op(BoundaryOp::EventsReplay(events_replay_params(
-            thread.thread_id.clone(),
+            thread.thread.id.clone(),
         )))
         .await
         .unwrap();
@@ -971,7 +1197,7 @@ async fn submit_boundary_op_dispatches_events_replay_as_first_class_op() {
     let BoundaryOpResponse::EventsReplayed(replay) = response else {
         panic!("expected events replay response");
     };
-    assert_eq!(replay.thread_id, thread.thread_id);
+    assert_eq!(replay.thread_id, thread.thread.id);
     assert_eq!(replay.events.len(), 3);
 }
 
@@ -997,19 +1223,20 @@ async fn events_replay_supports_after_event_id_and_limit_cursor_fields() {
             cwd: None,
         })
         .unwrap();
-    service
+    let turn = service
         .turn_start(TurnStartParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             prompt: "make cursor events".into(),
             workspace_root: None,
             turn_context: None,
         })
         .await
         .unwrap();
+    wait_for_turn_completed(&service, &thread.thread.id, &turn.turn.id).await;
 
     let replay = service
         .events_replay(EventsReplayParams {
-            thread_id: thread.thread_id,
+            thread_id: thread.thread.id,
             workspace_root: None,
             after_event_id: Some(EventId::new("evt_1")),
             limit: Some(1),
@@ -1041,19 +1268,20 @@ async fn failed_turn_start_records_runtime_error_for_replay() {
             cwd: None,
         })
         .unwrap();
-    let err = service
+    let turn = service
         .turn_start(TurnStartParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             prompt: "this will fail".into(),
             workspace_root: None,
             turn_context: None,
         })
         .await
-        .unwrap_err();
-    assert!(err.to_string().contains("MockLlm is out of scripted turns"));
+        .unwrap();
+    assert_eq!(turn.turn.status, TurnStatus::InProgress);
+    wait_for_runtime_error(&service, &thread.thread.id, &turn.turn.id).await;
 
     let replay = service
-        .events_replay(events_replay_params(thread.thread_id))
+        .events_replay(events_replay_params(thread.thread.id))
         .unwrap();
     assert_eq!(replay.events.len(), 2);
     assert!(matches!(
@@ -1094,7 +1322,7 @@ async fn thread_rejects_second_turn_while_first_turn_is_running() {
         .unwrap();
 
     let first_service = service.clone();
-    let first_thread_id = thread.thread_id.clone();
+    let first_thread_id = thread.thread.id.clone();
     let first_turn = tokio::spawn(async move {
         first_service
             .turn_start(TurnStartParams {
@@ -1110,19 +1338,23 @@ async fn thread_rejects_second_turn_while_first_turn_is_running() {
 
     let read_running = service
         .thread_read(ThreadReadParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             workspace_root: None,
         })
         .unwrap();
-    assert_eq!(read_running.status, ThreadStatus::Running);
+    assert_eq!(read_running.thread.status, ThreadStatus::Running);
     assert_eq!(
-        read_running.active_turn.as_ref().map(|turn| &turn.status),
-        Some(&TurnStatus::Running)
+        read_running
+            .thread
+            .active_turn
+            .as_ref()
+            .map(|turn| &turn.status),
+        Some(&TurnStatus::InProgress)
     );
 
     let err = service
         .turn_start(TurnStartParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             prompt: "must be rejected".into(),
             workspace_root: None,
             turn_context: None,
@@ -1131,22 +1363,23 @@ async fn thread_rejects_second_turn_while_first_turn_is_running() {
         .unwrap_err();
     assert!(matches!(
         err.downcast_ref::<AppServerError>(),
-        Some(AppServerError::ThreadBusy(thread_id)) if thread_id == &thread.thread_id
+        Some(AppServerError::ThreadBusy(thread_id)) if thread_id == &thread.thread.id
     ));
 
     release.notify_one();
-    let completed = first_turn.await.unwrap().unwrap();
-    assert_eq!(completed.output.text.as_deref(), Some("released turn"));
+    let started_turn = first_turn.await.unwrap().unwrap();
+    assert_eq!(started_turn.turn.status, TurnStatus::InProgress);
+    wait_for_turn_completed(&service, &thread.thread.id, &started_turn.turn.id).await;
 
     let read_idle = service
         .thread_read(ThreadReadParams {
-            thread_id: thread.thread_id,
+            thread_id: thread.thread.id,
             workspace_root: None,
         })
         .unwrap();
-    assert_eq!(read_idle.status, ThreadStatus::Idle);
+    assert_eq!(read_idle.thread.status, ThreadStatus::Idle);
     assert_eq!(
-        read_idle.latest_turn.as_ref().map(|turn| &turn.status),
+        read_idle.thread.turns.last().map(|turn| &turn.status),
         Some(&TurnStatus::Completed)
     );
 }
@@ -1181,7 +1414,7 @@ async fn rejected_concurrent_turn_context_does_not_mutate_thread_snapshot() {
         .unwrap();
 
     let first_service = service.clone();
-    let first_thread_id = thread.thread_id.clone();
+    let first_thread_id = thread.thread.id.clone();
     let first_turn = tokio::spawn(async move {
         first_service
             .turn_start(TurnStartParams {
@@ -1197,7 +1430,7 @@ async fn rejected_concurrent_turn_context_does_not_mutate_thread_snapshot() {
 
     let err = service
         .turn_start(TurnStartParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             prompt: "must be rejected without context mutation".into(),
             workspace_root: None,
             turn_context: Some(TurnContextOverrides {
@@ -1208,16 +1441,17 @@ async fn rejected_concurrent_turn_context_does_not_mutate_thread_snapshot() {
         .unwrap_err();
     assert!(matches!(
         err.downcast_ref::<AppServerError>(),
-        Some(AppServerError::ThreadBusy(thread_id)) if thread_id == &thread.thread_id
+        Some(AppServerError::ThreadBusy(thread_id)) if thread_id == &thread.thread.id
     ));
 
     let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(thread.snapshot_path.as_ref()).unwrap();
+        exagent::transcript::read_json(thread.thread.snapshot_path.as_ref()).unwrap();
     assert_eq!(snapshot.cwd, std::fs::canonicalize(original_cwd).unwrap());
     assert_ne!(snapshot.cwd, std::fs::canonicalize(rejected_cwd).unwrap());
 
     release.notify_one();
-    first_turn.await.unwrap().unwrap();
+    let started_turn = first_turn.await.unwrap().unwrap();
+    wait_for_turn_completed(&service, &thread.thread.id, &started_turn.turn.id).await;
 }
 
 #[tokio::test]
@@ -1246,7 +1480,7 @@ async fn turn_interrupt_aborts_active_turn_and_records_interrupted_event() {
         .unwrap();
 
     let first_service = service.clone();
-    let first_thread_id = thread.thread_id.clone();
+    let first_thread_id = thread.thread.id.clone();
     let first_turn = tokio::spawn(async move {
         first_service
             .turn_start(TurnStartParams {
@@ -1259,9 +1493,11 @@ async fn turn_interrupt_aborts_active_turn_and_records_interrupted_event() {
     });
 
     started.notified().await;
+    let started_turn = first_turn.await.unwrap().unwrap();
+    assert_eq!(started_turn.turn.status, TurnStatus::InProgress);
     let response = service
         .submit_boundary_op(BoundaryOp::TurnInterrupt(TurnInterruptParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             turn_id: None,
             workspace_root: None,
         }))
@@ -1271,7 +1507,7 @@ async fn turn_interrupt_aborts_active_turn_and_records_interrupted_event() {
     let BoundaryOpResponse::TurnInterrupted(interrupted) = response else {
         panic!("expected turn interrupted response");
     };
-    assert_eq!(interrupted.thread_id, thread.thread_id);
+    assert_eq!(interrupted.thread_id, thread.thread.id);
     assert_eq!(
         interrupted
             .interrupted_turn
@@ -1281,35 +1517,28 @@ async fn turn_interrupt_aborts_active_turn_and_records_interrupted_event() {
     );
 
     let replay_after_response = service
-        .events_replay(events_replay_params(thread.thread_id.clone()))
+        .events_replay(events_replay_params(thread.thread.id.clone()))
         .unwrap();
     assert!(matches!(
         replay_after_response.events.last().map(|event| &event.kind),
         Some(RuntimeEventKind::TurnInterrupted)
     ));
-    assert_events_jsonl_is_valid(thread.events_path.as_ref());
-
-    let err = first_turn.await.unwrap().unwrap_err();
-    assert!(matches!(
-        err.downcast_ref::<AppServerError>(),
-        Some(AppServerError::TurnInterrupted { thread_id, turn_id })
-            if thread_id == &thread.thread_id && turn_id == &TurnId::new("turn_1")
-    ));
+    assert_events_jsonl_is_valid(thread.thread.events_path.as_ref());
 
     let read = service
         .thread_read(ThreadReadParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             workspace_root: None,
         })
         .unwrap();
-    assert_eq!(read.status, ThreadStatus::Idle);
+    assert_eq!(read.thread.status, ThreadStatus::Idle);
     assert_eq!(
-        read.latest_turn.as_ref().map(|turn| &turn.status),
+        read.thread.turns.last().map(|turn| &turn.status),
         Some(&TurnStatus::Interrupted)
     );
 
     let replay = service
-        .events_replay(events_replay_params(thread.thread_id))
+        .events_replay(events_replay_params(thread.thread.id))
         .unwrap();
     assert!(matches!(
         replay.events.last().map(|event| &event.kind),
@@ -1351,37 +1580,41 @@ async fn thread_read_reports_waiting_approval_when_snapshot_has_pending_approval
             cwd: None,
         })
         .unwrap();
-    service
+    let _turn = service
         .turn_start(TurnStartParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             prompt: "request approval".into(),
             workspace_root: None,
             turn_context: None,
         })
         .await
         .unwrap();
+    wait_for_thread_event(&service, &thread.thread.id, |kind| {
+        matches!(kind, RuntimeEventKind::ApprovalRequested { .. })
+    })
+    .await;
 
     let read = service
         .thread_read(ThreadReadParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             workspace_root: None,
         })
         .unwrap();
-    assert_eq!(read.status, ThreadStatus::WaitingApproval);
+    assert_eq!(read.thread.status, ThreadStatus::WaitingApproval);
     assert_eq!(
-        read.latest_turn.as_ref().map(|turn| &turn.status),
+        read.thread.turns.last().map(|turn| &turn.status),
         Some(&TurnStatus::Completed)
     );
 
     let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(thread.snapshot_path.as_ref()).unwrap();
+        exagent::transcript::read_json(thread.thread.snapshot_path.as_ref()).unwrap();
     assert!(snapshot
         .pending_approvals
         .iter()
         .any(|approval| approval.status == ApprovalStatus::Pending));
 
     let replay = service
-        .events_replay(events_replay_params(thread.thread_id))
+        .events_replay(events_replay_params(thread.thread.id))
         .unwrap();
     assert!(replay
         .events
@@ -1423,31 +1656,36 @@ async fn turn_interrupt_clears_waiting_approval_and_records_interrupted_event() 
             cwd: None,
         })
         .unwrap();
-    service
+    let _turn = service
         .turn_start(TurnStartParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             prompt: "request approval".into(),
             workspace_root: None,
             turn_context: None,
         })
         .await
         .unwrap();
+    wait_for_thread_event(&service, &thread.thread.id, |kind| {
+        matches!(kind, RuntimeEventKind::ApprovalRequested { .. })
+    })
+    .await;
     let waiting = service
         .thread_read(ThreadReadParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             workspace_root: None,
         })
         .unwrap();
-    assert_eq!(waiting.status, ThreadStatus::WaitingApproval);
+    assert_eq!(waiting.thread.status, ThreadStatus::WaitingApproval);
     let latest_turn_id = waiting
-        .latest_turn
-        .as_ref()
-        .map(|turn| turn.turn_id.clone())
+        .thread
+        .turns
+        .last()
+        .map(|turn| turn.id.clone())
         .expect("waiting approval should have latest turn");
 
     let interrupted = service
         .turn_interrupt(TurnInterruptParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             turn_id: Some(latest_turn_id.clone()),
             workspace_root: None,
         })
@@ -1469,23 +1707,23 @@ async fn turn_interrupt_clears_waiting_approval_and_records_interrupted_event() 
     );
 
     let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(thread.snapshot_path.as_ref()).unwrap();
+        exagent::transcript::read_json(thread.thread.snapshot_path.as_ref()).unwrap();
     assert!(snapshot.pending_approvals.is_empty());
 
     let read = service
         .thread_read(ThreadReadParams {
-            thread_id: thread.thread_id.clone(),
+            thread_id: thread.thread.id.clone(),
             workspace_root: None,
         })
         .unwrap();
-    assert_eq!(read.status, ThreadStatus::Idle);
+    assert_eq!(read.thread.status, ThreadStatus::Idle);
     assert_eq!(
-        read.latest_turn.as_ref().map(|turn| &turn.status),
+        read.thread.turns.last().map(|turn| &turn.status),
         Some(&TurnStatus::Interrupted)
     );
 
     let replay = service
-        .events_replay(events_replay_params(thread.thread_id))
+        .events_replay(events_replay_params(thread.thread.id))
         .unwrap();
     assert!(matches!(
         replay.events.last().map(|event| &event.kind),

@@ -7,7 +7,7 @@ use crate::orchestration::{ChildSessionSummary, CollectedChildSession};
 use crate::session::{AgentRole, CompactionSummary};
 use crate::types::{EventId, SessionId, ToolCall, TurnId};
 
-pub const BOUNDARY_PROTOCOL_VERSION: &str = "appserver-runtime-boundary-v1";
+pub const BOUNDARY_PROTOCOL_VERSION: &str = "appserver-runtime-boundary-v2";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InitializeParams {}
@@ -22,6 +22,7 @@ pub enum BoundaryCapability {
     ThreadRead,
     TurnStart,
     TurnInterrupt,
+    EventsSubscribe,
     EventsReplay,
 }
 
@@ -29,6 +30,8 @@ pub enum BoundaryCapability {
 pub struct InitializeResponse {
     pub protocol_version: String,
     pub supported_ops: Vec<BoundaryCapability>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_streams: Vec<BoundaryCapability>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -88,11 +91,9 @@ pub struct ThreadStartParams {
     pub cwd: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ThreadStartResponse {
-    pub thread_id: SessionId,
-    pub snapshot_path: PathBuf,
-    pub events_path: PathBuf,
+    pub thread: ThreadView,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -110,6 +111,7 @@ pub enum ThreadStatus {
 pub enum TurnStatus {
     Queued,
     Running,
+    InProgress,
     WaitingApproval,
     Completed,
     Failed,
@@ -122,20 +124,64 @@ pub struct TurnState {
     pub status: TurnStatus,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ThreadView {
+    pub id: SessionId,
+    pub status: ThreadStatus,
+    pub active_turn: Option<TurnView>,
+    pub turns: Vec<TurnView>,
+    pub snapshot_path: PathBuf,
+    pub events_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TurnView {
+    pub id: TurnId,
+    pub status: TurnStatus,
+    pub items: Vec<ThreadItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ThreadItem {
+    UserMessage {
+        text: String,
+    },
+    AssistantMessage {
+        text: Option<String>,
+    },
+    ToolResult {
+        name: String,
+    },
+    ExecOutput {
+        text: String,
+    },
+    ApprovalRequested {
+        tool_name: String,
+        reason: String,
+    },
+    ApprovalDecision {
+        status: String,
+        note: Option<String>,
+    },
+    RuntimeError {
+        message: String,
+    },
+    StructuredResult {
+        kind: String,
+    },
+    CompactionWritten,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadReadParams {
     pub thread_id: SessionId,
     pub workspace_root: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ThreadReadResponse {
-    pub thread_id: SessionId,
-    pub status: ThreadStatus,
-    pub active_turn: Option<TurnState>,
-    pub latest_turn: Option<TurnState>,
-    pub snapshot_path: PathBuf,
-    pub events_path: PathBuf,
+    pub thread: ThreadView,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -154,9 +200,9 @@ pub enum IgnoredOverrideField {
     Provider,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ThreadResumeResponse {
-    pub thread: ThreadReadResponse,
+    pub thread: ThreadView,
     pub ignored_overrides: Vec<IgnoredOverrideField>,
 }
 
@@ -178,8 +224,7 @@ pub struct TurnStartParams {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TurnStartResponse {
     pub thread_id: SessionId,
-    pub turn_id: TurnId,
-    pub output: AgentRunResponse,
+    pub turn: TurnView,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -280,6 +325,14 @@ pub struct EventsReplayParams {
     pub include_snapshot: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub event_kinds: Vec<RuntimeEventKindFilter>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EventsSubscribeParams {
+    pub thread_id: SessionId,
+    pub workspace_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_event_id: Option<EventId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

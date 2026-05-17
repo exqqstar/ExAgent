@@ -105,6 +105,28 @@ impl Agent {
         user_prompt: &str,
         turn_cwd: Option<PathBuf>,
     ) -> Result<AgentRunOutput> {
+        self.resume_with_runtime_turn(session_id, user_prompt, None, turn_cwd)
+            .await
+    }
+
+    pub async fn resume_with_turn_id_cwd(
+        &self,
+        session_id: &SessionId,
+        user_prompt: &str,
+        turn_id: TurnId,
+        turn_cwd: Option<PathBuf>,
+    ) -> Result<AgentRunOutput> {
+        self.resume_with_runtime_turn(session_id, user_prompt, Some(turn_id), turn_cwd)
+            .await
+    }
+
+    async fn resume_with_runtime_turn(
+        &self,
+        session_id: &SessionId,
+        user_prompt: &str,
+        runtime_turn_id: Option<TurnId>,
+        turn_cwd: Option<PathBuf>,
+    ) -> Result<AgentRunOutput> {
         let paths = crate::transcript::session_paths(&self.config.workspace_root, session_id);
         let mut snapshot: SessionSnapshot = crate::transcript::read_json(&paths.snapshot_path)?;
         snapshot.normalize_lineage();
@@ -113,7 +135,8 @@ impl Agent {
             .push(ConversationMessage::user(user_prompt));
         crate::transcript::write_json(&paths.snapshot_path, &snapshot)?;
 
-        self.run_session_with_turn_cwd(snapshot, turn_cwd).await
+        self.run_session_with_turn_cwd(snapshot, runtime_turn_id, turn_cwd)
+            .await
     }
 
     pub async fn fork_session(
@@ -155,12 +178,13 @@ impl Agent {
     }
 
     async fn run_session(&self, snapshot: SessionSnapshot) -> Result<AgentRunOutput> {
-        self.run_session_with_turn_cwd(snapshot, None).await
+        self.run_session_with_turn_cwd(snapshot, None, None).await
     }
 
     async fn run_session_with_turn_cwd(
         &self,
         mut snapshot: SessionSnapshot,
+        runtime_turn_id: Option<TurnId>,
         turn_cwd: Option<PathBuf>,
     ) -> Result<AgentRunOutput> {
         snapshot.normalize_lineage();
@@ -196,8 +220,13 @@ impl Agent {
                 .llm
                 .complete(&messages, &self.registry.schemas())
                 .await?;
-            let turn_id = TurnId::new(format!("turn_{next_turn_index}"));
-            next_turn_index += 1;
+            let turn_id = if let Some(runtime_turn_id) = runtime_turn_id.as_ref() {
+                runtime_turn_id.clone()
+            } else {
+                let turn_id = TurnId::new(format!("turn_{next_turn_index}"));
+                next_turn_index += 1;
+                turn_id
+            };
             let assistant_event = RuntimeEvent {
                 event_id: EventId::new(format!("evt_{next_event_index}")),
                 session_id: session_id.clone(),
@@ -295,7 +324,8 @@ impl RuntimeOpExecutor for Agent {
                         prompt,
                     )
                 };
-                self.run_session(snapshot).await?;
+                self.run_session_with_turn_cwd(snapshot, Some(turn_id.clone()), None)
+                    .await?;
 
                 Ok(RuntimeExecution {
                     session_id: session_id.clone(),

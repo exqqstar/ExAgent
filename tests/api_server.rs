@@ -6,12 +6,12 @@ use axum::http::{Request, StatusCode};
 use exagent::api::build_router;
 use exagent::app_server::protocol::{
     AgentRunResponse, BoundaryCapability, BoundaryOp, BoundaryOpResponse, CollectParams,
-    CollectResponse, EventsReplayParams, EventsReplayResponse, ForkParams, IgnoredOverrideField,
-    InitializeResponse, InspectParams, InspectResponse, RunParams, ThreadReadParams,
-    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadSpawnChildParams,
-    ThreadSpawnChildResponse, ThreadStartParams, ThreadStartResponse, ThreadStatus,
-    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
-    BOUNDARY_PROTOCOL_VERSION,
+    CollectResponse, EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, ForkParams,
+    IgnoredOverrideField, InitializeResponse, InspectParams, InspectResponse, RunParams,
+    ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
+    ThreadSpawnChildParams, ThreadSpawnChildResponse, ThreadStartParams, ThreadStartResponse,
+    ThreadStatus, ThreadView, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
+    TurnStartResponse, TurnStatus, TurnView, BOUNDARY_PROTOCOL_VERSION,
 };
 use exagent::app_server::AppServerBoundary;
 use exagent::app_server::AppServerError;
@@ -166,6 +166,7 @@ impl AppServerBoundary for StubRunner {
                     BoundaryCapability::TurnInterrupt,
                     BoundaryCapability::EventsReplay,
                 ],
+                supported_streams: vec![BoundaryCapability::EventsSubscribe],
             })),
             _ => panic!("unexpected submit_boundary_op call in api adapter tests"),
         }
@@ -180,6 +181,22 @@ impl AppServerBoundary for StubRunner {
         assert_eq!(params.workspace_root.as_deref(), Some("."));
 
         Ok(self.events_replay_response.clone())
+    }
+
+    async fn events_subscribe(
+        &self,
+        params: EventsSubscribeParams,
+    ) -> anyhow::Result<tokio::sync::broadcast::Receiver<RuntimeEvent>> {
+        self.calls.lock().unwrap().push("events_subscribe".into());
+        assert_eq!(params.thread_id.as_str(), "session_123");
+        assert_eq!(params.workspace_root.as_deref(), Some("."));
+
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        for event in self.events_replay_response.events.clone() {
+            let _ = tx.send(event);
+        }
+        drop(tx);
+        Ok(rx)
     }
 }
 
@@ -259,6 +276,13 @@ impl AppServerBoundary for ForkIgnoresCwdRunner {
         _params: EventsReplayParams,
     ) -> anyhow::Result<EventsReplayResponse> {
         panic!("events_replay should not be called in fork test");
+    }
+
+    async fn events_subscribe(
+        &self,
+        _params: EventsSubscribeParams,
+    ) -> anyhow::Result<tokio::sync::broadcast::Receiver<RuntimeEvent>> {
+        panic!("events_subscribe should not be called in fork test");
     }
 }
 
@@ -352,6 +376,13 @@ impl AppServerBoundary for ErrorBoundary {
     ) -> anyhow::Result<EventsReplayResponse> {
         Err(self.error())
     }
+
+    async fn events_subscribe(
+        &self,
+        _params: EventsSubscribeParams,
+    ) -> anyhow::Result<tokio::sync::broadcast::Receiver<RuntimeEvent>> {
+        Err(self.error())
+    }
 }
 
 struct BoundaryOpRunner {
@@ -428,6 +459,13 @@ impl AppServerBoundary for BoundaryOpRunner {
     ) -> anyhow::Result<EventsReplayResponse> {
         panic!("events_replay should not be called in thread op test");
     }
+
+    async fn events_subscribe(
+        &self,
+        _params: EventsSubscribeParams,
+    ) -> anyhow::Result<tokio::sync::broadcast::Receiver<RuntimeEvent>> {
+        panic!("events_subscribe should not be called in thread op test");
+    }
 }
 
 struct ThreadReadOpRunner {
@@ -503,6 +541,13 @@ impl AppServerBoundary for ThreadReadOpRunner {
         _params: EventsReplayParams,
     ) -> anyhow::Result<EventsReplayResponse> {
         panic!("events_replay should not be called in thread read op test");
+    }
+
+    async fn events_subscribe(
+        &self,
+        _params: EventsSubscribeParams,
+    ) -> anyhow::Result<tokio::sync::broadcast::Receiver<RuntimeEvent>> {
+        panic!("events_subscribe should not be called in thread read op test");
     }
 }
 
@@ -594,6 +639,9 @@ async fn initialize_route_returns_protocol_capabilities() {
                 "turn_start",
                 "turn_interrupt",
                 "events_replay"
+            ],
+            "supported_streams": [
+                "events_subscribe"
             ]
         })
     );
@@ -1051,9 +1099,14 @@ async fn thread_start_route_accepts_workspace_and_cwd() {
     assert_eq!(
         serde_json::from_slice::<Value>(&body).unwrap(),
         json!({
-            "thread_id": "session_123",
-            "snapshot_path": ".exagent/sessions/session_123/snapshot.json",
-            "events_path": ".exagent/sessions/session_123/events.jsonl"
+            "thread": {
+                "id": "session_123",
+                "status": "idle",
+                "active_turn": null,
+                "turns": [],
+                "snapshot_path": ".exagent/sessions/session_123/snapshot.json",
+                "events_path": ".exagent/sessions/session_123/events.jsonl"
+            }
         })
     );
 }
@@ -1128,12 +1181,14 @@ async fn thread_read_route_accepts_thread_id_and_returns_lifecycle_state() {
     assert_eq!(
         serde_json::from_slice::<Value>(&body).unwrap(),
         json!({
-            "thread_id": "session_123",
-            "status": "idle",
-            "active_turn": null,
-            "latest_turn": null,
-            "snapshot_path": ".exagent/sessions/session_123/snapshot.json",
-            "events_path": ".exagent/sessions/session_123/events.jsonl"
+            "thread": {
+                "id": "session_123",
+                "status": "idle",
+                "active_turn": null,
+                "turns": [],
+                "snapshot_path": ".exagent/sessions/session_123/snapshot.json",
+                "events_path": ".exagent/sessions/session_123/events.jsonl"
+            }
         })
     );
 }
@@ -1178,10 +1233,10 @@ async fn thread_resume_route_accepts_thread_id_and_reports_ignored_overrides() {
         serde_json::from_slice::<Value>(&body).unwrap(),
         json!({
             "thread": {
-                "thread_id": "session_123",
+                "id": "session_123",
                 "status": "idle",
                 "active_turn": null,
-                "latest_turn": null,
+                "turns": [],
                 "snapshot_path": ".exagent/sessions/session_123/snapshot.json",
                 "events_path": ".exagent/sessions/session_123/events.jsonl"
             },
@@ -1230,13 +1285,10 @@ async fn turn_start_route_accepts_thread_id_and_prompt() {
         serde_json::from_slice::<Value>(&body).unwrap(),
         json!({
             "thread_id": "session_123",
-            "turn_id": "turn_1",
-            "output": {
-                "text": "turn complete",
-                "tool_calls": [],
-                "session_id": "session_123",
-                "snapshot_path": ".exagent/sessions/session_123/snapshot.json",
-                "events_path": ".exagent/sessions/session_123/events.jsonl"
+            "turn": {
+                "id": "turn_1",
+                "status": "in_progress",
+                "items": []
             }
         })
     );
@@ -1428,6 +1480,78 @@ async fn events_replay_route_returns_runtime_events() {
 }
 
 #[tokio::test]
+async fn events_subscribe_route_streams_runtime_events() {
+    let runner = Arc::new(StubRunner {
+        response: sample_run_response("unused"),
+        inspect_response: sample_inspect_response(),
+        collect_response: sample_collect_response(),
+        thread_start_response: sample_thread_start_response(),
+        thread_read_response: sample_thread_read_response(),
+        thread_resume_response: sample_thread_resume_response(),
+        turn_start_response: sample_turn_start_response(),
+        thread_spawn_child_response: sample_thread_spawn_child_response(),
+        events_replay_response: sample_events_replay_response(),
+        calls: Mutex::new(vec![]),
+    });
+    let app = build_router(runner.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/events/subscribe")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "thread_id": "session_123",
+                        "workspace_root": "."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("data:"));
+    assert!(body.contains("assistant_turn"));
+    assert_eq!(
+        runner.calls.lock().unwrap().as_slice(),
+        ["events_subscribe", "events_replay"]
+    );
+}
+
+#[tokio::test]
+async fn events_subscribe_route_maps_missing_thread_errors_to_not_found() {
+    let app = build_router(Arc::new(ErrorBoundary {
+        kind: ErrorKind::ThreadNotFound,
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/events/subscribe")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "thread_id": "missing-thread",
+                        "workspace_root": "."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn events_replay_slash_route_returns_runtime_events() {
     let app = build_router(Arc::new(StubRunner {
         response: sample_run_response("unused"),
@@ -1574,12 +1698,14 @@ async fn thread_op_route_accepts_thread_read_as_boundary_op() {
         serde_json::from_slice::<Value>(&body).unwrap(),
         json!({
             "type": "thread_read",
-            "thread_id": "session_123",
-            "status": "idle",
-            "active_turn": null,
-            "latest_turn": null,
-            "snapshot_path": ".exagent/sessions/session_123/snapshot.json",
-            "events_path": ".exagent/sessions/session_123/events.jsonl"
+            "thread": {
+                "id": "session_123",
+                "status": "idle",
+                "active_turn": null,
+                "turns": [],
+                "snapshot_path": ".exagent/sessions/session_123/snapshot.json",
+                "events_path": ".exagent/sessions/session_123/events.jsonl"
+            }
         })
     );
 }
@@ -1664,26 +1790,19 @@ fn sample_run_response(text: &str) -> AgentRunResponse {
 
 fn sample_thread_start_response() -> ThreadStartResponse {
     ThreadStartResponse {
-        thread_id: SessionId::new("session_123"),
-        snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
-        events_path: ".exagent/sessions/session_123/events.jsonl".into(),
+        thread: sample_thread_view(SessionId::new("session_123")),
     }
 }
 
 fn sample_thread_read_response() -> ThreadReadResponse {
     ThreadReadResponse {
-        thread_id: SessionId::new("session_123"),
-        status: ThreadStatus::Idle,
-        active_turn: None,
-        latest_turn: None,
-        snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
-        events_path: ".exagent/sessions/session_123/events.jsonl".into(),
+        thread: sample_thread_view(SessionId::new("session_123")),
     }
 }
 
 fn sample_thread_resume_response() -> ThreadResumeResponse {
     ThreadResumeResponse {
-        thread: sample_thread_read_response(),
+        thread: sample_thread_view(SessionId::new("session_123")),
         ignored_overrides: vec![IgnoredOverrideField::Cwd],
     }
 }
@@ -1691,8 +1810,22 @@ fn sample_thread_resume_response() -> ThreadResumeResponse {
 fn sample_turn_start_response() -> TurnStartResponse {
     TurnStartResponse {
         thread_id: SessionId::new("session_123"),
-        turn_id: TurnId::new("turn_1"),
-        output: sample_run_response("turn complete"),
+        turn: TurnView {
+            id: TurnId::new("turn_1"),
+            status: TurnStatus::InProgress,
+            items: vec![],
+        },
+    }
+}
+
+fn sample_thread_view(id: SessionId) -> ThreadView {
+    ThreadView {
+        id,
+        status: ThreadStatus::Idle,
+        active_turn: None,
+        turns: vec![],
+        snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
+        events_path: ".exagent/sessions/session_123/events.jsonl".into(),
     }
 }
 

@@ -1,15 +1,18 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use tokio::sync::broadcast;
 
 use crate::app_server::protocol::{
     AgentRunResponse, BoundaryOp, BoundaryOpResponse, CollectParams, CollectResponse,
-    EventsReplayParams, EventsReplayResponse, ForkParams, InspectParams, InspectResponse,
-    RunParams, ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
-    ThreadSpawnChildParams, ThreadSpawnChildResponse, ThreadStartParams, ThreadStartResponse,
-    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, ForkParams, InspectParams,
+    InspectResponse, RunParams, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadSpawnChildParams, ThreadSpawnChildResponse, ThreadStartParams,
+    ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
+    TurnStartResponse,
 };
 use crate::app_server::ThreadManager;
 use crate::config::AgentConfig;
+use crate::events::RuntimeEvent;
 use crate::llm::LlmClient;
 use crate::registry::ToolRegistry;
 
@@ -30,6 +33,10 @@ pub trait AppServerBoundary: Send + Sync {
     ) -> Result<ThreadSpawnChildResponse>;
     async fn submit_boundary_op(&self, op: BoundaryOp) -> Result<BoundaryOpResponse>;
     async fn events_replay(&self, params: EventsReplayParams) -> Result<EventsReplayResponse>;
+    async fn events_subscribe(
+        &self,
+        params: EventsSubscribeParams,
+    ) -> Result<broadcast::Receiver<RuntimeEvent>>;
 }
 
 pub struct AppServerService {
@@ -117,6 +124,13 @@ impl AppServerService {
     pub fn events_replay(&self, params: EventsReplayParams) -> Result<EventsReplayResponse> {
         self.thread_manager.events_replay(params)
     }
+
+    pub fn events_subscribe(
+        &self,
+        params: EventsSubscribeParams,
+    ) -> Result<broadcast::Receiver<RuntimeEvent>> {
+        self.thread_manager.events_subscribe(params)
+    }
 }
 
 #[async_trait]
@@ -170,5 +184,12 @@ impl AppServerBoundary for AppServerService {
 
     async fn events_replay(&self, params: EventsReplayParams) -> Result<EventsReplayResponse> {
         self.events_replay(params)
+    }
+
+    async fn events_subscribe(
+        &self,
+        params: EventsSubscribeParams,
+    ) -> Result<broadcast::Receiver<RuntimeEvent>> {
+        self.events_subscribe(params)
     }
 }

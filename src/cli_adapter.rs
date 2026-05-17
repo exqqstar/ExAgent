@@ -1,11 +1,13 @@
 use anyhow::Result;
 
 use crate::app_server::protocol::{
-    CollectParams, InspectParams, ThreadResumeParams, ThreadSpawnChildParams, ThreadStartParams,
-    TurnStartParams,
+    CollectParams, EventsSubscribeParams, InspectParams, ThreadResumeParams,
+    ThreadSpawnChildParams, ThreadStartParams, TurnStartParams,
 };
 use crate::app_server::AppServerBoundary;
 use crate::cli::CliCommand;
+use crate::events::RuntimeEventKind;
+use crate::types::TurnId;
 
 pub struct CliExecutionOutput {
     pub stdout: String,
@@ -41,15 +43,25 @@ pub async fn execute_cli_command(
                     cwd: None,
                 })
                 .await?;
+            let mut events = boundary
+                .events_subscribe(EventsSubscribeParams {
+                    thread_id: thread.thread.id.clone(),
+                    workspace_root: None,
+                    after_event_id: None,
+                })
+                .await?;
             let turn = boundary
                 .turn_start(TurnStartParams {
-                    thread_id: thread.thread_id,
+                    thread_id: thread.thread.id.clone(),
                     prompt,
                     workspace_root: None,
                     turn_context: None,
                 })
                 .await?;
-            format!("{}\n", turn.output.text.unwrap_or_default())
+            format!(
+                "{}\n",
+                wait_for_final_assistant_text(&mut events, turn.turn.id).await?
+            )
         }
         CliCommand::Resume { session_id, prompt } => {
             let resumed = boundary
@@ -59,15 +71,25 @@ pub async fn execute_cli_command(
                     cwd: None,
                 })
                 .await?;
+            let mut events = boundary
+                .events_subscribe(EventsSubscribeParams {
+                    thread_id: resumed.thread.id.clone(),
+                    workspace_root: None,
+                    after_event_id: None,
+                })
+                .await?;
             let turn = boundary
                 .turn_start(TurnStartParams {
-                    thread_id: resumed.thread.thread_id,
+                    thread_id: resumed.thread.id.clone(),
                     prompt,
                     workspace_root: None,
                     turn_context: None,
                 })
                 .await?;
-            format!("{}\n", turn.output.text.unwrap_or_default())
+            format!(
+                "{}\n",
+                wait_for_final_assistant_text(&mut events, turn.turn.id).await?
+            )
         }
         CliCommand::Fork {
             parent_session_id,
@@ -90,4 +112,32 @@ pub async fn execute_cli_command(
     };
 
     Ok(CliExecutionOutput { stdout })
+}
+
+async fn wait_for_final_assistant_text(
+    events: &mut tokio::sync::broadcast::Receiver<crate::events::RuntimeEvent>,
+    turn_id: TurnId,
+) -> Result<String> {
+    let mut last_text = None;
+    loop {
+        let event = events.recv().await?;
+        if event.turn_id.as_ref() != Some(&turn_id) {
+            continue;
+        }
+        match event.kind {
+            RuntimeEventKind::AssistantTurn { turn } => {
+                last_text = turn.text;
+            }
+            RuntimeEventKind::TurnCompleted => {
+                return Ok(last_text.unwrap_or_default());
+            }
+            RuntimeEventKind::RuntimeError { message } => {
+                anyhow::bail!(message);
+            }
+            RuntimeEventKind::TurnInterrupted => {
+                anyhow::bail!("turn interrupted");
+            }
+            _ => {}
+        }
+    }
 }

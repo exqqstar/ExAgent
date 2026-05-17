@@ -3,18 +3,20 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
+use std::convert::Infallible;
 
 pub use crate::app_server::protocol::{
     AgentRunResponse, BoundaryOp, BoundaryOpResponse, CollectParams as CollectRequest,
     CollectResponse, EventsReplayParams as EventsReplayRequest, EventsReplayResponse,
-    ForkParams as ForkRequest, InitializeParams as InitializeRequest, InitializeResponse,
-    InspectParams as InspectRequest, InspectResponse, RunParams as RunRequest,
-    ThreadReadParams as ThreadReadRequest, ThreadReadResponse,
-    ThreadResumeParams as ThreadResumeRequest, ThreadResumeResponse,
+    EventsSubscribeParams as EventsSubscribeRequest, ForkParams as ForkRequest,
+    InitializeParams as InitializeRequest, InitializeResponse, InspectParams as InspectRequest,
+    InspectResponse, RunParams as RunRequest, ThreadReadParams as ThreadReadRequest,
+    ThreadReadResponse, ThreadResumeParams as ThreadResumeRequest, ThreadResumeResponse,
     ThreadSpawnChildParams as ThreadSpawnChildRequest, ThreadSpawnChildResponse,
     ThreadStartParams as ThreadStartRequest, ThreadStartResponse,
     TurnInterruptParams as TurnInterruptRequest, TurnInterruptResponse,
@@ -56,6 +58,7 @@ pub fn build_router(boundary: Arc<dyn AppServerBoundary>) -> Router {
         .route("/thread_spawn_child", post(thread_spawn_child))
         .route("/events/replay", post(events_replay))
         .route("/events_replay", post(events_replay))
+        .route("/events/subscribe", post(events_subscribe))
         .with_state(ApiState { boundary })
 }
 
@@ -175,6 +178,57 @@ async fn events_replay(
     Json(request): Json<EventsReplayRequest>,
 ) -> impl IntoResponse {
     json_result(state.boundary.events_replay(request).await)
+}
+
+async fn events_subscribe(
+    State(state): State<ApiState>,
+    Json(request): Json<EventsSubscribeRequest>,
+) -> axum::response::Response {
+    let mut rx = match state.boundary.events_subscribe(request.clone()).await {
+        Ok(rx) => rx,
+        Err(err) => return json_result::<()>(Err(err)),
+    };
+    let replay = match state
+        .boundary
+        .events_replay(EventsReplayRequest {
+            thread_id: request.thread_id.clone(),
+            workspace_root: request.workspace_root.clone(),
+            after_event_id: request.after_event_id,
+            limit: None,
+            include_snapshot: false,
+            event_kinds: vec![],
+        })
+        .await
+    {
+        Ok(replay) => replay,
+        Err(err) => return json_result::<()>(Err(err)),
+    };
+
+    let stream = async_stream::stream! {
+        for event in replay.events {
+            match Event::default().json_data(event) {
+                Ok(event) => yield Ok::<Event, Infallible>(event),
+                Err(_) => continue,
+            }
+        }
+
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    match Event::default().json_data(event) {
+                        Ok(event) => yield Ok::<Event, Infallible>(event),
+                        Err(_) => continue,
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 fn json_result<T: Serialize>(result: Result<T>) -> axum::response::Response {

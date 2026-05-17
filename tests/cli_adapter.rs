@@ -2,24 +2,28 @@ use std::sync::Mutex;
 
 use exagent::app_server::protocol::{
     AgentRunResponse, BoundaryOp, BoundaryOpResponse, CollectParams, CollectResponse,
-    EventsReplayParams, EventsReplayResponse, ForkParams, InspectParams, InspectResponse,
-    RunParams, ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
-    ThreadSpawnChildParams, ThreadSpawnChildResponse, ThreadStartParams, ThreadStartResponse,
-    ThreadStatus, TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, ForkParams, InspectParams,
+    InspectResponse, RunParams, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadSpawnChildParams, ThreadSpawnChildResponse, ThreadStartParams,
+    ThreadStartResponse, ThreadStatus, ThreadView, TurnInterruptParams, TurnInterruptResponse,
+    TurnStartParams, TurnStartResponse, TurnStatus, TurnView,
 };
 use exagent::app_server::AppServerBoundary;
 use exagent::cli::CliCommand;
+use exagent::events::{RuntimeEvent, RuntimeEventKind};
 use exagent::session::AgentRole;
-use exagent::types::{SessionId, TurnId};
+use exagent::types::{AssistantTurn, EventId, SessionId, TurnId};
 
 struct CliBoundary {
     calls: Mutex<Vec<String>>,
+    event_tx: Mutex<Option<tokio::sync::broadcast::Sender<RuntimeEvent>>>,
 }
 
 impl CliBoundary {
     fn new() -> Self {
         Self {
             calls: Mutex::new(vec![]),
+            event_tx: Mutex::new(None),
         }
     }
 
@@ -56,9 +60,7 @@ impl AppServerBoundary for CliBoundary {
         assert_eq!(params.cwd, None);
 
         Ok(ThreadStartResponse {
-            thread_id: SessionId::new("session_cli"),
-            snapshot_path: ".exagent/sessions/session_cli/snapshot.json".into(),
-            events_path: ".exagent/sessions/session_cli/events.jsonl".into(),
+            thread: sample_thread_view(SessionId::new("session_cli")),
         })
     }
 
@@ -76,14 +78,7 @@ impl AppServerBoundary for CliBoundary {
         assert_eq!(params.cwd, None);
 
         Ok(ThreadResumeResponse {
-            thread: ThreadReadResponse {
-                thread_id: params.thread_id,
-                status: ThreadStatus::Idle,
-                active_turn: None,
-                latest_turn: None,
-                snapshot_path: ".exagent/sessions/session_existing/snapshot.json".into(),
-                events_path: ".exagent/sessions/session_existing/events.jsonl".into(),
-            },
+            thread: sample_thread_view(params.thread_id),
             ignored_overrides: vec![],
         })
     }
@@ -95,16 +90,37 @@ impl AppServerBoundary for CliBoundary {
             "resume prompt" => "resumed turn complete",
             other => panic!("unexpected prompt: {other}"),
         };
+        let event_tx = self
+            .event_tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("events_subscribe should be called before turn_start")
+            .clone();
+        let _ = event_tx.send(RuntimeEvent {
+            event_id: EventId::new("evt_1"),
+            session_id: params.thread_id.clone(),
+            turn_id: Some(TurnId::new("turn_1")),
+            kind: RuntimeEventKind::AssistantTurn {
+                turn: AssistantTurn {
+                    text: Some(text.into()),
+                    tool_calls: vec![],
+                },
+            },
+        });
+        let _ = event_tx.send(RuntimeEvent {
+            event_id: EventId::new("evt_2"),
+            session_id: params.thread_id.clone(),
+            turn_id: Some(TurnId::new("turn_1")),
+            kind: RuntimeEventKind::TurnCompleted,
+        });
 
         Ok(TurnStartResponse {
             thread_id: params.thread_id.clone(),
-            turn_id: TurnId::new("turn_1"),
-            output: AgentRunResponse {
-                text: Some(text.into()),
-                tool_calls: vec![],
-                session_id: params.thread_id,
-                snapshot_path: ".exagent/sessions/session_cli/snapshot.json".into(),
-                events_path: ".exagent/sessions/session_cli/events.jsonl".into(),
+            turn: TurnView {
+                id: TurnId::new("turn_1"),
+                status: TurnStatus::InProgress,
+                items: vec![],
             },
         })
     }
@@ -152,6 +168,27 @@ impl AppServerBoundary for CliBoundary {
     ) -> anyhow::Result<EventsReplayResponse> {
         panic!("events_replay is not used in these CLI adapter tests");
     }
+
+    async fn events_subscribe(
+        &self,
+        _params: EventsSubscribeParams,
+    ) -> anyhow::Result<tokio::sync::broadcast::Receiver<RuntimeEvent>> {
+        self.calls.lock().unwrap().push("events_subscribe".into());
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        *self.event_tx.lock().unwrap() = Some(tx);
+        Ok(rx)
+    }
+}
+
+fn sample_thread_view(id: SessionId) -> ThreadView {
+    ThreadView {
+        id,
+        status: ThreadStatus::Idle,
+        active_turn: None,
+        turns: vec![],
+        snapshot_path: ".exagent/sessions/session_cli/snapshot.json".into(),
+        events_path: ".exagent/sessions/session_cli/events.jsonl".into(),
+    }
 }
 
 #[tokio::test]
@@ -168,7 +205,10 @@ async fn cli_run_starts_thread_then_turn_without_legacy_run() {
     .unwrap();
 
     assert_eq!(output.stdout, "new turn complete\n");
-    assert_eq!(boundary.calls(), vec!["thread_start", "turn_start"]);
+    assert_eq!(
+        boundary.calls(),
+        vec!["thread_start", "events_subscribe", "turn_start"]
+    );
 }
 
 #[tokio::test]
@@ -186,7 +226,10 @@ async fn cli_resume_reads_thread_then_starts_turn_without_legacy_run() {
     .unwrap();
 
     assert_eq!(output.stdout, "resumed turn complete\n");
-    assert_eq!(boundary.calls(), vec!["thread_resume", "turn_start"]);
+    assert_eq!(
+        boundary.calls(),
+        vec!["thread_resume", "events_subscribe", "turn_start"]
+    );
 }
 
 #[tokio::test]

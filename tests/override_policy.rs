@@ -46,24 +46,6 @@ fn merge_turn_start_uses_workspace_lookup_without_mutating_cwd() {
 }
 
 #[test]
-fn merge_thread_spawn_child_uses_workspace_only() {
-    let dir = tempdir().unwrap();
-    let base = AgentConfig::default();
-
-    let config = OverridePolicy::merge_thread_spawn_child(
-        &base,
-        Some(dir.path().to_string_lossy().to_string()),
-    )
-    .unwrap();
-
-    assert_eq!(
-        config.workspace_root,
-        std::fs::canonicalize(dir.path()).unwrap()
-    );
-    assert_eq!(config.cwd, config.workspace_root);
-}
-
-#[test]
 fn apply_turn_context_rejects_cwd_outside_snapshot_workspace() {
     let dir = tempdir().unwrap();
     let outside = tempdir().unwrap();

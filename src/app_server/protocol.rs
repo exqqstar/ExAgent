@@ -3,8 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::events::RuntimeEvent;
-use crate::orchestration::{ChildSessionSummary, CollectedChildSession};
-use crate::session::{AgentRole, CompactionSummary};
+use crate::session::CompactionSummary;
 use crate::types::{EventId, SessionId, ToolCall, TurnId};
 
 pub const BOUNDARY_PROTOCOL_VERSION: &str = "appserver-runtime-boundary-v2";
@@ -18,7 +17,6 @@ pub enum BoundaryCapability {
     Initialize,
     ThreadStart,
     ThreadResume,
-    ThreadSpawnChild,
     ThreadRead,
     TurnStart,
     TurnInterrupt,
@@ -43,46 +41,12 @@ pub struct AgentRunResponse {
     pub events_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct InspectResponse {
-    pub children: Vec<ChildSessionSummary>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CollectResponse {
-    pub session: CollectedChildSession,
-}
-
-// Legacy adapter compatibility DTOs for the pre-boundary HTTP/CLI surface.
-// Keep these stable for old clients, but add new runtime capabilities through
-// BoundaryOp and the thread/turn protocol types below.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct RunParams {
     pub prompt: String,
     pub workspace_root: Option<String>,
     pub cwd: Option<String>,
     pub session_id: Option<SessionId>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct ForkParams {
-    pub parent_session_id: SessionId,
-    pub agent_role: AgentRole,
-    pub prompt: String,
-    pub workspace_root: Option<String>,
-    pub spawned_by_turn_id: Option<TurnId>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct InspectParams {
-    pub parent_session_id: SessionId,
-    pub workspace_root: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct CollectParams {
-    pub session_id: SessionId,
-    pub workspace_root: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -167,9 +131,6 @@ pub enum ThreadItem {
     RuntimeError {
         message: String,
     },
-    StructuredResult {
-        kind: String,
-    },
     CompactionWritten,
 }
 
@@ -242,26 +203,6 @@ pub struct TurnInterruptResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ThreadSpawnChildParams {
-    pub parent_thread_id: SessionId,
-    pub agent_role: AgentRole,
-    pub prompt: String,
-    pub workspace_root: Option<String>,
-    #[serde(default)]
-    pub cwd: Option<String>,
-    pub spawned_by_turn_id: Option<TurnId>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ThreadSpawnChildResponse {
-    pub parent_thread_id: SessionId,
-    pub child_thread_id: SessionId,
-    pub agent_role: AgentRole,
-    pub ignored_overrides: Vec<IgnoredOverrideField>,
-    pub output: AgentRunResponse,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BoundaryOp {
     Initialize(InitializeParams),
@@ -270,7 +211,6 @@ pub enum BoundaryOp {
     ThreadResume(ThreadResumeParams),
     TurnStart(TurnStartParams),
     TurnInterrupt(TurnInterruptParams),
-    ThreadSpawnChild(ThreadSpawnChildParams),
     EventsReplay(EventsReplayParams),
 }
 
@@ -283,7 +223,6 @@ pub enum BoundaryOpResponse {
     ThreadResumed(ThreadResumeResponse),
     TurnStarted(TurnStartResponse),
     TurnInterrupted(TurnInterruptResponse),
-    ThreadChildSpawned(ThreadSpawnChildResponse),
     EventsReplayed(EventsReplayResponse),
 }
 
@@ -304,12 +243,10 @@ pub enum RuntimeEventKindFilter {
     TurnInterrupted,
     AssistantTurn,
     ToolResult,
-    SessionSpawned,
     ExecOutput,
     ApprovalRequested,
     ApprovalDecision,
     CompactionWritten,
-    StructuredResultRecorded,
     RuntimeError,
 }
 

@@ -21,6 +21,9 @@ Implemented decisions:
 - Events produced during one `ThreadOp::UserInput` are normalized to the outer runtime turn id.
 - Concurrent turns are rejected in V2 rather than queued.
 - Child session lineage and multi-runtime child orchestration stay outside V2.
+  The previous compatibility child-spawn path has been removed so future child
+  work has to enter through the live runtime design instead of the old Agent
+  fork helpers.
 
 ## Context
 
@@ -932,7 +935,7 @@ Landed defaults:
 - Normalize `TurnContextOverrides` into `ThreadTurnContext` at `ThreadManager`. `ThreadOp::UserInput` holds the internal type so `thread_runtime.rs` does not depend on protocol DTOs.
 - Keep active-turn interrupt state inside `ThreadRuntime`, not `ThreadManager`.
 - Keep turn lifecycle and event append/broadcast logic inside `ThreadSession`, not `ThreadRuntimeLoop`.
-- Leave child session lineage and multi-runtime orchestration outside V2. Existing fork/spawn behavior stays on the compatibility path until a later design decides how parent and child timelines route through live runtimes.
+- Leave child session lineage and multi-runtime orchestration outside V2. The old fork/spawn compatibility path has been removed; a later design must decide how parent and child timelines route through live runtimes before exposing the capability again.
 
 Remaining follow-ups:
 

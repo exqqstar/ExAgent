@@ -440,9 +440,9 @@ turn_interrupted
 ```
 
 Child session lineage events are intentionally not part of the V2 runtime actor
-contract. Existing fork/spawn behavior can remain on the compatibility path until
-a later orchestration design defines how parent and child timelines should be
-routed through live runtimes.
+contract. The earlier compatibility fork/spawn path has been removed, so a later
+orchestration design must define parent and child timelines as runtime-native
+thread operations before the capability returns.
 
 All events produced during one `ThreadOp::UserInput` are normalized to the
 outer runtime turn id. This keeps assistant/tool/approval events grouped under
@@ -489,7 +489,6 @@ pub enum ThreadItem {
     ApprovalRequested { tool_name: String, reason: String },
     ApprovalDecision { status: String, note: Option<String> },
     RuntimeError { message: String },
-    StructuredResult { kind: String },
     CompactionWritten,
 }
 ```

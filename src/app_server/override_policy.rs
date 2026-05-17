@@ -44,13 +44,6 @@ impl OverridePolicy {
         Self::apply_workspace_only(base, workspace_root)
     }
 
-    pub fn merge_thread_spawn_child(
-        base: &AgentConfig,
-        workspace_root: Option<String>,
-    ) -> Result<AgentConfig> {
-        Self::apply_workspace_only(base, workspace_root)
-    }
-
     pub fn merge_events_replay(
         base: &AgentConfig,
         workspace_root: Option<String>,

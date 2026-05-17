@@ -1,8 +1,7 @@
 use anyhow::Result;
 
 use crate::app_server::protocol::{
-    CollectParams, EventsSubscribeParams, InspectParams, ThreadResumeParams,
-    ThreadSpawnChildParams, ThreadStartParams, TurnStartParams,
+    EventsSubscribeParams, ThreadResumeParams, ThreadStartParams, TurnStartParams,
 };
 use crate::app_server::AppServerBoundary;
 use crate::cli::CliCommand;
@@ -18,24 +17,6 @@ pub async fn execute_cli_command(
     command: CliCommand,
 ) -> Result<CliExecutionOutput> {
     let stdout = match command {
-        CliCommand::Inspect { parent_session_id } => {
-            let response = boundary
-                .inspect(InspectParams {
-                    parent_session_id,
-                    workspace_root: None,
-                })
-                .await?;
-            format!("{}\n", serde_json::to_string_pretty(&response)?)
-        }
-        CliCommand::Collect { session_id } => {
-            let response = boundary
-                .collect(CollectParams {
-                    session_id,
-                    workspace_root: None,
-                })
-                .await?;
-            format!("{}\n", serde_json::to_string_pretty(&response)?)
-        }
         CliCommand::Run { prompt } => {
             let thread = boundary
                 .thread_start(ThreadStartParams {
@@ -90,23 +71,6 @@ pub async fn execute_cli_command(
                 "{}\n",
                 wait_for_final_assistant_text(&mut events, turn.turn.id).await?
             )
-        }
-        CliCommand::Fork {
-            parent_session_id,
-            agent_role,
-            prompt,
-        } => {
-            let child = boundary
-                .thread_spawn_child(ThreadSpawnChildParams {
-                    parent_thread_id: parent_session_id,
-                    agent_role,
-                    prompt,
-                    workspace_root: None,
-                    cwd: None,
-                    spawned_by_turn_id: None,
-                })
-                .await?;
-            format!("{}\n", child.output.text.unwrap_or_default())
         }
         CliCommand::Api { .. } => unreachable!("api command is handled by process startup"),
     };

@@ -5,7 +5,6 @@ use crate::registry::ToolContext;
 use crate::types::{ToolCall, ToolResult};
 
 pub mod read_file;
-pub mod record_structured_result;
 pub mod run_command;
 pub mod write_file;
 

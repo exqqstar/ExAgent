@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::result_contract::StructuredSessionResult;
-use crate::session::{AgentRole, ApprovalId, ApprovalStatus, CompactionSummary, ExecSessionId};
+use crate::session::{ApprovalId, ApprovalStatus, CompactionSummary, ExecSessionId};
 use crate::types::{AssistantTurn, EventId, SessionId, ToolResult, TurnId};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -32,12 +31,6 @@ pub enum RuntimeEventKind {
     ToolResult {
         result: ToolResult,
     },
-    SessionSpawned {
-        child_session_id: SessionId,
-        parent_session_id: SessionId,
-        agent_role: AgentRole,
-        spawned_by_turn_id: Option<TurnId>,
-    },
     ExecOutput {
         exec_session_id: ExecSessionId,
         stream: ExecOutputStream,
@@ -55,9 +48,6 @@ pub enum RuntimeEventKind {
     },
     CompactionWritten {
         summary: CompactionSummary,
-    },
-    StructuredResultRecorded {
-        result: StructuredSessionResult,
     },
     RuntimeError {
         message: String,

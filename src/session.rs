@@ -157,38 +157,9 @@ impl SessionSnapshot {
         }
     }
 
-    pub fn fork_child(
-        &self,
-        agent_role: AgentRole,
-        user_prompt: impl Into<String>,
-        spawned_by_turn_id: Option<TurnId>,
-    ) -> Self {
-        Self {
-            session_id: crate::transcript::new_session_id(),
-            parent_session_id: Some(self.session_id.clone()),
-            root_session_id: self.effective_root_session_id(),
-            spawned_by_turn_id,
-            agent_role,
-            workspace_root: self.workspace_root.clone(),
-            cwd: self.cwd.clone(),
-            conversation: vec![ConversationMessage::user(user_prompt)],
-            open_exec_sessions: vec![],
-            latest_compaction: None,
-            pending_approvals: vec![],
-        }
-    }
-
     pub fn normalize_lineage(&mut self) {
         if self.root_session_id.as_str().is_empty() {
             self.root_session_id = self.session_id.clone();
-        }
-    }
-
-    fn effective_root_session_id(&self) -> SessionId {
-        if self.root_session_id.as_str().is_empty() {
-            self.session_id.clone()
-        } else {
-            self.root_session_id.clone()
         }
     }
 }

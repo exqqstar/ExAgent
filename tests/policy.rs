@@ -1,21 +1,15 @@
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
-use async_trait::async_trait;
-use exagent::agent::Agent;
 use exagent::config::AgentConfig;
 use exagent::events::RuntimeEventKind;
 use exagent::exec_session::ExecSessionManager;
-use exagent::llm::LlmClient;
 use exagent::policy::{PolicyManager, PolicyMode};
 use exagent::registry::{ToolContext, ToolRegistry};
-use exagent::session::SessionSnapshot;
 use exagent::tools::run_command::RunCommandTool;
-use exagent::transcript::{read_json, replay_session};
-use exagent::types::{AssistantTurn, ConversationMessage, MessageRole, SessionId, ToolCall};
+use exagent::transcript::replay_session;
+use exagent::types::{SessionId, ToolCall};
 use serde_json::json;
 use tempfile::tempdir;
-use tokio::sync::Mutex;
 
 fn test_context() -> (tempfile::TempDir, SessionId, ToolContext) {
     let dir = tempdir().unwrap();
@@ -172,71 +166,4 @@ async fn approved_requests_execute_and_denied_requests_stop_execution() {
         RuntimeEventKind::ApprovalDecision { status, .. }
             if *status == exagent::session::ApprovalStatus::Denied
     )));
-}
-
-#[tokio::test]
-async fn agent_persists_pending_approvals_in_session_snapshot() {
-    let dir = tempdir().unwrap();
-    let llm = PolicyInspectingLlm::default();
-
-    let config = AgentConfig {
-        workspace_root: dir.path().to_path_buf(),
-        cwd: dir.path().to_path_buf(),
-        policy_mode: PolicyMode::Enforced,
-        ..AgentConfig::default()
-    };
-
-    let mut registry = ToolRegistry::new();
-    registry.register(RunCommandTool);
-
-    let agent = Agent::new(config, Box::new(llm), registry);
-    let output = agent.run_with_meta("clean scratch").await.unwrap();
-    let snapshot: SessionSnapshot = read_json(&output.snapshot_path).unwrap();
-
-    assert_eq!(snapshot.pending_approvals.len(), 1);
-    assert_eq!(snapshot.pending_approvals[0].tool_name, "run_command");
-    assert!(snapshot.pending_approvals[0].reason.contains("risky"));
-}
-
-#[derive(Default)]
-struct PolicyInspectingLlm {
-    calls: Mutex<usize>,
-}
-
-#[async_trait]
-impl LlmClient for PolicyInspectingLlm {
-    async fn complete(
-        &self,
-        messages: &[ConversationMessage],
-        _tools: &[serde_json::Value],
-    ) -> Result<AssistantTurn> {
-        let mut calls = self.calls.lock().await;
-        *calls += 1;
-
-        match *calls {
-            1 => Ok(AssistantTurn {
-                text: Some("trying risky command".into()),
-                tool_calls: vec![ToolCall {
-                    id: "call_1".into(),
-                    name: "run_command".into(),
-                    arguments: json!({ "command": "rm -rf scratch" }),
-                }],
-            }),
-            2 => {
-                let tool_message = messages
-                    .iter()
-                    .find(|message| matches!(message.role, MessageRole::Tool))
-                    .ok_or_else(|| anyhow!("expected tool message"))?;
-                assert!(tool_message
-                    .content
-                    .contains("\"status\":\"review_required\""));
-
-                Ok(AssistantTurn {
-                    text: Some("waiting for approval".into()),
-                    tool_calls: vec![],
-                })
-            }
-            _ => Err(anyhow!("unexpected llm call count")),
-        }
-    }
 }

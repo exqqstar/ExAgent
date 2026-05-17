@@ -11,13 +11,11 @@ use serde::Serialize;
 use std::convert::Infallible;
 
 pub use crate::app_server::protocol::{
-    AgentRunResponse, BoundaryOp, BoundaryOpResponse, CollectParams as CollectRequest,
-    CollectResponse, EventsReplayParams as EventsReplayRequest, EventsReplayResponse,
-    EventsSubscribeParams as EventsSubscribeRequest, ForkParams as ForkRequest,
-    InitializeParams as InitializeRequest, InitializeResponse, InspectParams as InspectRequest,
-    InspectResponse, RunParams as RunRequest, ThreadReadParams as ThreadReadRequest,
-    ThreadReadResponse, ThreadResumeParams as ThreadResumeRequest, ThreadResumeResponse,
-    ThreadSpawnChildParams as ThreadSpawnChildRequest, ThreadSpawnChildResponse,
+    AgentRunResponse, BoundaryOp, BoundaryOpResponse, EventsReplayParams as EventsReplayRequest,
+    EventsReplayResponse, EventsSubscribeParams as EventsSubscribeRequest,
+    InitializeParams as InitializeRequest, InitializeResponse, RunParams as RunRequest,
+    ThreadReadParams as ThreadReadRequest, ThreadReadResponse,
+    ThreadResumeParams as ThreadResumeRequest, ThreadResumeResponse,
     ThreadStartParams as ThreadStartRequest, ThreadStartResponse,
     TurnInterruptParams as TurnInterruptRequest, TurnInterruptResponse,
     TurnStartParams as TurnStartRequest, TurnStartResponse,
@@ -46,16 +44,12 @@ pub fn build_router(boundary: Arc<dyn AppServerBoundary>) -> Router {
         .route("/health", get(health))
         .route("/initialize", post(initialize))
         .route("/run", post(run_agent))
-        .route("/fork", post(fork_agent))
-        .route("/inspect", post(inspect_children))
-        .route("/collect", post(collect_session))
         .route("/thread/start", post(thread_start))
         .route("/thread/read", post(thread_read))
         .route("/thread/resume", post(thread_resume))
         .route("/turn/start", post(turn_start))
         .route("/turn/interrupt", post(turn_interrupt))
         .route("/thread/op", post(thread_op))
-        .route("/thread/spawn_child", post(thread_spawn_child))
         .route("/events/replay", post(events_replay))
         .route("/events/subscribe", post(events_subscribe))
         .with_state(ApiState { boundary })
@@ -102,27 +96,6 @@ async fn run_agent(
     json_result(state.boundary.run(request).await)
 }
 
-async fn fork_agent(
-    State(state): State<ApiState>,
-    Json(request): Json<ForkRequest>,
-) -> impl IntoResponse {
-    json_result(state.boundary.fork(request).await)
-}
-
-async fn inspect_children(
-    State(state): State<ApiState>,
-    Json(request): Json<InspectRequest>,
-) -> impl IntoResponse {
-    json_result(state.boundary.inspect(request).await)
-}
-
-async fn collect_session(
-    State(state): State<ApiState>,
-    Json(request): Json<CollectRequest>,
-) -> impl IntoResponse {
-    json_result(state.boundary.collect(request).await)
-}
-
 async fn thread_start(
     State(state): State<ApiState>,
     Json(request): Json<ThreadStartRequest>,
@@ -163,13 +136,6 @@ async fn thread_op(
     Json(request): Json<BoundaryOp>,
 ) -> impl IntoResponse {
     json_result::<BoundaryOpResponse>(state.boundary.submit_boundary_op(request).await)
-}
-
-async fn thread_spawn_child(
-    State(state): State<ApiState>,
-    Json(request): Json<ThreadSpawnChildRequest>,
-) -> impl IntoResponse {
-    json_result(state.boundary.thread_spawn_child(request).await)
 }
 
 async fn events_replay(

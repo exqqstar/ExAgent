@@ -1,17 +1,15 @@
 use std::sync::Mutex;
 
 use exagent::app_server::protocol::{
-    AgentRunResponse, BoundaryOp, BoundaryOpResponse, CollectParams, CollectResponse,
-    EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, ForkParams, InspectParams,
-    InspectResponse, RunParams, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadSpawnChildParams, ThreadSpawnChildResponse, ThreadStartParams,
-    ThreadStartResponse, ThreadStatus, ThreadView, TurnInterruptParams, TurnInterruptResponse,
-    TurnStartParams, TurnStartResponse, TurnStatus, TurnView,
+    AgentRunResponse, BoundaryOp, BoundaryOpResponse, EventsReplayParams, EventsReplayResponse,
+    EventsSubscribeParams, RunParams, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, ThreadStatus, ThreadView,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnStatus,
+    TurnView,
 };
 use exagent::app_server::AppServerBoundary;
 use exagent::cli::CliCommand;
 use exagent::events::{RuntimeEvent, RuntimeEventKind};
-use exagent::session::AgentRole;
 use exagent::types::{AssistantTurn, EventId, SessionId, TurnId};
 
 struct CliBoundary {
@@ -36,22 +34,6 @@ impl CliBoundary {
 impl AppServerBoundary for CliBoundary {
     async fn run(&self, _params: RunParams) -> anyhow::Result<AgentRunResponse> {
         panic!("CLI adapter must not use legacy run");
-    }
-
-    async fn fork(&self, _params: ForkParams) -> anyhow::Result<AgentRunResponse> {
-        panic!("CLI adapter must not use legacy fork");
-    }
-
-    async fn inspect(&self, params: InspectParams) -> anyhow::Result<InspectResponse> {
-        self.calls.lock().unwrap().push("inspect".into());
-        assert_eq!(params.parent_session_id.as_str(), "session_parent");
-        assert_eq!(params.workspace_root, None);
-
-        Ok(InspectResponse { children: vec![] })
-    }
-
-    async fn collect(&self, _params: CollectParams) -> anyhow::Result<CollectResponse> {
-        panic!("collect is not used in these CLI adapter tests");
     }
 
     async fn thread_start(&self, params: ThreadStartParams) -> anyhow::Result<ThreadStartResponse> {
@@ -132,32 +114,6 @@ impl AppServerBoundary for CliBoundary {
         panic!("turn_interrupt is not used in these CLI adapter tests");
     }
 
-    async fn thread_spawn_child(
-        &self,
-        params: ThreadSpawnChildParams,
-    ) -> anyhow::Result<ThreadSpawnChildResponse> {
-        self.calls.lock().unwrap().push("thread_spawn_child".into());
-        assert_eq!(params.parent_thread_id.as_str(), "session_parent");
-        assert_eq!(params.agent_role, AgentRole::Spec);
-        assert_eq!(params.prompt, "draft spec");
-        assert_eq!(params.workspace_root, None);
-        assert_eq!(params.cwd, None);
-
-        Ok(ThreadSpawnChildResponse {
-            parent_thread_id: params.parent_thread_id,
-            child_thread_id: SessionId::new("session_child"),
-            agent_role: params.agent_role,
-            ignored_overrides: vec![],
-            output: AgentRunResponse {
-                text: Some("child complete".into()),
-                tool_calls: vec![],
-                session_id: SessionId::new("session_child"),
-                snapshot_path: ".exagent/sessions/session_child/snapshot.json".into(),
-                events_path: ".exagent/sessions/session_child/events.jsonl".into(),
-            },
-        })
-    }
-
     async fn submit_boundary_op(&self, _op: BoundaryOp) -> anyhow::Result<BoundaryOpResponse> {
         panic!("CLI adapter uses typed boundary methods in these tests");
     }
@@ -230,23 +186,4 @@ async fn cli_resume_reads_thread_then_starts_turn_without_legacy_run() {
         boundary.calls(),
         vec!["thread_resume", "events_subscribe", "turn_start"]
     );
-}
-
-#[tokio::test]
-async fn cli_fork_uses_thread_spawn_child_without_legacy_fork() {
-    let boundary = CliBoundary::new();
-
-    let output = exagent::cli_adapter::execute_cli_command(
-        &boundary,
-        CliCommand::Fork {
-            parent_session_id: SessionId::new("session_parent"),
-            agent_role: AgentRole::Spec,
-            prompt: "draft spec".into(),
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(output.stdout, "child complete\n");
-    assert_eq!(boundary.calls(), vec!["thread_spawn_child"]);
 }

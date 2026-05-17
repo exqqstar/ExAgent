@@ -2,6 +2,9 @@
 
 **Date:** 2026-05-15
 **Status:** Implemented and verified
+**Update 2026-05-17:** The legacy child orchestration surface
+`fork`/`inspect`/`collect`/`thread_spawn_child` has been removed. Child threads
+will be reintroduced as runtime-native operations in a later design.
 **Related:**
 - `docs/architecture/2026-05-15-exagent-appserver-runtime-boundary-v1-design.md`
 - `docs/plans/2026-05-15-exagent-appserver-runtime-boundary-v1.md`
@@ -39,7 +42,6 @@ V1 operations:
 - `thread_resume`
 - `turn_start`
 - `turn_interrupt`
-- `thread_spawn_child`
 - `events_replay`
 
 `BoundaryCapability` is kept aligned with `BoundaryOp`. The test
@@ -73,7 +75,6 @@ The implemented rules are:
   It does not rewrite the thread snapshot.
 - `thread_resume`: persisted thread context wins. Unsupported request
   overrides are reported with `IgnoredOverrideField`.
-- `thread_spawn_child`: parent snapshot workspace/cwd/lineage wins.
 - `events_replay`: read-only; no config mutation.
 
 The key concurrency fix is that `turn_context` is validated after active-turn
@@ -135,9 +136,6 @@ CLI code uses `src/cli_adapter.rs`. It maps user commands into boundary calls:
 ```text
 run     -> thread_start -> turn_start
 resume  -> thread_resume -> turn_start
-fork    -> thread_spawn_child
-inspect -> inspect
-collect -> collect
 ```
 
 HTTP code in `src/api.rs` is a transport adapter. The current app-server boundary V1 routes are:
@@ -149,7 +147,6 @@ HTTP code in `src/api.rs` is a transport adapter. The current app-server boundar
 - `POST /turn/start`
 - `POST /turn/interrupt`
 - `POST /thread/op`
-- `POST /thread/spawn_child`
 - `POST /events/replay`
 
 `POST /initialize` maps to `BoundaryOp::Initialize` and returns the tagged
@@ -161,9 +158,10 @@ The older runtime-control routes `POST /threads` and
 routes. The legacy runtime-control prototype has been removed, so thread and
 turn lifecycle enters through the app-server boundary.
 
-The earlier underscore aliases `POST /thread_spawn_child` and
-`POST /events_replay` have been removed. New clients should use only the slash
-routes listed above.
+The earlier orchestration routes `POST /fork`, `POST /inspect`,
+`POST /collect`, and `POST /thread/spawn_child` have been removed. The earlier
+underscore aliases `POST /thread_spawn_child` and `POST /events_replay` have
+also been removed.
 
 ## Code Map
 
@@ -172,7 +170,7 @@ Core files:
 - `src/app_server/protocol.rs`: protocol DTOs, ops, responses, status enums.
 - `src/app_server/override_policy.rs`: named config merge rules.
 - `src/app_server/thread_manager.rs`: thread lifecycle, turn lifecycle,
-  active-turn registry, replay, child spawn, interrupt handling.
+  active-turn registry, replay, interrupt handling.
 - `src/app_server/service.rs`: public boundary facade and trait.
 - `src/app_server/error.rs`: typed app-server errors.
 - `src/cli_adapter.rs`: CLI-to-boundary adapter.
@@ -225,9 +223,9 @@ Useful follow-ups that are intentionally outside V1:
 - client capability negotiation in `initialize`, if GUI or streaming clients
   need to advertise supported features.
 - richer tracing spans for `thread_start`, `turn_start`, `turn_interrupt`, and
-  `thread_spawn_child`.
-- `events_subscribe` streaming.
+  replay/subscription paths.
+- explicit SDK/client documentation for the `events_subscribe` SSE envelope.
 - cross-process active-turn ownership.
-- transcript-copy fork modes separate from lineage child spawn.
+- runtime-native child thread/fork modes.
 - replacing the in-process active-turn `Mutex<HashMap<...>>` if concurrency
   pressure requires it.

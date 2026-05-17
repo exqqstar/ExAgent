@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use exagent::app_server::protocol::{
     BoundaryCapability, BoundaryOp, BoundaryOpResponse, EventsReplayParams, IgnoredOverrideField,
     InitializeParams, RunParams, ThreadItem, ThreadReadParams, ThreadResumeParams,
-    ThreadSpawnChildParams, ThreadStartParams, ThreadStatus, TurnContextOverrides,
-    TurnInterruptParams, TurnStartParams, TurnStatus,
+    ThreadStartParams, ThreadStatus, TurnContextOverrides, TurnInterruptParams, TurnStartParams,
+    TurnStatus,
 };
 use exagent::app_server::{AppServerError, AppServerService};
 use exagent::config::AgentConfig;
@@ -12,7 +12,7 @@ use exagent::events::{RuntimeEvent, RuntimeEventKind};
 use exagent::llm::{LlmClient, MockLlm};
 use exagent::policy::PolicyMode;
 use exagent::registry::{ToolContext, ToolRegistry};
-use exagent::session::{AgentRole, ApprovalStatus, SessionSnapshot};
+use exagent::session::{ApprovalStatus, SessionSnapshot};
 use exagent::tools::run_command::RunCommandTool;
 use exagent::tools::Tool;
 use exagent::types::{
@@ -190,7 +190,6 @@ async fn initialize_boundary_advertises_v2_protocol_surface() {
             BoundaryCapability::Initialize,
             BoundaryCapability::ThreadStart,
             BoundaryCapability::ThreadResume,
-            BoundaryCapability::ThreadSpawnChild,
             BoundaryCapability::ThreadRead,
             BoundaryCapability::TurnStart,
             BoundaryCapability::TurnInterrupt,
@@ -224,18 +223,6 @@ fn boundary_capabilities_match_boundary_op_type_names() {
                 thread_id: SessionId::new("session_123"),
                 workspace_root: None,
                 cwd: None,
-            }))
-            .unwrap(),
-        ),
-        (
-            BoundaryCapability::ThreadSpawnChild,
-            serde_json::to_value(BoundaryOp::ThreadSpawnChild(ThreadSpawnChildParams {
-                parent_thread_id: SessionId::new("session_parent"),
-                agent_role: AgentRole::Spec,
-                prompt: "draft".into(),
-                workspace_root: None,
-                cwd: None,
-                spawned_by_turn_id: None,
             }))
             .unwrap(),
         ),
@@ -849,81 +836,6 @@ async fn legacy_run_compatibility_uses_thread_and_turn_lifecycle() {
         &replay.events[2].kind,
         RuntimeEventKind::TurnCompleted
     ));
-}
-
-#[tokio::test]
-async fn thread_spawn_child_uses_parent_context_and_records_spawn_events() {
-    let dir = tempdir().unwrap();
-    let parent_cwd = dir.path().join("parent-cwd");
-    let ignored_cwd = dir.path().join("ignored-cwd");
-    std::fs::create_dir_all(&parent_cwd).unwrap();
-    std::fs::create_dir_all(&ignored_cwd).unwrap();
-
-    let service = AppServerService::with_llm(
-        AgentConfig {
-            workspace_root: dir.path().to_path_buf(),
-            cwd: dir.path().to_path_buf(),
-            ..AgentConfig::default()
-        },
-        Box::new(MockLlm::new(vec![AssistantTurn {
-            text: Some("child complete".into()),
-            tool_calls: vec![],
-        }])),
-        ToolRegistry::new,
-    );
-
-    let parent = service
-        .thread_start(ThreadStartParams {
-            workspace_root: None,
-            cwd: Some("parent-cwd".into()),
-        })
-        .unwrap();
-    let child = service
-        .thread_spawn_child(ThreadSpawnChildParams {
-            parent_thread_id: parent.thread.id.clone(),
-            agent_role: AgentRole::Spec,
-            prompt: "draft spec".into(),
-            workspace_root: None,
-            cwd: Some("ignored-cwd".into()),
-            spawned_by_turn_id: Some(TurnId::new("turn_parent_1")),
-        })
-        .await
-        .unwrap();
-
-    assert_eq!(child.parent_thread_id, parent.thread.id);
-    assert_eq!(child.agent_role, AgentRole::Spec);
-    assert_eq!(child.output.text.as_deref(), Some("child complete"));
-    assert_eq!(child.ignored_overrides, vec![IgnoredOverrideField::Cwd]);
-
-    let child_snapshot: SessionSnapshot =
-        exagent::transcript::read_json(child.output.snapshot_path.as_ref()).unwrap();
-    assert_eq!(
-        child_snapshot.parent_session_id,
-        Some(parent.thread.id.clone())
-    );
-    assert_eq!(child_snapshot.root_session_id, parent.thread.id);
-    assert_eq!(
-        child_snapshot.cwd,
-        std::fs::canonicalize(parent_cwd).unwrap()
-    );
-    assert_ne!(child_snapshot.cwd, ignored_cwd);
-
-    let parent_replay = service
-        .events_replay(events_replay_params(child.parent_thread_id.clone()))
-        .unwrap();
-    assert!(parent_replay.events.iter().any(|event| {
-        matches!(
-            &event.kind,
-            RuntimeEventKind::SessionSpawned {
-                child_session_id,
-                parent_session_id,
-                agent_role: AgentRole::Spec,
-                spawned_by_turn_id: Some(turn_id),
-            } if child_session_id == &child.child_thread_id
-                && parent_session_id == &child.parent_thread_id
-                && *turn_id == TurnId::new("turn_parent_1")
-        )
-    }));
 }
 
 #[test]

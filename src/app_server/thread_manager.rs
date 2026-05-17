@@ -9,14 +9,13 @@ use tokio::sync::broadcast;
 use crate::agent::{Agent, AgentRunOutput};
 use crate::app_server::override_policy::{OverridePolicy, RuntimeOverrides};
 use crate::app_server::protocol::{
-    AgentRunResponse, BoundaryCapability, BoundaryOp, BoundaryOpResponse, CollectParams,
-    CollectResponse, EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, ForkParams,
-    IgnoredOverrideField, InitializeParams, InitializeResponse, InspectParams, InspectResponse,
-    ReplaySnapshotView, RunParams, RuntimeEventKindFilter, ThreadItem, ThreadReadParams,
-    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadSpawnChildParams,
-    ThreadSpawnChildResponse, ThreadStartParams, ThreadStartResponse, ThreadStatus, ThreadView,
-    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnState,
-    TurnStatus, TurnView, BOUNDARY_PROTOCOL_VERSION,
+    AgentRunResponse, BoundaryCapability, BoundaryOp, BoundaryOpResponse, EventsReplayParams,
+    EventsReplayResponse, EventsSubscribeParams, IgnoredOverrideField, InitializeParams,
+    InitializeResponse, ReplaySnapshotView, RunParams, RuntimeEventKindFilter, ThreadItem,
+    ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
+    ThreadStartParams, ThreadStartResponse, ThreadStatus, ThreadView, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnState, TurnStatus, TurnView,
+    BOUNDARY_PROTOCOL_VERSION,
 };
 use crate::app_server::AppServerError;
 use crate::config::AgentConfig;
@@ -185,7 +184,6 @@ impl ThreadManager {
                 BoundaryCapability::Initialize,
                 BoundaryCapability::ThreadStart,
                 BoundaryCapability::ThreadResume,
-                BoundaryCapability::ThreadSpawnChild,
                 BoundaryCapability::ThreadRead,
                 BoundaryCapability::TurnStart,
                 BoundaryCapability::TurnInterrupt,
@@ -193,40 +191,6 @@ impl ThreadManager {
             ],
             supported_streams: vec![BoundaryCapability::EventsSubscribe],
         }
-    }
-
-    pub async fn fork(&self, params: ForkParams) -> Result<AgentRunResponse> {
-        Ok(self
-            .thread_spawn_child(ThreadSpawnChildParams {
-                parent_thread_id: params.parent_session_id,
-                agent_role: params.agent_role,
-                prompt: params.prompt,
-                workspace_root: params.workspace_root,
-                cwd: None,
-                spawned_by_turn_id: params.spawned_by_turn_id,
-            })
-            .await?
-            .output)
-    }
-
-    pub fn inspect(&self, params: InspectParams) -> Result<InspectResponse> {
-        let config = OverridePolicy::merge_thread_read(&self.base_config, params.workspace_root)?;
-        Ok(InspectResponse {
-            children: crate::orchestration::inspect_children(
-                &config.workspace_root,
-                &params.parent_session_id,
-            )?,
-        })
-    }
-
-    pub fn collect(&self, params: CollectParams) -> Result<CollectResponse> {
-        let config = OverridePolicy::merge_thread_read(&self.base_config, params.workspace_root)?;
-        Ok(CollectResponse {
-            session: crate::orchestration::collect_session(
-                &config.workspace_root,
-                &params.session_id,
-            )?,
-        })
     }
 
     pub fn thread_start(&self, params: ThreadStartParams) -> Result<ThreadStartResponse> {
@@ -545,46 +509,6 @@ impl ThreadManager {
         Ok(TurnStartStarted { thread_id, turn_id })
     }
 
-    pub async fn thread_spawn_child(
-        &self,
-        params: ThreadSpawnChildParams,
-    ) -> Result<ThreadSpawnChildResponse> {
-        match self
-            .submit_boundary_op(BoundaryOp::ThreadSpawnChild(params))
-            .await?
-        {
-            BoundaryOpResponse::ThreadChildSpawned(response) => Ok(response),
-            response => Err(unexpected_boundary_response("thread_spawn_child", &response).into()),
-        }
-    }
-
-    async fn thread_spawn_child_direct(
-        &self,
-        params: ThreadSpawnChildParams,
-    ) -> Result<ThreadSpawnChildResponse> {
-        let ignored_overrides = ignored_child_overrides(&params);
-        let config =
-            OverridePolicy::merge_thread_spawn_child(&self.base_config, params.workspace_root)?;
-        let agent = self.agent_for(config)?;
-        let output = agent
-            .fork_session(
-                &params.parent_thread_id,
-                params.agent_role.clone(),
-                &params.prompt,
-                params.spawned_by_turn_id.as_ref(),
-            )
-            .await?;
-        let child_thread_id = output.session_id.clone();
-
-        Ok(ThreadSpawnChildResponse {
-            parent_thread_id: params.parent_thread_id,
-            child_thread_id,
-            agent_role: params.agent_role,
-            ignored_overrides,
-            output: agent_run_response(output),
-        })
-    }
-
     pub async fn submit_boundary_op(&self, op: BoundaryOp) -> Result<BoundaryOpResponse> {
         match op {
             BoundaryOp::Initialize(params) => {
@@ -607,10 +531,6 @@ impl ThreadManager {
                 .turn_interrupt(params)
                 .await
                 .map(BoundaryOpResponse::TurnInterrupted),
-            BoundaryOp::ThreadSpawnChild(params) => self
-                .thread_spawn_child_direct(params)
-                .await
-                .map(BoundaryOpResponse::ThreadChildSpawned),
             BoundaryOp::EventsReplay(params) => self
                 .events_replay(params)
                 .map(BoundaryOpResponse::EventsReplayed),
@@ -657,17 +577,6 @@ impl ThreadManager {
         }
         let runtime = self.ensure_runtime_loaded(&params.thread_id, config)?;
         Ok(runtime.subscribe_events())
-    }
-
-    fn agent_for(&self, config: AgentConfig) -> Result<Agent> {
-        let llm = self.llm_factory.build(&config)?;
-        Ok(Agent::with_runtime(
-            config,
-            llm,
-            (self.registry_factory)(),
-            self.exec_sessions.clone(),
-            self.policy.clone(),
-        ))
     }
 
     fn runtime_agent_factory(&self) -> AgentFactory {
@@ -768,14 +677,6 @@ impl ThreadManager {
     }
 }
 
-fn ignored_child_overrides(params: &ThreadSpawnChildParams) -> Vec<IgnoredOverrideField> {
-    let mut ignored = Vec::new();
-    if params.cwd.is_some() {
-        ignored.push(IgnoredOverrideField::Cwd);
-    }
-    ignored
-}
-
 fn ignored_resume_overrides(params: &ThreadResumeParams) -> Vec<IgnoredOverrideField> {
     let mut ignored = Vec::new();
     if params.cwd.is_some() {
@@ -799,7 +700,6 @@ fn boundary_response_name(response: &BoundaryOpResponse) -> &'static str {
         BoundaryOpResponse::ThreadResumed(_) => "thread_resumed",
         BoundaryOpResponse::TurnStarted(_) => "turn_started",
         BoundaryOpResponse::TurnInterrupted(_) => "turn_interrupted",
-        BoundaryOpResponse::ThreadChildSpawned(_) => "thread_child_spawned",
         BoundaryOpResponse::EventsReplayed(_) => "events_replayed",
     }
 }
@@ -817,9 +717,7 @@ fn latest_turn_state(events: &[crate::events::RuntimeEvent]) -> Option<TurnState
             RuntimeEventKind::ToolResult { .. }
             | RuntimeEventKind::ExecOutput { .. }
             | RuntimeEventKind::ApprovalDecision { .. }
-            | RuntimeEventKind::SessionSpawned { .. }
-            | RuntimeEventKind::CompactionWritten { .. }
-            | RuntimeEventKind::StructuredResultRecorded { .. } => TurnStatus::InProgress,
+            | RuntimeEventKind::CompactionWritten { .. } => TurnStatus::InProgress,
         };
         Some(TurnState { turn_id, status })
     })
@@ -906,8 +804,7 @@ fn build_turn_views(events: Vec<RuntimeEvent>) -> Vec<TurnView> {
             | RuntimeEventKind::ToolResult { .. }
             | RuntimeEventKind::ExecOutput { .. }
             | RuntimeEventKind::ApprovalDecision { .. }
-            | RuntimeEventKind::CompactionWritten { .. }
-            | RuntimeEventKind::StructuredResultRecorded { .. } => {
+            | RuntimeEventKind::CompactionWritten { .. } => {
                 if let Some(turn_id) = view_turn_id(&event, current_turn_id.as_ref()) {
                     let index = ensure_turn_view(&mut turns, &turn_id);
                     if let Some(item) = thread_item_from_event(&event.kind) {
@@ -915,7 +812,6 @@ fn build_turn_views(events: Vec<RuntimeEvent>) -> Vec<TurnView> {
                     }
                 }
             }
-            RuntimeEventKind::SessionSpawned { .. } => {}
         }
     }
 
@@ -965,16 +861,10 @@ fn thread_item_from_event(kind: &RuntimeEventKind) -> Option<ThreadItem> {
         RuntimeEventKind::RuntimeError { message } => Some(ThreadItem::RuntimeError {
             message: message.clone(),
         }),
-        RuntimeEventKind::StructuredResultRecorded { result } => {
-            Some(ThreadItem::StructuredResult {
-                kind: structured_result_kind(result).to_string(),
-            })
-        }
         RuntimeEventKind::CompactionWritten { .. } => Some(ThreadItem::CompactionWritten),
         RuntimeEventKind::TurnStarted
         | RuntimeEventKind::TurnCompleted
-        | RuntimeEventKind::TurnInterrupted
-        | RuntimeEventKind::SessionSpawned { .. } => None,
+        | RuntimeEventKind::TurnInterrupted => None,
     }
 }
 
@@ -983,16 +873,6 @@ fn approval_status_name(status: &crate::session::ApprovalStatus) -> &'static str
         crate::session::ApprovalStatus::Pending => "pending",
         crate::session::ApprovalStatus::Approved => "approved",
         crate::session::ApprovalStatus::Denied => "denied",
-    }
-}
-
-fn structured_result_kind(
-    result: &crate::result_contract::StructuredSessionResult,
-) -> &'static str {
-    match &result.payload {
-        crate::result_contract::StructuredResultPayload::Spec { .. } => "spec",
-        crate::result_contract::StructuredResultPayload::Test { .. } => "test",
-        crate::result_contract::StructuredResultPayload::Judge { .. } => "judge",
     }
 }
 
@@ -1044,9 +924,6 @@ fn runtime_event_kind_matches(filter: &RuntimeEventKindFilter, kind: &RuntimeEve
             RuntimeEventKindFilter::ToolResult,
             RuntimeEventKind::ToolResult { .. },
         ) | (
-            RuntimeEventKindFilter::SessionSpawned,
-            RuntimeEventKind::SessionSpawned { .. },
-        ) | (
             RuntimeEventKindFilter::ExecOutput,
             RuntimeEventKind::ExecOutput { .. },
         ) | (
@@ -1058,9 +935,6 @@ fn runtime_event_kind_matches(filter: &RuntimeEventKindFilter, kind: &RuntimeEve
         ) | (
             RuntimeEventKindFilter::CompactionWritten,
             RuntimeEventKind::CompactionWritten { .. },
-        ) | (
-            RuntimeEventKindFilter::StructuredResultRecorded,
-            RuntimeEventKind::StructuredResultRecorded { .. },
         ) | (
             RuntimeEventKindFilter::RuntimeError,
             RuntimeEventKind::RuntimeError { .. },

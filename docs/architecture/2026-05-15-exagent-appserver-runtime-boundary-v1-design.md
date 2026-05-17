@@ -68,7 +68,7 @@ A thread owns:
 - event log path
 - snapshot path
 
-Thread identity is stable across turns. A thread can be resumed, inspected, forked into a child, or replayed.
+Thread identity is stable across turns. A thread can be resumed, read, interrupted, and replayed.
 
 ### Turn
 
@@ -94,7 +94,6 @@ Boundary operation:
   initialize
   thread/start
   thread/resume
-  thread/spawn_child
   thread/read
   turn/start
   turn/interrupt
@@ -120,12 +119,10 @@ V1 events include:
 - `turn_interrupted`
 - `assistant_turn`
 - `tool_result`
-- `session_spawned`
 - `exec_output`
 - `approval_requested`
 - `approval_decision`
 - `compaction_written`
-- `structured_result_recorded`
 - `runtime_error`
 
 The event log is the observability and replay plane. The snapshot is the fast-resume plane. Both are needed.
@@ -206,9 +203,6 @@ turn/interrupt while waiting_approval
 
 events/replay while running
   -> allowed, read-only
-
-thread/spawn_child while parent running
-  -> allowed only if it uses the last persisted parent snapshot
 ```
 
 This keeps the first boundary deterministic. Later versions can add a real queue, but the V1 contract should not imply hidden scheduling.
@@ -221,7 +215,6 @@ V1 should expose a compact protocol surface:
 initialize
 thread/start
 thread/resume
-thread/spawn_child
 thread/read
 turn/start
 turn/interrupt
@@ -243,18 +236,14 @@ exagent "prompt"
 exagent resume <thread_id> "prompt"
   -> thread/resume
   -> turn/start
-
-exagent fork <parent_thread_id> spec "prompt"
-  -> thread/spawn_child
-
-exagent inspect <thread_id>
-  -> thread/read or inspect children
-
-exagent collect <child_thread_id>
-  -> collect child output view
 ```
 
 The CLI may combine multiple protocol calls for convenience, but it should not build `Agent` directly.
+
+The earlier `fork`, `inspect`, and `collect` commands were removed from the
+current boundary. Child orchestration will be reintroduced only after it can be
+modeled as runtime-native thread operations instead of a separate legacy
+execution path.
 
 ### HTTP/API Mapping
 
@@ -268,7 +257,6 @@ POST /thread/resume
 POST /turn/start
 POST /turn/interrupt
 POST /thread/op
-POST /thread/spawn_child
 POST /events/replay
 ```
 
@@ -282,8 +270,9 @@ Runtime Boundary V1 surface. The legacy runtime-control prototype has been
 removed so thread and turn lifecycle cannot enter through a competing runtime
 path.
 
-The legacy aliases `POST /thread_spawn_child` and `POST /events_replay` are
-not part of the boundary surface. Clients must use the slash routes.
+The legacy `POST /fork`, `POST /inspect`, `POST /collect`,
+`POST /thread/spawn_child`, `POST /thread_spawn_child`, and
+`POST /events_replay` routes are not part of the boundary surface.
 
 The route shape can evolve, but the rule is stable: HTTP handlers translate JSON into protocol requests and delegate to the app-server boundary.
 
@@ -369,44 +358,28 @@ thread/start           defaults + environment + explicit request overrides
 turn/start             current thread context + explicit per-turn overrides; no snapshot mutation
 thread/resume          persisted thread context; unsupported overrides reported as ignored
 running thread/resume  active thread context; request overrides ignored with warnings
-thread/spawn_child     parent snapshot workspace/cwd/lineage wins
 events/replay          persisted event log only; no config mutation
 ```
 
 This matrix is the contract `OverridePolicy` should implement and tests should pin. It is intentionally entrypoint-specific.
 
-## Fork Semantics
+## Child Thread Status
 
-V1 must define fork semantics precisely.
+The earlier child-session surface was deliberately removed from the current
+boundary. It created a second execution path around the live thread runtime and
+depended on old `Agent::fork_session`, `inspect_children`, and `collect_session`
+helpers.
 
-Current ExAgent child-session behavior is lineage-based:
-
-```text
-child inherits:
-  parent_session_id
-  root_session_id
-  workspace_root
-  cwd
-  agent_role
-  spawned_by_turn_id
-
-child does not inherit:
-  parent conversation transcript
-```
-
-That means the current operation is better described as child spawn, not transcript fork.
-
-V1 should use one of these names:
+The next child-thread design should be explicit about whether it is:
 
 ```text
-thread/spawn_child
+snapshot fork       copy durable state at a point in time
+prefix fork         copy transcript prefix then inject new input
+lineage child       create a related thread without transcript inheritance
 ```
 
-or, if the public method remains `thread/fork`, the protocol must explicitly state:
-
-```text
-V1 fork = lineage fork, not transcript fork.
-```
+Until that design exists, the protocol surface intentionally contains no
+`thread/spawn_child` operation.
 
 Transcript-copying forks can be added later as separate operations:
 

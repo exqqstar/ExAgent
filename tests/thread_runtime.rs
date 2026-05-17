@@ -1,15 +1,14 @@
 use exagent::agent::Agent;
 use exagent::config::AgentConfig;
-use exagent::events::RuntimeEventKind;
+use exagent::events::{RuntimeEvent, RuntimeEventKind};
 use exagent::llm::MockLlm;
 use exagent::registry::ToolRegistry;
 use exagent::runtime::thread_runtime::{
-    AgentFactory, ThreadOp, ThreadOpResult, ThreadRuntime, ThreadRuntimeOptions,
-    ThreadRuntimeStatus,
+    AgentFactory, ThreadOpResult, ThreadRuntime, ThreadRuntimeOptions, ThreadRuntimeStatus,
 };
 use exagent::runtime::thread_session::{ThreadSession, ThreadSessionOptions};
 use exagent::session::SessionSnapshot;
-use exagent::types::{AssistantTurn, SessionId, TurnId};
+use exagent::types::{AssistantTurn, EventId, SessionId, TurnId};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -65,12 +64,52 @@ async fn thread_runtime_starts_idle_and_accepts_shutdown_op() {
     assert_eq!(runtime.thread_id(), &thread_id);
     assert_eq!(runtime.status(), ThreadRuntimeStatus::Idle);
 
-    runtime
-        .submit(ThreadOp::Shutdown)
-        .await
-        .expect("submit shutdown");
+    runtime.shutdown().await.expect("submit shutdown");
     runtime.wait_until_terminated().await;
     assert_eq!(runtime.status(), ThreadRuntimeStatus::Stopped);
+}
+
+#[tokio::test]
+async fn thread_runtime_live_view_uses_loaded_session_state_not_disk_mutations() {
+    let dir = tempdir().unwrap();
+    let thread_id = SessionId::new("session_runtime_live_view");
+    let config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        ..AgentConfig::default()
+    };
+    let snapshot = SessionSnapshot::new_thread(
+        thread_id.clone(),
+        config.workspace_root.clone(),
+        config.cwd.clone(),
+    );
+    let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
+    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+    let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
+        thread_id.clone(),
+        config.clone(),
+        agent_factory(vec![]),
+    ))
+    .expect("spawn runtime");
+
+    exagent::transcript::append_json_line(
+        &paths.events_path,
+        &RuntimeEvent {
+            event_id: EventId::new("evt_disk_only"),
+            session_id: thread_id.clone(),
+            turn_id: Some(TurnId::new("turn_disk_only")),
+            kind: RuntimeEventKind::RuntimeError {
+                message: "disk mutation after runtime load".into(),
+            },
+        },
+    )
+    .expect("append disk-only event");
+
+    let live_view = runtime.live_view().expect("read live view");
+
+    assert_eq!(live_view.thread_id, thread_id);
+    assert!(live_view.events.is_empty());
+    assert!(live_view.snapshot.conversation.is_empty());
 }
 
 #[tokio::test]
@@ -102,11 +141,7 @@ async fn thread_runtime_runs_user_input_through_agent_and_records_turn_lifecycle
     .expect("spawn runtime");
 
     let result = runtime
-        .submit_and_wait(ThreadOp::UserInput {
-            turn_id: turn_id.clone(),
-            prompt: "continue".into(),
-            turn_context: None,
-        })
+        .submit_user_input_and_wait(turn_id.clone(), "continue".into(), None)
         .await
         .expect("run turn");
 
@@ -128,6 +163,57 @@ async fn thread_runtime_runs_user_input_through_agent_and_records_turn_lifecycle
     assert!(matches!(replay[2].kind, RuntimeEventKind::TurnCompleted));
     assert_eq!(replay[0].turn_id.as_ref(), Some(&turn_id));
     assert_eq!(replay[2].turn_id.as_ref(), Some(&turn_id));
+}
+
+#[tokio::test]
+async fn thread_runtime_live_view_tracks_snapshot_after_turn_without_disk_read() {
+    let dir = tempdir().unwrap();
+    let thread_id = SessionId::new("session_runtime_live_snapshot");
+    let turn_id = TurnId::new("turn_1");
+    let config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        ..AgentConfig::default()
+    };
+    let snapshot = SessionSnapshot::new_thread(
+        thread_id.clone(),
+        config.workspace_root.clone(),
+        config.cwd.clone(),
+    );
+    let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
+    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+    let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
+        thread_id.clone(),
+        config,
+        agent_factory(vec![AssistantTurn {
+            text: Some("live snapshot complete".into()),
+            tool_calls: vec![],
+        }]),
+    ))
+    .expect("spawn runtime");
+
+    runtime
+        .submit_user_input_and_wait(turn_id, "continue".into(), None)
+        .await
+        .expect("run turn");
+    exagent::transcript::write_json(
+        &paths.snapshot_path,
+        &SessionSnapshot::new_thread(
+            thread_id.clone(),
+            paths.session_dir.clone(),
+            paths.session_dir.clone(),
+        ),
+    )
+    .unwrap();
+
+    let live_view = runtime.live_view().expect("read live view");
+
+    assert_eq!(live_view.snapshot.conversation.len(), 2);
+    assert_eq!(live_view.snapshot.conversation[0].content, "continue");
+    assert_eq!(
+        live_view.snapshot.conversation[1].content,
+        "live snapshot complete"
+    );
 }
 
 fn agent_factory(turns: Vec<AssistantTurn>) -> AgentFactory {

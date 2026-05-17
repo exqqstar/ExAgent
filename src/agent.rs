@@ -32,6 +32,14 @@ pub struct AgentRunOutput {
     pub events: Vec<RuntimeEvent>,
 }
 
+pub(crate) struct AgentLiveTurnOutput {
+    pub final_turn: AssistantTurn,
+    pub session_id: SessionId,
+    pub snapshot_path: PathBuf,
+    pub events_path: PathBuf,
+    pub event_kinds: Vec<RuntimeEventKind>,
+}
+
 impl Agent {
     pub fn new(config: AgentConfig, llm: Box<dyn LlmClient>, registry: ToolRegistry) -> Self {
         Self::with_runtime(
@@ -210,17 +218,83 @@ impl Agent {
     pub(crate) async fn run_live_turn(
         &self,
         snapshot: &mut SessionSnapshot,
-        user_prompt: &str,
         turn_id: TurnId,
         turn_cwd: Option<PathBuf>,
-        next_event_index: &mut usize,
-    ) -> Result<AgentRunOutput> {
-        snapshot.normalize_lineage();
-        snapshot
-            .conversation
-            .push(ConversationMessage::user(user_prompt));
-        self.run_session_snapshot(snapshot, Some(turn_id), turn_cwd, next_event_index)
+    ) -> Result<AgentLiveTurnOutput> {
+        self.run_live_session_snapshot(snapshot, turn_id, turn_cwd)
             .await
+    }
+
+    async fn run_live_session_snapshot(
+        &self,
+        snapshot: &mut SessionSnapshot,
+        runtime_turn_id: TurnId,
+        turn_cwd: Option<PathBuf>,
+    ) -> Result<AgentLiveTurnOutput> {
+        snapshot.normalize_lineage();
+        let mut session_config = self.config.clone();
+        session_config.workspace_root = snapshot.workspace_root.clone();
+        session_config.cwd = turn_cwd.unwrap_or_else(|| snapshot.cwd.clone());
+
+        let session_id = snapshot.session_id.clone();
+        let paths = crate::transcript::session_paths(&session_config.workspace_root, &session_id);
+        let mut messages = snapshot.conversation.clone();
+        let mut event_kinds = Vec::new();
+
+        let base_ctx = ToolContext {
+            config: session_config,
+            session_id: Some(session_id.clone()),
+            turn_id: None,
+            exec_sessions: self.exec_sessions.clone(),
+            policy: self.policy.clone(),
+        };
+        for _ in 0..self.config.max_turns {
+            let turn = self
+                .llm
+                .complete(&messages, &self.registry.schemas())
+                .await?;
+            event_kinds.push(RuntimeEventKind::AssistantTurn { turn: turn.clone() });
+
+            if turn.text.is_some() || !turn.tool_calls.is_empty() {
+                let assistant_message =
+                    ConversationMessage::assistant(turn.text.clone(), turn.tool_calls.clone());
+                messages.push(assistant_message.clone());
+                snapshot.conversation.push(assistant_message);
+            }
+
+            if turn.tool_calls.is_empty() {
+                return Ok(AgentLiveTurnOutput {
+                    final_turn: turn,
+                    session_id,
+                    snapshot_path: paths.snapshot_path,
+                    events_path: paths.events_path,
+                    event_kinds,
+                });
+            }
+
+            for call in turn.tool_calls.clone() {
+                let mut ctx = base_ctx.clone();
+                ctx.turn_id = Some(runtime_turn_id.clone());
+                let result = self.registry.execute(call, Some(&ctx)).await;
+                apply_exec_session_update(snapshot, &result);
+                apply_pending_approval_update(snapshot, &result);
+                event_kinds.push(RuntimeEventKind::ToolResult {
+                    result: result.clone(),
+                });
+
+                let tool_message = ConversationMessage::tool(
+                    result.tool_call_id.clone(),
+                    serde_json::to_string(&result)?,
+                );
+                messages.push(tool_message.clone());
+                snapshot.conversation.push(tool_message);
+            }
+        }
+
+        Err(anyhow!(
+            "Agent reached max turns ({}) without a final assistant turn",
+            self.config.max_turns
+        ))
     }
 
     async fn run_session_snapshot(

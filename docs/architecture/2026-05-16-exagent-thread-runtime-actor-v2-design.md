@@ -30,8 +30,9 @@ CLI / HTTP / future GUI
   -> ThreadManager
        loaded_threads: HashMap<SessionId, Arc<ThreadRuntime>>
   -> ThreadRuntime
-       submit(ThreadOp)
+       submit_user_input(...)
        subscribe_events()
+       live_view()
        status()
        shutdown()
   -> ThreadRuntimeLoop
@@ -42,6 +43,7 @@ CLI / HTTP / future GUI
        holds live Agent + snapshot
        emits RuntimeEvent
        persists snapshot + events.jsonl
+       exposes authoritative live view while loaded
 ```
 
 ## Codex Reference Model
@@ -192,12 +194,19 @@ events, but it does not create child runtimes in V2.
 
 Responsibilities:
 
-- Submit runtime ops.
+- Submit user-input turns through guarded methods.
 - Expose live event subscription.
 - Expose current status.
 - Own the active-turn interrupt handle.
+- Expose an authoritative live view for `thread/read` while loaded.
 - Provide thread metadata such as snapshot/event paths.
 - Shut down the runtime loop.
+
+Non-responsibilities:
+
+- It should not expose raw `ThreadOp::UserInput` submission. User input must go
+  through active-turn reservation so concurrent turn rejection and interrupt
+  state stay coherent.
 
 Target shape:
 
@@ -293,13 +302,18 @@ Responsibilities:
 - Handle processed internal ops such as `ThreadOp::UserInput`.
 - Update runtime status around a turn.
 - Advance turns against the live in-memory snapshot.
-- Append lifecycle events and broadcast persisted agent events.
+- Append lifecycle, assistant, and tool events.
+- Assign runtime event ids.
+- Broadcast live runtime events.
+- Checkpoint `snapshot.json`.
+- Keep an in-memory event buffer for loaded-thread reads.
 - Report shutdown and interrupt results back through `ThreadOpResult`.
 
 `ThreadSession` loads the durable snapshot when the runtime is spawned and
 keeps that snapshot in memory while the thread is live. Disk remains the
 recovery and replay surface; normal turn execution should not reconstruct the
-agent state from disk for every user input.
+agent state from disk for every user input. While a runtime is loaded,
+`thread/read` should prefer `ThreadRuntime::live_view()` over direct disk reads.
 
 The first implementation is intentionally small:
 

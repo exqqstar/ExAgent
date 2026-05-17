@@ -8,7 +8,7 @@ use exagent::app_server::protocol::{
 };
 use exagent::app_server::{AppServerError, AppServerService};
 use exagent::config::AgentConfig;
-use exagent::events::RuntimeEventKind;
+use exagent::events::{RuntimeEvent, RuntimeEventKind};
 use exagent::llm::{LlmClient, MockLlm};
 use exagent::policy::PolicyMode;
 use exagent::registry::{ToolContext, ToolRegistry};
@@ -930,6 +930,50 @@ fn thread_read_reports_new_thread_as_idle_without_latest_turn() {
     assert_eq!(read.thread.turns.last(), None);
     assert_eq!(read.thread.snapshot_path, thread.thread.snapshot_path);
     assert_eq!(read.thread.events_path, thread.thread.events_path);
+}
+
+#[test]
+fn thread_read_prefers_loaded_runtime_view_over_disk_events() {
+    let dir = tempdir().unwrap();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![])),
+        ToolRegistry::new,
+    );
+
+    let thread = service
+        .thread_start(ThreadStartParams {
+            workspace_root: None,
+            cwd: None,
+        })
+        .unwrap();
+    exagent::transcript::append_json_line(
+        &thread.thread.events_path,
+        &RuntimeEvent {
+            event_id: EventId::new("evt_disk_only"),
+            session_id: thread.thread.id.clone(),
+            turn_id: Some(TurnId::new("turn_disk_only")),
+            kind: RuntimeEventKind::RuntimeError {
+                message: "disk-only event after runtime load".into(),
+            },
+        },
+    )
+    .unwrap();
+
+    let read = service
+        .thread_read(ThreadReadParams {
+            thread_id: thread.thread.id.clone(),
+            workspace_root: None,
+        })
+        .unwrap();
+
+    assert_eq!(read.thread.id, thread.thread.id);
+    assert_eq!(read.thread.status, ThreadStatus::Idle);
+    assert_eq!(read.thread.turns, vec![]);
 }
 
 #[test]

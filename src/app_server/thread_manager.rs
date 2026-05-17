@@ -264,6 +264,23 @@ impl ThreadManager {
         thread_id: SessionId,
         workspace_root: &std::path::Path,
     ) -> Result<ThreadReadResponse> {
+        if let Some(runtime) = self.runtime_for(&thread_id) {
+            let live_view = runtime.live_view()?;
+            if live_view.snapshot.workspace_root == workspace_root {
+                let paths = crate::transcript::session_paths(
+                    &live_view.snapshot.workspace_root,
+                    &thread_id,
+                );
+                return Ok(self.thread_read_from_snapshot_events(
+                    thread_id,
+                    live_view.snapshot,
+                    live_view.events,
+                    paths.snapshot_path,
+                    paths.events_path,
+                ));
+            }
+        }
+
         let paths = crate::transcript::session_paths(workspace_root, &thread_id);
         if !paths.snapshot_path.exists() {
             return Err(AppServerError::ThreadNotFound(thread_id).into());
@@ -271,6 +288,23 @@ impl ThreadManager {
 
         let snapshot = crate::transcript::read_session_snapshot(workspace_root, &thread_id)?;
         let events = crate::transcript::read_session_events(workspace_root, &thread_id)?;
+        Ok(self.thread_read_from_snapshot_events(
+            thread_id,
+            snapshot,
+            events,
+            paths.snapshot_path,
+            paths.events_path,
+        ))
+    }
+
+    fn thread_read_from_snapshot_events(
+        &self,
+        thread_id: SessionId,
+        snapshot: SessionSnapshot,
+        events: Vec<RuntimeEvent>,
+        snapshot_path: PathBuf,
+        events_path: PathBuf,
+    ) -> ThreadReadResponse {
         let active_turn = self.active_turn_state(&thread_id);
         let has_pending_approval = snapshot
             .pending_approvals
@@ -290,16 +324,16 @@ impl ThreadManager {
             ThreadStatus::Idle
         };
 
-        Ok(ThreadReadResponse {
+        ThreadReadResponse {
             thread: build_thread_view(
                 thread_id,
                 status,
                 active_turn,
                 events,
-                paths.snapshot_path,
-                paths.events_path,
+                snapshot_path,
+                events_path,
             ),
-        })
+        }
     }
 
     pub fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse> {
@@ -360,6 +394,17 @@ impl ThreadManager {
                     }),
                 });
             }
+            let turn_id = runtime
+                .interrupt_waiting_approval_turn(params.turn_id.clone())
+                .await
+                .map_err(map_thread_runtime_error)?;
+            return Ok(TurnInterruptResponse {
+                thread_id: params.thread_id,
+                interrupted_turn: Some(TurnState {
+                    turn_id,
+                    status: TurnStatus::Interrupted,
+                }),
+            });
         }
         self.interrupt_waiting_approval_turn(params, &config.workspace_root)
             .await

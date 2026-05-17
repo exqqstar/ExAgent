@@ -34,9 +34,9 @@ Current V1 state:
 Target V2 state:
 
 - `ThreadManager` owns `loaded_threads: HashMap<SessionId, Arc<ThreadRuntime>>`.
-- `ThreadRuntime` is a live thread handle with `submit`, `subscribe_events`, `status`, and `shutdown`.
+- `ThreadRuntime` is a live thread handle with guarded user-input submission, `subscribe_events`, `live_view`, `status`, and `shutdown`.
 - `ThreadRuntimeLoop` serializes `ThreadSubmission` values and dispatches `ThreadOp`.
-- `ThreadSession` owns per-thread live execution state and handles `ThreadOp::UserInput` without reconstructing Agent state from disk per turn.
+- `ThreadSession` owns per-thread live execution state, event id assignment, event append/broadcast, and snapshot checkpointing. It handles `ThreadOp::UserInput` without reconstructing Agent state from disk per turn.
 - `turn/start` submits `ThreadOp::UserInput` and returns `TurnStatus::InProgress`.
 - CLI waits on live events until turn completion, then prints final assistant text.
 

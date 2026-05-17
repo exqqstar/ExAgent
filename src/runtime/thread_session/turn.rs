@@ -1,11 +1,12 @@
 use anyhow::Result;
 
 use super::{RuntimeInterrupt, ThreadSession};
+use crate::agent::AgentRunOutput;
 use crate::events::RuntimeEventKind;
 use crate::runtime::thread_runtime::{
     ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus, ThreadTurnContext,
 };
-use crate::types::TurnId;
+use crate::types::{ConversationMessage, TurnId};
 
 impl ThreadSession {
     pub(crate) async fn handle_user_input(
@@ -31,7 +32,10 @@ impl ThreadSession {
         interrupt: Option<RuntimeInterrupt>,
     ) -> Result<ThreadOpResult> {
         self.append_and_broadcast(Some(&turn_id), RuntimeEventKind::TurnStarted)?;
-        let broadcasted_event_count = self.persisted_event_count(&self.thread_id)?;
+        self.snapshot
+            .conversation
+            .push(ConversationMessage::user(prompt));
+        self.checkpoint_snapshot()?;
 
         let turn_cwd = turn_context.and_then(|context| context.cwd);
         let output = if let Some(interrupt) = interrupt {
@@ -39,15 +43,13 @@ impl ThreadSession {
             tokio::select! {
                 result = self.agent.run_live_turn(
                     &mut self.snapshot,
-                    &prompt,
                     runtime_turn_id,
                     turn_cwd,
-                    &mut self.next_event_index,
                 ) => {
                     match result {
                         Ok(output) => output,
                         Err(err) => {
-                            self.broadcast_events_since(broadcasted_event_count)?;
+                            self.checkpoint_snapshot()?;
                             let message = err.to_string();
                             self.append_and_broadcast(
                                 Some(&turn_id),
@@ -72,18 +74,12 @@ impl ThreadSession {
         } else {
             let result = self
                 .agent
-                .run_live_turn(
-                    &mut self.snapshot,
-                    &prompt,
-                    turn_id.clone(),
-                    turn_cwd,
-                    &mut self.next_event_index,
-                )
+                .run_live_turn(&mut self.snapshot, turn_id.clone(), turn_cwd)
                 .await;
             match result {
                 Ok(output) => output,
                 Err(err) => {
-                    self.broadcast_events_since(broadcasted_event_count)?;
+                    self.checkpoint_snapshot()?;
                     let message = err.to_string();
                     self.append_and_broadcast(
                         Some(&turn_id),
@@ -94,10 +90,20 @@ impl ThreadSession {
             }
         };
 
-        for event in &output.events {
-            let _ = self.event_tx.send(event.clone());
+        let mut recorded_events = Vec::new();
+        for kind in output.event_kinds {
+            recorded_events.push(self.append_and_broadcast(Some(&turn_id), kind)?);
         }
+        self.checkpoint_snapshot()?;
         self.append_and_broadcast(Some(&turn_id), RuntimeEventKind::TurnCompleted)?;
+
+        let output = AgentRunOutput {
+            final_turn: output.final_turn,
+            session_id: output.session_id,
+            snapshot_path: output.snapshot_path,
+            events_path: output.events_path,
+            events: recorded_events,
+        };
 
         Ok(ThreadOpResult::UserInput { turn_id, output })
     }

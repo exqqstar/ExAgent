@@ -8,7 +8,10 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 use crate::agent::{Agent, AgentRunOutput};
 use crate::config::AgentConfig;
 use crate::events::RuntimeEvent;
-use crate::runtime::thread_session::{RuntimeInterrupt, ThreadSession, ThreadSessionOptions};
+use crate::runtime::thread_session::{
+    RuntimeInterrupt, ThreadSession, ThreadSessionLiveState, ThreadSessionLiveView,
+    ThreadSessionOptions,
+};
 use crate::types::{SessionId, TurnId};
 
 const THREAD_OP_CHANNEL_CAPACITY: usize = 64;
@@ -99,6 +102,7 @@ pub struct ThreadRuntime {
     event_tx: broadcast::Sender<RuntimeEvent>,
     status_rx: watch::Receiver<ThreadRuntimeStatus>,
     active_turn: Arc<Mutex<Option<ActiveRuntimeTurnRecord>>>,
+    live_state: Arc<Mutex<ThreadSessionLiveState>>,
 }
 
 impl ThreadRuntime {
@@ -107,19 +111,21 @@ impl ThreadRuntime {
         let (event_tx, _) = broadcast::channel(THREAD_EVENT_CHANNEL_CAPACITY);
         let (status_tx, status_rx) = watch::channel(ThreadRuntimeStatus::Idle);
 
+        let session = ThreadSession::new(
+            ThreadSessionOptions::new(options.thread_id, options.config, options.agent_factory)
+                .with_event_tx(event_tx.clone())
+                .with_status_tx(status_tx),
+        )?;
+        let live_state = session.live_state_handle();
+
         let runtime = Arc::new(Self {
-            thread_id: options.thread_id.clone(),
+            thread_id: session.thread_id().clone(),
             op_tx,
             event_tx: event_tx.clone(),
             status_rx,
             active_turn: Arc::new(Mutex::new(None)),
+            live_state,
         });
-
-        let session = ThreadSession::new(
-            ThreadSessionOptions::new(options.thread_id, options.config, options.agent_factory)
-                .with_event_tx(event_tx)
-                .with_status_tx(status_tx),
-        )?;
 
         spawn_runtime_loop(async move {
             ThreadRuntimeLoop { op_rx, session }.run().await;
@@ -136,23 +142,11 @@ impl ThreadRuntime {
         *self.status_rx.borrow()
     }
 
-    pub async fn submit(&self, op: ThreadOp) -> Result<()> {
-        self.op_tx
-            .send(ThreadSubmission {
-                op,
-                completion_tx: None,
-                interrupt: None,
-                _active_turn_guard: None,
-            })
-            .await
-            .map_err(|_| anyhow!("thread runtime is stopped"))
-    }
-
-    pub async fn submit_and_wait(&self, op: ThreadOp) -> Result<ThreadOpResult> {
+    async fn submit_control_and_wait(&self, op: ThreadOp) -> Result<ThreadOpResult> {
         self.submit_and_wait_internal(op, None).await
     }
 
-    pub(crate) async fn submit_user_input_and_wait(
+    pub async fn submit_user_input_and_wait(
         &self,
         turn_id: TurnId,
         prompt: String,
@@ -174,6 +168,13 @@ impl ThreadRuntime {
     ) -> Result<()> {
         self.send_user_input(turn_id, prompt, turn_context, None)
             .await
+    }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        match self.submit_control_and_wait(ThreadOp::Shutdown).await? {
+            ThreadOpResult::Ack => Ok(()),
+            _ => Err(anyhow!("shutdown returned non-ack runtime result")),
+        }
     }
 
     async fn send_user_input(
@@ -229,6 +230,10 @@ impl ThreadRuntime {
         self.event_tx.subscribe()
     }
 
+    pub fn live_view(&self) -> Result<ThreadSessionLiveView> {
+        ThreadSession::live_view_from_state(self.thread_id.clone(), &self.live_state)
+    }
+
     pub(crate) fn active_turn_id(&self) -> Option<TurnId> {
         self.active_turn
             .lock()
@@ -272,6 +277,21 @@ impl ThreadRuntime {
         }
         record.interrupted.notified().await;
         Ok(record.turn_id)
+    }
+
+    pub(crate) async fn interrupt_waiting_approval_turn(
+        &self,
+        requested_turn_id: Option<TurnId>,
+    ) -> Result<TurnId> {
+        match self
+            .submit_control_and_wait(ThreadOp::Interrupt {
+                turn_id: requested_turn_id,
+            })
+            .await?
+        {
+            ThreadOpResult::Interrupted { turn_id } => Ok(turn_id),
+            _ => Err(anyhow!("interrupt returned non-interrupted runtime result")),
+        }
     }
 
     pub async fn wait_until_terminated(&self) {

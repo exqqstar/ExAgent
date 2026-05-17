@@ -10,6 +10,7 @@ use crate::llm::LlmClient;
 use crate::orchestration::{ChildSessionSummary, CollectedChildSession};
 use crate::policy::PolicyManager;
 use crate::registry::{ToolContext, ToolRegistry};
+use crate::runtime::thread_session::LiveEventSink;
 use crate::session::{
     AgentRole, ApprovalId, ApprovalStatus, ExecSessionId, ExecSessionRef, ExecSessionStatus,
     PendingApproval, SessionSnapshot,
@@ -34,10 +35,6 @@ pub struct AgentRunOutput {
 
 pub(crate) struct AgentLiveTurnOutput {
     pub final_turn: AssistantTurn,
-    pub session_id: SessionId,
-    pub snapshot_path: PathBuf,
-    pub events_path: PathBuf,
-    pub event_kinds: Vec<RuntimeEventKind>,
 }
 
 impl Agent {
@@ -220,8 +217,9 @@ impl Agent {
         snapshot: &mut SessionSnapshot,
         turn_id: TurnId,
         turn_cwd: Option<PathBuf>,
+        sink: &mut dyn LiveEventSink,
     ) -> Result<AgentLiveTurnOutput> {
-        self.run_live_session_snapshot(snapshot, turn_id, turn_cwd)
+        self.run_live_session_snapshot(snapshot, turn_id, turn_cwd, sink)
             .await
     }
 
@@ -230,6 +228,7 @@ impl Agent {
         snapshot: &mut SessionSnapshot,
         runtime_turn_id: TurnId,
         turn_cwd: Option<PathBuf>,
+        sink: &mut dyn LiveEventSink,
     ) -> Result<AgentLiveTurnOutput> {
         snapshot.normalize_lineage();
         let mut session_config = self.config.clone();
@@ -237,9 +236,7 @@ impl Agent {
         session_config.cwd = turn_cwd.unwrap_or_else(|| snapshot.cwd.clone());
 
         let session_id = snapshot.session_id.clone();
-        let paths = crate::transcript::session_paths(&session_config.workspace_root, &session_id);
         let mut messages = snapshot.conversation.clone();
-        let mut event_kinds = Vec::new();
 
         let base_ctx = ToolContext {
             config: session_config,
@@ -253,23 +250,24 @@ impl Agent {
                 .llm
                 .complete(&messages, &self.registry.schemas())
                 .await?;
-            event_kinds.push(RuntimeEventKind::AssistantTurn { turn: turn.clone() });
 
+            // Push the assistant message into the live snapshot before the
+            // sink records the AssistantTurn event so the checkpoint sink
+            // performs sees the message already.
             if turn.text.is_some() || !turn.tool_calls.is_empty() {
                 let assistant_message =
                     ConversationMessage::assistant(turn.text.clone(), turn.tool_calls.clone());
                 messages.push(assistant_message.clone());
                 snapshot.conversation.push(assistant_message);
             }
+            sink.record(
+                snapshot,
+                Some(&runtime_turn_id),
+                RuntimeEventKind::AssistantTurn { turn: turn.clone() },
+            )?;
 
             if turn.tool_calls.is_empty() {
-                return Ok(AgentLiveTurnOutput {
-                    final_turn: turn,
-                    session_id,
-                    snapshot_path: paths.snapshot_path,
-                    events_path: paths.events_path,
-                    event_kinds,
-                });
+                return Ok(AgentLiveTurnOutput { final_turn: turn });
             }
 
             for call in turn.tool_calls.clone() {
@@ -278,9 +276,6 @@ impl Agent {
                 let result = self.registry.execute(call, Some(&ctx)).await;
                 apply_exec_session_update(snapshot, &result);
                 apply_pending_approval_update(snapshot, &result);
-                event_kinds.push(RuntimeEventKind::ToolResult {
-                    result: result.clone(),
-                });
 
                 let tool_message = ConversationMessage::tool(
                     result.tool_call_id.clone(),
@@ -288,6 +283,14 @@ impl Agent {
                 );
                 messages.push(tool_message.clone());
                 snapshot.conversation.push(tool_message);
+
+                sink.record(
+                    snapshot,
+                    Some(&runtime_turn_id),
+                    RuntimeEventKind::ToolResult {
+                        result: result.clone(),
+                    },
+                )?;
             }
         }
 

@@ -1,6 +1,8 @@
 pub mod events;
 pub mod turn;
 
+pub(crate) use events::{LiveEventSink, ThreadEventRecorder};
+
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::{broadcast, oneshot, watch, Notify};
@@ -13,7 +15,6 @@ use crate::runtime::thread_runtime::{
     AgentFactory, ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus,
 };
 use crate::session::{ApprovalStatus, SessionSnapshot};
-use crate::transcript::SessionPaths;
 use crate::types::{SessionId, TurnId};
 
 const DEFAULT_THREAD_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -66,10 +67,7 @@ pub struct ThreadSession {
     thread_id: SessionId,
     agent: Agent,
     snapshot: SessionSnapshot,
-    paths: SessionPaths,
-    events: Vec<RuntimeEvent>,
-    next_event_index: usize,
-    event_tx: broadcast::Sender<RuntimeEvent>,
+    recorder: ThreadEventRecorder,
     status_tx: watch::Sender<ThreadRuntimeStatus>,
     live_state: Arc<Mutex<ThreadSessionLiveState>>,
     policy: Arc<PolicyManager>,
@@ -121,22 +119,26 @@ impl ThreadSession {
         let mut snapshot: SessionSnapshot = crate::transcript::read_json(&paths.snapshot_path)?;
         snapshot.normalize_lineage();
         let events = crate::transcript::read_json_lines::<RuntimeEvent>(&paths.events_path)?;
-        let next_event_index = events.len() + 1;
         let agent = agent_factory(config.clone())?;
         let live_state = Arc::new(Mutex::new(ThreadSessionLiveState {
             snapshot: snapshot.clone(),
             events: events.clone(),
             status: ThreadRuntimeStatus::Idle,
         }));
+        let recorder = ThreadEventRecorder::new(
+            thread_id.clone(),
+            paths.snapshot_path,
+            paths.events_path,
+            events,
+            event_tx,
+            live_state.clone(),
+        );
 
         Ok(Self {
             thread_id,
             agent,
             snapshot,
-            paths,
-            events,
-            next_event_index,
-            event_tx,
+            recorder,
             status_tx,
             live_state,
             policy,
@@ -163,18 +165,6 @@ impl ThreadSession {
             live_state.status = status;
         }
         let _ = self.status_tx.send(status);
-    }
-
-    pub(crate) fn checkpoint_snapshot(&self) -> anyhow::Result<()> {
-        crate::transcript::write_json(&self.paths.snapshot_path, &self.snapshot)?;
-        self.publish_live_snapshot();
-        Ok(())
-    }
-
-    fn publish_live_snapshot(&self) {
-        if let Ok(mut live_state) = self.live_state.lock() {
-            live_state.snapshot = self.snapshot.clone();
-        }
     }
 
     pub(crate) fn live_view_from_state(
@@ -210,7 +200,8 @@ impl ThreadSession {
         }
 
         let latest_turn_id = self
-            .events
+            .recorder
+            .events()
             .iter()
             .rev()
             .find_map(|event| event.turn_id.clone());
@@ -234,10 +225,11 @@ impl ThreadSession {
         self.snapshot
             .pending_approvals
             .retain(|approval| !matches!(approval.status, ApprovalStatus::Pending));
-        self.checkpoint_snapshot()?;
         self.policy
             .cancel_pending_for_session(&self.thread_id)
             .await;
+        // append_and_broadcast checkpoints the snapshot atomically with the
+        // event, so a separate pre-event checkpoint is no longer needed.
         self.append_and_broadcast(
             Some(&interrupted_turn_id),
             RuntimeEventKind::TurnInterrupted,

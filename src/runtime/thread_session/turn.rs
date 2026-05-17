@@ -7,6 +7,8 @@ use crate::runtime::thread_runtime::{
     ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus, ThreadTurnContext,
 };
 use crate::types::{ConversationMessage, TurnId};
+// LiveEventSink not imported directly; the recorder field implements it and is
+// passed by trait object to Agent::run_live_turn.
 
 impl ThreadSession {
     pub(crate) async fn handle_user_input(
@@ -31,25 +33,28 @@ impl ThreadSession {
         turn_context: Option<ThreadTurnContext>,
         interrupt: Option<RuntimeInterrupt>,
     ) -> Result<ThreadOpResult> {
-        self.append_and_broadcast(Some(&turn_id), RuntimeEventKind::TurnStarted)?;
+        // Push user message into the live snapshot first so the TurnStarted
+        // event records a snapshot that already contains the user input.
         self.snapshot
             .conversation
             .push(ConversationMessage::user(prompt));
-        self.checkpoint_snapshot()?;
+        self.append_and_broadcast(Some(&turn_id), RuntimeEventKind::TurnStarted)?;
 
         let turn_cwd = turn_context.and_then(|context| context.cwd);
-        let output = if let Some(interrupt) = interrupt {
+        let Self {
+            agent,
+            snapshot,
+            recorder,
+            ..
+        } = self;
+
+        let final_turn = if let Some(interrupt) = interrupt {
             let runtime_turn_id = turn_id.clone();
             tokio::select! {
-                result = self.agent.run_live_turn(
-                    &mut self.snapshot,
-                    runtime_turn_id,
-                    turn_cwd,
-                ) => {
+                result = agent.run_live_turn(snapshot, runtime_turn_id, turn_cwd, recorder) => {
                     match result {
-                        Ok(output) => output,
+                        Ok(output) => output.final_turn,
                         Err(err) => {
-                            self.checkpoint_snapshot()?;
                             let message = err.to_string();
                             self.append_and_broadcast(
                                 Some(&turn_id),
@@ -72,14 +77,12 @@ impl ThreadSession {
                 }
             }
         } else {
-            let result = self
-                .agent
-                .run_live_turn(&mut self.snapshot, turn_id.clone(), turn_cwd)
-                .await;
-            match result {
-                Ok(output) => output,
+            match agent
+                .run_live_turn(snapshot, turn_id.clone(), turn_cwd, recorder)
+                .await
+            {
+                Ok(output) => output.final_turn,
                 Err(err) => {
-                    self.checkpoint_snapshot()?;
                     let message = err.to_string();
                     self.append_and_broadcast(
                         Some(&turn_id),
@@ -90,19 +93,16 @@ impl ThreadSession {
             }
         };
 
-        let mut recorded_events = Vec::new();
-        for kind in output.event_kinds {
-            recorded_events.push(self.append_and_broadcast(Some(&turn_id), kind)?);
-        }
-        self.checkpoint_snapshot()?;
         self.append_and_broadcast(Some(&turn_id), RuntimeEventKind::TurnCompleted)?;
 
+        let paths =
+            crate::transcript::session_paths(&self.snapshot.workspace_root, &self.thread_id);
         let output = AgentRunOutput {
-            final_turn: output.final_turn,
-            session_id: output.session_id,
-            snapshot_path: output.snapshot_path,
-            events_path: output.events_path,
-            events: recorded_events,
+            final_turn,
+            session_id: self.thread_id.clone(),
+            snapshot_path: paths.snapshot_path,
+            events_path: paths.events_path,
+            events: Vec::new(),
         };
 
         Ok(ThreadOpResult::UserInput { turn_id, output })
@@ -114,17 +114,18 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    use anyhow::Result;
     use tempfile::tempdir;
 
     use crate::agent::Agent;
     use crate::config::AgentConfig;
-    use crate::events::RuntimeEventKind;
+    use crate::events::{RuntimeEvent, RuntimeEventKind};
     use crate::llm::MockLlm;
     use crate::registry::ToolRegistry;
     use crate::runtime::thread_runtime::{AgentFactory, ThreadOpResult};
-    use crate::runtime::thread_session::{ThreadSession, ThreadSessionOptions};
+    use crate::runtime::thread_session::{LiveEventSink, ThreadSession, ThreadSessionOptions};
     use crate::session::SessionSnapshot;
-    use crate::types::{AssistantTurn, SessionId, TurnId};
+    use crate::types::{AssistantTurn, ConversationMessage, EventId, SessionId, ToolCall, TurnId};
 
     #[tokio::test]
     async fn thread_session_handles_user_input_and_records_turn_lifecycle() {
@@ -277,5 +278,115 @@ mod tests {
                 "second turn complete"
             ]
         );
+    }
+
+    /// Verifies the F2 streaming contract: Agent calls the sink once per
+    /// produced event (not batched at end of turn), and the snapshot passed
+    /// to each record() call already reflects the message that produced that
+    /// event. This proves a mid-turn reader of the live state would observe
+    /// monotonically growing conversation history paired with event records.
+    #[tokio::test]
+    async fn agent_streams_events_through_live_event_sink_paired_with_snapshot() {
+        struct CapturingSink {
+            event_kinds: Vec<RuntimeEventKind>,
+            conversation_lens_at_record: Vec<usize>,
+            thread_id: SessionId,
+            next_id: usize,
+        }
+
+        impl LiveEventSink for CapturingSink {
+            fn record(
+                &mut self,
+                snapshot: &SessionSnapshot,
+                turn_id: Option<&TurnId>,
+                kind: RuntimeEventKind,
+            ) -> Result<RuntimeEvent> {
+                self.conversation_lens_at_record
+                    .push(snapshot.conversation.len());
+                self.event_kinds.push(kind.clone());
+                let event = RuntimeEvent {
+                    event_id: EventId::new(format!("evt_capture_{}", self.next_id)),
+                    session_id: self.thread_id.clone(),
+                    turn_id: turn_id.cloned(),
+                    kind,
+                };
+                self.next_id += 1;
+                Ok(event)
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let thread_id = SessionId::new("session_streaming_capture");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+
+        // Two-step turn: a tool call (which fails because no tool is
+        // registered, giving a deterministic ToolResult event) followed by a
+        // final assistant turn.
+        let llm = MockLlm::new(vec![
+            AssistantTurn {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_x".into(),
+                    name: "missing_tool".into(),
+                    arguments: serde_json::json!({}),
+                }],
+            },
+            AssistantTurn {
+                text: Some("done".into()),
+                tool_calls: vec![],
+            },
+        ]);
+
+        let agent = Agent::new(config.clone(), Box::new(llm), ToolRegistry::new());
+        let mut snapshot = SessionSnapshot::new_thread(
+            thread_id.clone(),
+            config.workspace_root.clone(),
+            config.cwd.clone(),
+        );
+        snapshot
+            .conversation
+            .push(ConversationMessage::user("hi".to_string()));
+        let starting_len = snapshot.conversation.len();
+
+        let mut sink = CapturingSink {
+            event_kinds: Vec::new(),
+            conversation_lens_at_record: Vec::new(),
+            thread_id: thread_id.clone(),
+            next_id: 1,
+        };
+
+        let output = agent
+            .run_live_turn(&mut snapshot, TurnId::new("turn_1"), None, &mut sink)
+            .await
+            .expect("agent should complete the two-step turn");
+
+        assert_eq!(output.final_turn.text.as_deref(), Some("done"));
+        // Three sink.record() calls -- AssistantTurn (tool call),
+        // ToolResult (no-tool error), AssistantTurn (final). Proves events
+        // are recorded one at a time, not batched at end of turn.
+        assert_eq!(sink.event_kinds.len(), 3, "expected three streamed events");
+        assert!(matches!(
+            sink.event_kinds[0],
+            RuntimeEventKind::AssistantTurn { .. }
+        ));
+        assert!(matches!(
+            sink.event_kinds[1],
+            RuntimeEventKind::ToolResult { .. }
+        ));
+        assert!(matches!(
+            sink.event_kinds[2],
+            RuntimeEventKind::AssistantTurn { .. }
+        ));
+        // Each record() saw a snapshot that already included that step's
+        // conversation push, and the conversation grew monotonically.
+        assert!(sink
+            .conversation_lens_at_record
+            .windows(2)
+            .all(|window| window[1] >= window[0]));
+        assert!(sink.conversation_lens_at_record[0] > starting_len);
     }
 }

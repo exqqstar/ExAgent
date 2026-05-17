@@ -8,6 +8,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 use crate::agent::{Agent, AgentRunOutput};
 use crate::config::AgentConfig;
 use crate::events::RuntimeEvent;
+use crate::policy::PolicyManager;
 use crate::runtime::thread_session::{
     RuntimeInterrupt, ThreadSession, ThreadSessionLiveState, ThreadSessionLiveView,
     ThreadSessionOptions,
@@ -84,6 +85,7 @@ pub struct ThreadRuntimeOptions {
     pub thread_id: SessionId,
     pub config: AgentConfig,
     agent_factory: AgentFactory,
+    policy: Arc<PolicyManager>,
 }
 
 impl ThreadRuntimeOptions {
@@ -92,7 +94,13 @@ impl ThreadRuntimeOptions {
             thread_id,
             config,
             agent_factory,
+            policy: Arc::new(PolicyManager::default()),
         }
+    }
+
+    pub fn with_policy(mut self, policy: Arc<PolicyManager>) -> Self {
+        self.policy = policy;
+        self
     }
 }
 
@@ -114,7 +122,8 @@ impl ThreadRuntime {
         let session = ThreadSession::new(
             ThreadSessionOptions::new(options.thread_id, options.config, options.agent_factory)
                 .with_event_tx(event_tx.clone())
-                .with_status_tx(status_tx),
+                .with_status_tx(status_tx)
+                .with_policy(options.policy),
         )?;
         let live_state = session.live_state_handle();
 

@@ -737,11 +737,10 @@ impl ThreadManager {
             return Ok(runtime);
         }
 
-        let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
-            thread_id.clone(),
-            config,
-            self.runtime_agent_factory(),
-        ))?;
+        let runtime = ThreadRuntime::spawn(
+            ThreadRuntimeOptions::new(thread_id.clone(), config, self.runtime_agent_factory())
+                .with_policy(self.policy.clone()),
+        )?;
         self.loaded_threads
             .lock()
             .expect("loaded threads mutex poisoned")

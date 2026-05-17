@@ -8,6 +8,7 @@ use tokio::sync::{broadcast, oneshot, watch, Notify};
 use crate::agent::Agent;
 use crate::config::AgentConfig;
 use crate::events::{RuntimeEvent, RuntimeEventKind};
+use crate::policy::PolicyManager;
 use crate::runtime::thread_runtime::{
     AgentFactory, ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus,
 };
@@ -28,6 +29,7 @@ pub struct ThreadSessionOptions {
     agent_factory: AgentFactory,
     event_tx: broadcast::Sender<RuntimeEvent>,
     status_tx: watch::Sender<ThreadRuntimeStatus>,
+    policy: Arc<PolicyManager>,
 }
 
 impl ThreadSessionOptions {
@@ -40,6 +42,7 @@ impl ThreadSessionOptions {
             agent_factory,
             event_tx,
             status_tx,
+            policy: Arc::new(PolicyManager::default()),
         }
     }
 
@@ -50,6 +53,11 @@ impl ThreadSessionOptions {
 
     pub fn with_status_tx(mut self, status_tx: watch::Sender<ThreadRuntimeStatus>) -> Self {
         self.status_tx = status_tx;
+        self
+    }
+
+    pub fn with_policy(mut self, policy: Arc<PolicyManager>) -> Self {
+        self.policy = policy;
         self
     }
 }
@@ -64,6 +72,7 @@ pub struct ThreadSession {
     event_tx: broadcast::Sender<RuntimeEvent>,
     status_tx: watch::Sender<ThreadRuntimeStatus>,
     live_state: Arc<Mutex<ThreadSessionLiveState>>,
+    policy: Arc<PolicyManager>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +98,7 @@ impl ThreadSession {
             agent_factory,
             event_tx,
             status_tx,
+            policy,
         } = options;
         let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
         let mut snapshot: SessionSnapshot = crate::transcript::read_json(&paths.snapshot_path)?;
@@ -112,6 +122,7 @@ impl ThreadSession {
             event_tx,
             status_tx,
             live_state,
+            policy,
         })
     }
 
@@ -204,6 +215,9 @@ impl ThreadSession {
             .pending_approvals
             .retain(|approval| !matches!(approval.status, ApprovalStatus::Pending));
         self.checkpoint_snapshot()?;
+        self.policy
+            .cancel_pending_for_session(&self.thread_id)
+            .await;
         self.append_and_broadcast(
             Some(&interrupted_turn_id),
             RuntimeEventKind::TurnInterrupted,
@@ -212,5 +226,92 @@ impl ThreadSession {
         Ok(ThreadOpResult::Interrupted {
             turn_id: interrupted_turn_id,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::Agent;
+    use crate::llm::MockLlm;
+    use crate::policy::PolicyManager;
+    use crate::registry::ToolRegistry;
+    use crate::runtime::thread_runtime::AgentFactory;
+    use crate::session::{ApprovalId, ApprovalStatus, PendingApproval};
+    use crate::types::EventId;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn handle_interrupt_cancels_pending_policy_approvals() {
+        let dir = tempdir().unwrap();
+        let thread_id = SessionId::new("session_interrupt_policy");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+
+        let mut snapshot = SessionSnapshot::new_thread(
+            thread_id.clone(),
+            config.workspace_root.clone(),
+            config.cwd.clone(),
+        );
+        snapshot.pending_approvals.push(PendingApproval {
+            approval_id: ApprovalId::new("approval_test_1"),
+            requested_event_id: EventId::new("approval_evt_test_1"),
+            tool_name: "run_command".to_string(),
+            reason: "policy requires review".to_string(),
+            status: ApprovalStatus::Pending,
+        });
+        let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
+        crate::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+
+        let policy = Arc::new(PolicyManager::default());
+        let _registered = policy
+            .create_command_approval(
+                thread_id.clone(),
+                "run_command",
+                "rm -rf scratch",
+                PathBuf::from("/tmp"),
+                None,
+                false,
+                "policy requires review".to_string(),
+            )
+            .await;
+        assert_eq!(
+            policy.pending_count_for_session(&thread_id).await,
+            1,
+            "precondition: policy holds one pending approval"
+        );
+
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(MockLlm::new(vec![])),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(
+            ThreadSessionOptions::new(thread_id.clone(), config, agent_factory)
+                .with_policy(policy.clone()),
+        )
+        .expect("create thread session");
+
+        let turn_id = TurnId::new("turn_approval_1");
+        let result = session
+            .handle_interrupt(Some(turn_id.clone()))
+            .await
+            .expect("handle_interrupt should succeed when pending approval exists");
+        assert!(matches!(
+            result,
+            ThreadOpResult::Interrupted { turn_id: ref tid } if tid == &turn_id
+        ));
+
+        assert_eq!(
+            policy.pending_count_for_session(&thread_id).await,
+            0,
+            "interrupt must drop the policy-side approval waiter, not just the snapshot copy"
+        );
     }
 }

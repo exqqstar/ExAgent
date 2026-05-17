@@ -126,6 +126,15 @@ impl PolicyManager {
             .await
             .retain(|_, approval| &approval.session_id != session_id);
     }
+
+    pub async fn pending_count_for_session(&self, session_id: &SessionId) -> usize {
+        self.pending
+            .lock()
+            .await
+            .values()
+            .filter(|approval| &approval.session_id == session_id)
+            .count()
+    }
 }
 
 pub fn new_policy_event_id() -> EventId {

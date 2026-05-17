@@ -1,3 +1,9 @@
+//! Legacy phase2 runtime-control prototype.
+//!
+//! This module is kept for older tests and `Agent as RuntimeOpExecutor`
+//! coverage. New live thread execution should use `runtime::thread_runtime`
+//! and `runtime::thread_session`.
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

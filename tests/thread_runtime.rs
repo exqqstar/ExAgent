@@ -1,16 +1,26 @@
 use exagent::agent::Agent;
-use exagent::app_server::thread_runtime::{
-    AgentFactory, ThreadOp, ThreadOpResult, ThreadRuntime, ThreadRuntimeOptions,
-    ThreadRuntimeStatus,
-};
 use exagent::config::AgentConfig;
 use exagent::events::RuntimeEventKind;
 use exagent::llm::MockLlm;
 use exagent::registry::ToolRegistry;
+use exagent::runtime::thread_runtime::{
+    AgentFactory, ThreadOp, ThreadOpResult, ThreadRuntime, ThreadRuntimeOptions,
+    ThreadRuntimeStatus,
+};
+use exagent::runtime::thread_session::{ThreadSession, ThreadSessionOptions};
 use exagent::session::SessionSnapshot;
 use exagent::types::{AssistantTurn, SessionId, TurnId};
 use std::sync::Arc;
 use tempfile::tempdir;
+
+#[test]
+fn thread_session_can_be_constructed_as_runtime_state_owner() {
+    let thread_id = SessionId::new("session_thread_session_construct");
+    let config = AgentConfig::default();
+    let session = ThreadSession::new(ThreadSessionOptions::new(thread_id.clone(), config));
+
+    assert_eq!(session.thread_id(), &thread_id);
+}
 
 #[tokio::test]
 async fn thread_runtime_starts_idle_and_accepts_shutdown_op() {

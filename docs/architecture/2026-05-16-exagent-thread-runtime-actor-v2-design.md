@@ -36,6 +36,8 @@ CLI / HTTP / future GUI
        shutdown()
   -> ThreadRuntimeLoop
        receives ThreadSubmission
+       dispatches mailbox ops
+  -> ThreadSession
        owns per-thread execution state
        calls Agent
        emits RuntimeEvent
@@ -81,7 +83,8 @@ ExAgent V2 should copy this shape in smaller form:
 ```text
 ThreadManager        ~= Codex core ThreadManager
 ThreadRuntime        ~= CodexThread + Codex handle
-ThreadRuntimeLoop    ~= Session + submission_loop
+ThreadRuntimeLoop    ~= submission_loop
+ThreadSession        ~= Session
 ThreadOp             ~= Codex Op
 RuntimeEvent         ~= Codex EventMsg-derived output plane
 ```
@@ -221,18 +224,22 @@ loop, like Codex's `CodexThread`.
 
 ### `ThreadRuntimeLoop`
 
-`ThreadRuntimeLoop` owns per-thread execution state and serializes all
-mutating work for one thread.
+`ThreadRuntimeLoop` serializes mailbox submissions for one thread. It should
+stay thin: receive a `ThreadSubmission`, dispatch the internal `ThreadOp`, and
+complete the optional response channel.
 
 Responsibilities:
 
 - Receive `ThreadSubmission` values from `op_rx`.
-- Convert `ThreadOp` into runtime behavior.
-- Write events to `events.jsonl`.
-- Broadcast the same events to live subscribers.
-- Update status.
-- Call `Agent` with clean runtime input.
-- Handle interrupt and shutdown.
+- Dispatch `ThreadOp` to `ThreadSession`.
+- Preserve submission completion semantics.
+- Stop the loop on shutdown.
+
+Non-responsibilities:
+
+- It should not call `Agent` directly.
+- It should not append or replay runtime events directly.
+- It should not own long-lived session state beyond the mailbox receiver.
 
 Target op shape:
 
@@ -266,6 +273,37 @@ pub struct AgentTurnInput {
 ```
 
 No CLI command, HTTP request, or `BoundaryOp` should reach `Agent`.
+
+### `ThreadSession`
+
+`ThreadSession` is the per-thread state and handler object held by
+`ThreadRuntimeLoop`.
+
+Responsibilities:
+
+- Hold runtime execution inputs:
+  - thread id
+  - `AgentConfig`
+  - agent factory
+  - live event broadcaster
+  - status watch sender
+- Handle processed internal ops such as `ThreadOp::UserInput`.
+- Update runtime status around a turn.
+- Call `Agent` with clean runtime input.
+- Append lifecycle events and broadcast persisted agent events.
+- Report shutdown and interrupt results back through `ThreadOpResult`.
+
+The first implementation is intentionally small:
+
+```text
+runtime/thread_session/
+  mod.rs     # ThreadSession state and op-level helpers
+  turn.rs    # user turn lifecycle
+  events.rs  # append and broadcast helpers
+```
+
+It should not depend on app-server protocol DTOs, `BoundaryOp`, HTTP, or CLI
+types.
 
 ## Protocol Semantics
 
@@ -322,7 +360,7 @@ V2 should treat events as the primary output plane.
 Every runtime event follows two paths:
 
 ```text
-ThreadRuntimeLoop emits event
+ThreadSession emits event
   -> append to events.jsonl
   -> broadcast to live subscribers
 ```
@@ -445,12 +483,13 @@ Recommended order:
 ```text
 1. Add ThreadRuntime types and tests.
 2. Move turn execution from ThreadManager into ThreadRuntimeLoop.
-3. Change ThreadManager into registry/factory.
-4. Change turn/start protocol to return in_progress instead of final output.
-5. Add events/subscribe.
-6. Change CLI to wait on events.
-7. Add Thread/Turn/Item views.
-8. Update docs and remove V1 compatibility assumptions.
+3. Split per-thread state and handlers into ThreadSession.
+4. Change ThreadManager into registry/factory.
+5. Change turn/start protocol to return in_progress instead of final output.
+6. Add events/subscribe.
+7. Change CLI to wait on events.
+8. Add Thread/Turn/Item views.
+9. Update docs and remove V1 compatibility assumptions.
 ```
 
 The result should be closer to Codex's stable architecture:
@@ -459,6 +498,7 @@ The result should be closer to Codex's stable architecture:
 ThreadManager
   -> ThreadRuntime handle
   -> runtime mailbox
+  -> ThreadSession
   -> clean Agent turn input
   -> event stream
 ```

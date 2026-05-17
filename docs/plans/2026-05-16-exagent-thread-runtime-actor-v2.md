@@ -2,7 +2,7 @@
 
 **Goal:** Replace request-scoped turn execution with a long-lived per-thread runtime actor model inspired by Codex.
 
-**Architecture:** `ThreadManager` becomes a registry/factory for loaded `ThreadRuntime` handles. Each `ThreadRuntime` owns a mailbox sender and live event broadcaster, while `ThreadRuntimeLoop` serializes per-thread ops, calls `Agent`, writes `events.jsonl`, and broadcasts events. Public `turn/start` becomes asynchronous: it returns an in-progress turn, and final output arrives through events. Protocol DTOs are normalized at the `ThreadManager` boundary before entering `ThreadRuntime`.
+**Architecture:** `ThreadManager` becomes a registry/factory for loaded `ThreadRuntime` handles. Each `ThreadRuntime` owns a mailbox sender and live event broadcaster, `ThreadRuntimeLoop` serializes mailbox submissions, and `ThreadSession` owns per-thread execution state, calls `Agent`, writes `events.jsonl`, and broadcasts events. Public `turn/start` becomes asynchronous: it returns an in-progress turn, and final output arrives through events. Protocol DTOs are normalized at the `ThreadManager` boundary before entering `ThreadRuntime`.
 
 **Tech Stack:** Rust, Tokio `mpsc`/`broadcast`/`watch`/`oneshot`, Axum, serde, existing ExAgent `Agent`, transcript persistence, and app-server protocol DTOs.
 
@@ -11,6 +11,7 @@
 Implemented decisions:
 
 - `ThreadRuntime` owns the live actor mailbox, event broadcaster, status watch channel, and active-turn interrupt handle.
+- `ThreadSession` owns the per-thread state and handlers for turn lifecycle and event emission.
 - `ThreadManager` owns the process-level runtime registry and no longer calls `Agent::resume*` for public `turn/start`.
 - `turn/start` returns `TurnStatus::InProgress`; final output is read from live/replayed events.
 - `initialize.supported_ops` maps to serializable `BoundaryOp` variants; streaming surfaces are advertised separately through `supported_streams`.
@@ -34,7 +35,8 @@ Target V2 state:
 
 - `ThreadManager` owns `loaded_threads: HashMap<SessionId, Arc<ThreadRuntime>>`.
 - `ThreadRuntime` is a live thread handle with `submit`, `subscribe_events`, `status`, and `shutdown`.
-- `ThreadRuntimeLoop` owns per-thread execution and handles `ThreadOp`.
+- `ThreadRuntimeLoop` serializes `ThreadSubmission` values and dispatches `ThreadOp`.
+- `ThreadSession` owns per-thread execution state and handles `ThreadOp::UserInput`.
 - `turn/start` submits `ThreadOp::UserInput` and returns `TurnStatus::InProgress`.
 - CLI waits on live events until turn completion, then prints final assistant text.
 
@@ -49,7 +51,7 @@ Reference design:
 ## Task 1: Add Thread Runtime Types
 
 **Files:**
-- Create: `src/app_server/thread_runtime.rs`
+- Create: `src/runtime/thread_runtime.rs`
 - Modify: `src/app_server/mod.rs`
 - Test: `tests/thread_runtime.rs`
 
@@ -58,7 +60,7 @@ Reference design:
 Create `tests/thread_runtime.rs` with a construction and submit smoke test:
 
 ```rust
-use exagent::app_server::thread_runtime::{
+use exagent::runtime::thread_runtime::{
     ThreadOp, ThreadRuntime, ThreadRuntimeOptions, ThreadRuntimeStatus,
 };
 use exagent::config::AgentConfig;
@@ -96,7 +98,7 @@ Expected: compile failure because `thread_runtime` module and types do not exist
 
 **Step 3: Implement minimal runtime skeleton**
 
-Create `src/app_server/thread_runtime.rs`:
+Create `src/runtime/thread_runtime.rs`:
 
 ```rust
 use std::path::PathBuf;
@@ -261,7 +263,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/app_server/thread_runtime.rs src/app_server/mod.rs tests/thread_runtime.rs
+git add src/runtime/thread_runtime.rs src/app_server/mod.rs tests/thread_runtime.rs
 git commit -m "feat: add thread runtime actor skeleton"
 ```
 
@@ -269,7 +271,7 @@ git commit -m "feat: add thread runtime actor skeleton"
 
 **Files:**
 - Modify: `src/app_server/thread_manager.rs`
-- Modify: `src/app_server/thread_runtime.rs`
+- Modify: `src/runtime/thread_runtime.rs`
 - Test: `tests/app_server_boundary.rs`
 
 **Step 1: Write the failing test**
@@ -383,14 +385,14 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/app_server/thread_manager.rs src/app_server/thread_runtime.rs tests/app_server_boundary.rs
+git add src/app_server/thread_manager.rs src/runtime/thread_runtime.rs tests/app_server_boundary.rs
 git commit -m "refactor: register loaded thread runtimes"
 ```
 
 ## Task 3: Move Turn Execution Into ThreadRuntimeLoop
 
 **Files:**
-- Modify: `src/app_server/thread_runtime.rs`
+- Modify: `src/runtime/thread_runtime.rs`
 - Modify: `src/app_server/thread_manager.rs`
 - Test: `tests/app_server_boundary.rs`
 
@@ -477,7 +479,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add src/app_server/thread_runtime.rs src/app_server/thread_manager.rs tests/app_server_boundary.rs
+git add src/runtime/thread_runtime.rs src/app_server/thread_manager.rs tests/app_server_boundary.rs
 git commit -m "refactor: run turns through thread runtime mailbox"
 ```
 
@@ -929,6 +931,7 @@ Landed defaults:
 - Treat `events.jsonl` as the single source of truth; live `broadcast` is best-effort and may drop on `Lagged`. Streaming clients reconnect by replaying from the last seen event id, then subscribing with that cursor.
 - Normalize `TurnContextOverrides` into `ThreadTurnContext` at `ThreadManager`. `ThreadOp::UserInput` holds the internal type so `thread_runtime.rs` does not depend on protocol DTOs.
 - Keep active-turn interrupt state inside `ThreadRuntime`, not `ThreadManager`.
+- Keep turn lifecycle and event append/broadcast logic inside `ThreadSession`, not `ThreadRuntimeLoop`.
 - Leave child session lineage and multi-runtime orchestration outside V2. Existing fork/spawn behavior stays on the compatibility path until a later design decides how parent and child timelines route through live runtimes.
 
 Remaining follow-ups:

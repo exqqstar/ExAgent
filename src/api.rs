@@ -24,6 +24,7 @@ pub use crate::app_server::protocol::{
 };
 use crate::app_server::AppServerError;
 use crate::app_server::{AppServerBoundary, AppServerService};
+use crate::runtime::thread_runtime::ThreadRuntimeError;
 
 #[derive(Debug, Serialize)]
 struct HealthResponse {
@@ -245,12 +246,20 @@ fn json_result<T: Serialize>(result: Result<T>) -> axum::response::Response {
 }
 
 fn status_for_error(err: &anyhow::Error) -> StatusCode {
-    match err.downcast_ref::<AppServerError>() {
-        Some(AppServerError::InvalidRequest(_)) => StatusCode::BAD_REQUEST,
-        Some(AppServerError::ThreadNotFound(_)) => StatusCode::NOT_FOUND,
-        Some(AppServerError::ThreadBusy(_)) => StatusCode::CONFLICT,
-        Some(AppServerError::TurnRejected { .. }) => StatusCode::CONFLICT,
-        Some(AppServerError::TurnInterrupted { .. }) => StatusCode::CONFLICT,
+    if let Some(err) = err.downcast_ref::<AppServerError>() {
+        return match err {
+            AppServerError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+            AppServerError::ThreadNotFound(_) => StatusCode::NOT_FOUND,
+            AppServerError::ThreadBusy(_)
+            | AppServerError::TurnRejected { .. }
+            | AppServerError::TurnInterrupted { .. } => StatusCode::CONFLICT,
+        };
+    }
+
+    match err.downcast_ref::<ThreadRuntimeError>() {
+        Some(ThreadRuntimeError::ThreadBusy(_))
+        | Some(ThreadRuntimeError::TurnRejected { .. })
+        | Some(ThreadRuntimeError::TurnInterrupted { .. }) => StatusCode::CONFLICT,
         None => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

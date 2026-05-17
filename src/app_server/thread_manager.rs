@@ -18,9 +18,6 @@ use crate::app_server::protocol::{
     TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnState,
     TurnStatus, TurnView, BOUNDARY_PROTOCOL_VERSION,
 };
-use crate::app_server::thread_runtime::{
-    AgentFactory, ThreadOpResult, ThreadRuntime, ThreadRuntimeOptions, ThreadTurnContext,
-};
 use crate::app_server::AppServerError;
 use crate::config::AgentConfig;
 use crate::events::{RuntimeEvent, RuntimeEventKind};
@@ -28,6 +25,10 @@ use crate::exec_session::ExecSessionManager;
 use crate::llm::{LlmClient, OpenAiCompatibleLlm};
 use crate::policy::PolicyManager;
 use crate::registry::ToolRegistry;
+use crate::runtime::thread_runtime::{
+    AgentFactory, ThreadOpResult, ThreadRuntime, ThreadRuntimeError, ThreadRuntimeOptions,
+    ThreadTurnContext,
+};
 use crate::session::SessionSnapshot;
 use crate::types::{SessionId, TurnId};
 
@@ -349,7 +350,8 @@ impl ThreadManager {
             if runtime.active_turn_id().is_some() {
                 let turn_id = runtime
                     .interrupt_active_turn(params.turn_id.as_ref())
-                    .await?;
+                    .await
+                    .map_err(map_thread_runtime_error)?;
                 return Ok(TurnInterruptResponse {
                     thread_id: params.thread_id,
                     interrupted_turn: Some(TurnState {
@@ -463,7 +465,8 @@ impl ThreadManager {
                 prompt,
                 turn_cwd.map(|cwd| ThreadTurnContext { cwd: Some(cwd) }),
             )
-            .await?;
+            .await
+            .map_err(map_thread_runtime_error)?;
         let ThreadOpResult::UserInput { output, .. } = result else {
             return Err(AppServerError::InvalidRequest(
                 "turn_start returned non-user-input runtime result".into(),
@@ -493,7 +496,8 @@ impl ThreadManager {
                 params.prompt,
                 turn_cwd.map(|cwd| ThreadTurnContext { cwd: Some(cwd) }),
             )
-            .await?;
+            .await
+            .map_err(map_thread_runtime_error)?;
 
         Ok(TurnStartStarted { thread_id, turn_id })
     }
@@ -1049,6 +1053,30 @@ fn agent_run_response(output: AgentRunOutput) -> AgentRunResponse {
         session_id: output.session_id,
         snapshot_path: output.snapshot_path,
         events_path: output.events_path,
+    }
+}
+
+fn map_thread_runtime_error(err: anyhow::Error) -> anyhow::Error {
+    let Some(runtime_error) = err.downcast_ref::<ThreadRuntimeError>() else {
+        return err;
+    };
+
+    match runtime_error {
+        ThreadRuntimeError::ThreadBusy(thread_id) => {
+            AppServerError::ThreadBusy(thread_id.clone()).into()
+        }
+        ThreadRuntimeError::TurnRejected { thread_id, reason } => AppServerError::TurnRejected {
+            thread_id: thread_id.clone(),
+            reason: reason.clone(),
+        }
+        .into(),
+        ThreadRuntimeError::TurnInterrupted { thread_id, turn_id } => {
+            AppServerError::TurnInterrupted {
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.clone(),
+            }
+            .into()
+        }
     }
 }
 

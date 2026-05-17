@@ -1,7 +1,6 @@
 use anyhow::Result;
 
 use super::{RuntimeInterrupt, ThreadSession};
-use crate::agent::AgentRunOutput;
 use crate::events::RuntimeEventKind;
 use crate::runtime::thread_runtime::{
     ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus, ThreadTurnContext,
@@ -60,7 +59,7 @@ impl ThreadSession {
             tokio::select! {
                 result = agent.run_live_turn(&mut snapshot, runtime_turn_id, turn_cwd, recorder) => {
                     match result {
-                        Ok(output) => output.final_turn,
+                        Ok(turn) => turn,
                         Err(err) => {
                             let message = err.to_string();
                             self.append_and_broadcast_snapshot(
@@ -90,7 +89,7 @@ impl ThreadSession {
                 .run_live_turn(&mut snapshot, turn_id.clone(), turn_cwd, recorder)
                 .await
             {
-                Ok(output) => output.final_turn,
+                Ok(turn) => turn,
                 Err(err) => {
                     let message = err.to_string();
                     self.append_and_broadcast_snapshot(
@@ -109,16 +108,7 @@ impl ThreadSession {
             RuntimeEventKind::TurnCompleted,
         )?;
 
-        let paths = crate::transcript::session_paths(&snapshot.workspace_root, &self.thread_id);
-        let output = AgentRunOutput {
-            final_turn,
-            session_id: self.thread_id.clone(),
-            snapshot_path: paths.snapshot_path,
-            events_path: paths.events_path,
-            events: Vec::new(),
-        };
-
-        Ok(ThreadOpResult::UserInput { turn_id, output })
+        Ok(ThreadOpResult::UserInput { turn_id, final_turn })
     }
 }
 
@@ -180,11 +170,11 @@ mod tests {
             .await
             .expect("run turn");
 
-        let ThreadOpResult::UserInput { output, .. } = result else {
+        let ThreadOpResult::UserInput { final_turn, .. } = result else {
             panic!("expected user input result");
         };
         assert_eq!(
-            output.final_turn.text.as_deref(),
+            final_turn.text.as_deref(),
             Some("session turn complete")
         );
 
@@ -252,25 +242,25 @@ mod tests {
             .expect("second turn");
 
         let ThreadOpResult::UserInput {
-            output: first_output,
+            final_turn: first_final_turn,
             ..
         } = first
         else {
             panic!("expected first user input result");
         };
         let ThreadOpResult::UserInput {
-            output: second_output,
+            final_turn: second_final_turn,
             ..
         } = second
         else {
             panic!("expected second user input result");
         };
         assert_eq!(
-            first_output.final_turn.text.as_deref(),
+            first_final_turn.text.as_deref(),
             Some("first turn complete")
         );
         assert_eq!(
-            second_output.final_turn.text.as_deref(),
+            second_final_turn.text.as_deref(),
             Some("second turn complete")
         );
         assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
@@ -378,12 +368,12 @@ mod tests {
             next_id: 1,
         };
 
-        let output = agent
+        let final_turn = agent
             .run_live_turn(&mut snapshot, TurnId::new("turn_1"), None, &mut sink)
             .await
             .expect("agent should complete the two-step turn");
 
-        assert_eq!(output.final_turn.text.as_deref(), Some("done"));
+        assert_eq!(final_turn.text.as_deref(), Some("done"));
         // Three sink.record() calls -- AssistantTurn (tool call),
         // ToolResult (no-tool error), AssistantTurn (final). Proves events
         // are recorded one at a time, not batched at end of turn.

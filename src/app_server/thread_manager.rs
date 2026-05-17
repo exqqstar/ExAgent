@@ -6,7 +6,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::broadcast;
 
-use crate::agent::{Agent, AgentRunOutput};
+use crate::agent::Agent;
 use crate::app_server::override_policy::{OverridePolicy, RuntimeOverrides};
 use crate::app_server::protocol::{
     AgentRunResponse, BoundaryCapability, BoundaryOp, BoundaryOpResponse, EventsReplayParams,
@@ -29,7 +29,7 @@ use crate::runtime::thread_runtime::{
     ThreadTurnContext,
 };
 use crate::session::SessionSnapshot;
-use crate::types::{SessionId, TurnId};
+use crate::types::{AssistantTurn, SessionId, TurnId};
 
 type RegistryFactory = Arc<dyn Fn() -> ToolRegistry + Send + Sync>;
 
@@ -88,10 +88,6 @@ pub struct NewThread {
     pub runtime: Arc<ThreadRuntime>,
     pub snapshot_path: PathBuf,
     pub events_path: PathBuf,
-}
-
-struct TurnStartRun {
-    output: AgentRunOutput,
 }
 
 struct TurnStartStarted {
@@ -329,8 +325,9 @@ impl ThreadManager {
     }
 
     async fn turn_start_and_wait(&self, params: TurnStartParams) -> Result<AgentRunResponse> {
-        let TurnStartRun { output, .. } = self.run_turn_through_runtime(params).await?;
-        Ok(agent_run_response(output))
+        let (thread_id, workspace_root, final_turn) =
+            self.run_turn_through_runtime(params).await?;
+        Ok(agent_run_response(thread_id, final_turn, &workspace_root))
     }
 
     pub async fn turn_interrupt(
@@ -454,10 +451,13 @@ impl ThreadManager {
         })
     }
 
-    async fn run_turn_through_runtime(&self, params: TurnStartParams) -> Result<TurnStartRun> {
+    async fn run_turn_through_runtime(
+        &self,
+        params: TurnStartParams,
+    ) -> Result<(SessionId, PathBuf, AssistantTurn)> {
         let config = OverridePolicy::merge_turn_start(&self.base_config, params.workspace_root)?;
         let thread_id = params.thread_id;
-        let runtime = self.ensure_runtime_loaded(&thread_id, config)?;
+        let runtime = self.ensure_runtime_loaded(&thread_id, config.clone())?;
         let turn_id = runtime.next_turn_id();
         let turn_cwd = if let Some(turn_context) = params.turn_context {
             let snapshot = runtime.live_view().snapshot;
@@ -475,14 +475,14 @@ impl ThreadManager {
             )
             .await
             .map_err(map_thread_runtime_error)?;
-        let ThreadOpResult::UserInput { output, .. } = result else {
+        let ThreadOpResult::UserInput { final_turn, .. } = result else {
             return Err(AppServerError::InvalidRequest(
                 "turn_start returned non-user-input runtime result".into(),
             )
             .into());
         };
 
-        Ok(TurnStartRun { output })
+        Ok((thread_id, config.workspace_root, final_turn))
     }
 
     async fn start_turn_in_background(&self, params: TurnStartParams) -> Result<TurnStartStarted> {
@@ -953,13 +953,18 @@ fn replay_snapshot_view(snapshot: SessionSnapshot) -> ReplaySnapshotView {
     }
 }
 
-fn agent_run_response(output: AgentRunOutput) -> AgentRunResponse {
+fn agent_run_response(
+    thread_id: SessionId,
+    final_turn: AssistantTurn,
+    workspace_root: &std::path::Path,
+) -> AgentRunResponse {
+    let paths = crate::transcript::session_paths(workspace_root, &thread_id);
     AgentRunResponse {
-        text: output.final_turn.text,
-        tool_calls: output.final_turn.tool_calls,
-        session_id: output.session_id,
-        snapshot_path: output.snapshot_path,
-        events_path: output.events_path,
+        text: final_turn.text,
+        tool_calls: final_turn.tool_calls,
+        session_id: thread_id,
+        snapshot_path: paths.snapshot_path,
+        events_path: paths.events_path,
     }
 }
 

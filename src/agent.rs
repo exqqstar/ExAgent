@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 
 use crate::config::AgentConfig;
-use crate::events::{RuntimeEvent, RuntimeEventKind};
+use crate::events::RuntimeEventKind;
 use crate::exec_session::ExecSessionManager;
 use crate::llm::LlmClient;
 use crate::policy::PolicyManager;
@@ -14,7 +14,7 @@ use crate::session::{
     ApprovalId, ApprovalStatus, ExecSessionId, ExecSessionRef, ExecSessionStatus, PendingApproval,
     SessionSnapshot,
 };
-use crate::types::{AssistantTurn, ConversationMessage, EventId, SessionId, TurnId};
+use crate::types::{AssistantTurn, ConversationMessage, EventId, TurnId};
 
 pub struct Agent {
     config: AgentConfig,
@@ -22,18 +22,6 @@ pub struct Agent {
     registry: ToolRegistry,
     exec_sessions: Arc<ExecSessionManager>,
     policy: Arc<PolicyManager>,
-}
-
-pub struct AgentRunOutput {
-    pub final_turn: AssistantTurn,
-    pub session_id: SessionId,
-    pub snapshot_path: PathBuf,
-    pub events_path: PathBuf,
-    pub events: Vec<RuntimeEvent>,
-}
-
-pub(crate) struct AgentLiveTurnOutput {
-    pub final_turn: AssistantTurn,
 }
 
 impl Agent {
@@ -81,21 +69,10 @@ impl Agent {
     pub(crate) async fn run_live_turn(
         &self,
         snapshot: &mut SessionSnapshot,
-        turn_id: TurnId,
-        turn_cwd: Option<PathBuf>,
-        sink: &mut dyn LiveEventSink,
-    ) -> Result<AgentLiveTurnOutput> {
-        self.run_live_session_snapshot(snapshot, turn_id, turn_cwd, sink)
-            .await
-    }
-
-    async fn run_live_session_snapshot(
-        &self,
-        snapshot: &mut SessionSnapshot,
         runtime_turn_id: TurnId,
         turn_cwd: Option<PathBuf>,
         sink: &mut dyn LiveEventSink,
-    ) -> Result<AgentLiveTurnOutput> {
+    ) -> Result<AssistantTurn> {
         snapshot.normalize_lineage();
         let mut session_config = self.config.clone();
         session_config.workspace_root = snapshot.workspace_root.clone();
@@ -134,7 +111,7 @@ impl Agent {
             )?;
 
             if turn.tool_calls.is_empty() {
-                return Ok(AgentLiveTurnOutput { final_turn: turn });
+                return Ok(turn);
             }
 
             for call in turn.tool_calls.clone() {

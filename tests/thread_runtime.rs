@@ -107,7 +107,7 @@ async fn thread_runtime_live_view_uses_loaded_session_state_not_disk_mutations()
     )
     .expect("append disk-only event");
 
-    let live_view = runtime.live_view().expect("read live view");
+    let live_view = runtime.live_view();
 
     assert_eq!(live_view.thread_id, thread_id);
     assert!(live_view.events.is_empty());
@@ -208,7 +208,7 @@ async fn thread_runtime_live_view_tracks_snapshot_after_turn_without_disk_read()
     )
     .unwrap();
 
-    let live_view = runtime.live_view().expect("read live view");
+    let live_view = runtime.live_view();
 
     assert_eq!(live_view.snapshot.conversation.len(), 2);
     assert_eq!(live_view.snapshot.conversation[0].content, "continue");
@@ -216,6 +216,50 @@ async fn thread_runtime_live_view_tracks_snapshot_after_turn_without_disk_read()
         live_view.snapshot.conversation[1].content,
         "live snapshot complete"
     );
+}
+
+#[tokio::test]
+async fn thread_runtime_next_turn_id_uses_live_state_not_disk() {
+    let dir = tempdir().unwrap();
+    let thread_id = SessionId::new("session_runtime_next_turn_id");
+    let config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        ..AgentConfig::default()
+    };
+    let snapshot = SessionSnapshot::new_thread(
+        thread_id.clone(),
+        config.workspace_root.clone(),
+        config.cwd.clone(),
+    );
+    let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
+    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+    let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
+        thread_id.clone(),
+        config,
+        agent_factory(vec![AssistantTurn {
+            text: Some("first turn complete".into()),
+            tool_calls: vec![],
+        }]),
+    ))
+    .expect("spawn runtime");
+
+    assert_eq!(runtime.next_turn_id(), TurnId::new("turn_1"));
+    runtime
+        .submit_user_input_and_wait(TurnId::new("turn_1"), "continue".into(), None)
+        .await
+        .expect("run turn");
+    exagent::transcript::write_json(
+        &paths.snapshot_path,
+        &SessionSnapshot::new_thread(
+            thread_id.clone(),
+            paths.session_dir.clone(),
+            paths.session_dir.clone(),
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(runtime.next_turn_id(), TurnId::new("turn_2"));
 }
 
 fn agent_factory(turns: Vec<AssistantTurn>) -> AgentFactory {

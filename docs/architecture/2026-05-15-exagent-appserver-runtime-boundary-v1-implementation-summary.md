@@ -161,10 +161,9 @@ The older runtime-control routes `POST /threads` and
 routes. The legacy runtime-control prototype has been removed, so thread and
 turn lifecycle enters through the app-server boundary.
 
-Compatibility aliases are still present:
-
-- `POST /thread_spawn_child`
-- `POST /events_replay`
+The earlier underscore aliases `POST /thread_spawn_child` and
+`POST /events_replay` have been removed. New clients should use only the slash
+routes listed above.
 
 ## Code Map
 

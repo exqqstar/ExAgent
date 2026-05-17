@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{anyhow, Result};
 use std::future::Future;
@@ -110,7 +110,7 @@ pub struct ThreadRuntime {
     event_tx: broadcast::Sender<RuntimeEvent>,
     status_rx: watch::Receiver<ThreadRuntimeStatus>,
     active_turn: Arc<Mutex<Option<ActiveRuntimeTurnRecord>>>,
-    live_state: Arc<Mutex<ThreadSessionLiveState>>,
+    live_state: Arc<RwLock<ThreadSessionLiveState>>,
 }
 
 impl ThreadRuntime {
@@ -239,8 +239,12 @@ impl ThreadRuntime {
         self.event_tx.subscribe()
     }
 
-    pub fn live_view(&self) -> Result<ThreadSessionLiveView> {
+    pub fn live_view(&self) -> ThreadSessionLiveView {
         ThreadSession::live_view_from_state(self.thread_id.clone(), &self.live_state)
+    }
+
+    pub fn next_turn_id(&self) -> TurnId {
+        ThreadSession::next_turn_id_from_state(&self.live_state)
     }
 
     pub(crate) fn active_turn_id(&self) -> Option<TurnId> {

@@ -265,7 +265,7 @@ impl ThreadManager {
         workspace_root: &std::path::Path,
     ) -> Result<ThreadReadResponse> {
         if let Some(runtime) = self.runtime_for(&thread_id) {
-            let live_view = runtime.live_view()?;
+            let live_view = runtime.live_view();
             if live_view.snapshot.workspace_root == workspace_root {
                 let paths = crate::transcript::session_paths(
                     &live_view.snapshot.workspace_root,
@@ -493,16 +493,15 @@ impl ThreadManager {
     async fn run_turn_through_runtime(&self, params: TurnStartParams) -> Result<TurnStartRun> {
         let config = OverridePolicy::merge_turn_start(&self.base_config, params.workspace_root)?;
         let thread_id = params.thread_id;
-        let turn_id = next_turn_id(&config.workspace_root, &thread_id)?;
+        let runtime = self.ensure_runtime_loaded(&thread_id, config)?;
+        let turn_id = runtime.next_turn_id();
         let turn_cwd = if let Some(turn_context) = params.turn_context {
-            let snapshot =
-                crate::transcript::read_session_snapshot(&config.workspace_root, &thread_id)?;
+            let snapshot = runtime.live_view().snapshot;
             let snapshot = OverridePolicy::apply_turn_context(&snapshot, turn_context)?;
             Some(snapshot.cwd)
         } else {
             None
         };
-        let runtime = self.ensure_runtime_loaded(&thread_id, config)?;
         let prompt = params.prompt;
         let result = runtime
             .submit_user_input_and_wait(
@@ -525,16 +524,15 @@ impl ThreadManager {
     async fn start_turn_in_background(&self, params: TurnStartParams) -> Result<TurnStartStarted> {
         let config = OverridePolicy::merge_turn_start(&self.base_config, params.workspace_root)?;
         let thread_id = params.thread_id;
-        let turn_id = next_turn_id(&config.workspace_root, &thread_id)?;
+        let runtime = self.ensure_runtime_loaded(&thread_id, config)?;
+        let turn_id = runtime.next_turn_id();
         let turn_cwd = if let Some(turn_context) = params.turn_context {
-            let snapshot =
-                crate::transcript::read_session_snapshot(&config.workspace_root, &thread_id)?;
+            let snapshot = runtime.live_view().snapshot;
             let snapshot = OverridePolicy::apply_turn_context(&snapshot, turn_context)?;
             Some(snapshot.cwd)
         } else {
             None
         };
-        let runtime = self.ensure_runtime_loaded(&thread_id, config)?;
         runtime
             .submit_user_input(
                 turn_id.clone(),
@@ -804,16 +802,6 @@ fn boundary_response_name(response: &BoundaryOpResponse) -> &'static str {
         BoundaryOpResponse::ThreadChildSpawned(_) => "thread_child_spawned",
         BoundaryOpResponse::EventsReplayed(_) => "events_replayed",
     }
-}
-
-fn next_turn_id(workspace_root: &std::path::Path, thread_id: &SessionId) -> Result<TurnId> {
-    let snapshot = crate::transcript::read_session_snapshot(workspace_root, thread_id)?;
-    let assistant_turn_count = snapshot
-        .conversation
-        .iter()
-        .filter(|message| matches!(message.role, crate::types::MessageRole::Assistant))
-        .count();
-    Ok(TurnId::new(format!("turn_{}", assistant_turn_count + 1)))
 }
 
 fn latest_turn_state(events: &[crate::events::RuntimeEvent]) -> Option<TurnState> {

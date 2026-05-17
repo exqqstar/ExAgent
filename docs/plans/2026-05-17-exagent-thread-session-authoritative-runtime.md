@@ -89,7 +89,7 @@ Pre-P0 gaps this plan fixes:
 
 - `thread_read` still reads disk directly in `thread_read_resolved`.
 - `ThreadSession` does not expose a live read view.
-- `Agent::run_session_snapshot` writes snapshot and assistant/tool events.
+- `Agent::run_legacy_session_snapshot` writes snapshot and assistant/tool events.
 - `ThreadSession::append_and_broadcast` writes lifecycle events.
 - Error handling calls `broadcast_events_since`, which rereads disk to find events the `Agent` wrote.
 - `ThreadRuntime::submit(ThreadOp)` lets callers submit `UserInput` without reserving `active_turn`.
@@ -256,11 +256,16 @@ The current gap is that ExAgent's `Agent` still owns too much of what Codex puts
 3. `ThreadSession` is the only code path that assigns runtime event IDs.
 4. `ThreadSession` is the only code path that appends live runtime events.
 5. `ThreadSession` is the only code path that broadcasts live runtime events.
-6. `Agent` may mutate a passed-in execution state only through an explicit result/delta contract.
+6. In the live runtime path, `Agent` may mutate only
+   `snapshot.conversation`, `snapshot.open_exec_sessions`, and
+   `snapshot.pending_approvals` in place.
 7. `Agent` must not call `append_json_line` for runtime events.
 8. `Agent` must not call `write_json` for session snapshots in the live runtime path.
 9. Raw `ThreadOp::UserInput` cannot be submitted without reserving `active_turn`.
 10. Interrupt uses the same active-turn state that `turn_start` reserves.
+11. `ThreadSession` owns event id assignment, event persistence, event
+    broadcast, snapshot checkpointing, live read publication, and status
+    updates.
 
 ## Proposed Runtime Data Flow
 
@@ -287,7 +292,7 @@ Target read flow:
 ```text
 thread_read request
   -> ThreadManager::runtime_for(thread_id)
-      Some(runtime) -> runtime.live_view().await
+      Some(runtime) -> runtime.live_view()
       None -> read snapshot/events from disk
 ```
 
@@ -318,7 +323,7 @@ Add a focused test that constructs a thread, loads runtime, runs a turn, and rea
 Expected new API shape:
 
 ```rust
-let view = runtime.live_view().await?;
+let view = runtime.live_view();
 assert_eq!(view.thread_id, thread_id);
 assert!(view.events.iter().any(|event| matches!(
     event.kind,
@@ -510,7 +515,7 @@ Add a test or CI-friendly assertion that live-path event writes happen only from
 At minimum, manually verify before commit:
 
 ```bash
-rg "append_json_line|append_runtime_event|write_json" src/agent.rs src/runtime
+rg "append_json_line|append_runtime_event|write_json" src/agent.rs src/runtime src/tools
 ```
 
 Expected: `src/agent.rs` should not write live runtime events or snapshots.
@@ -620,6 +625,21 @@ cargo test thread_runtime
 cargo test app_server_boundary
 cargo test agent_loop
 ```
+
+Architecture guards:
+
+```bash
+rg "append_json_line|append_runtime_event|write_json" src/agent.rs src/runtime src/tools
+rg "snapshot\\." src/agent.rs | rg -v \
+    "conversation|open_exec_sessions|pending_approvals|workspace_root|cwd|session_id|normalize_lineage"
+```
+
+The live runtime path should keep event persistence calls inside
+`thread_session`. Matches in `src/agent.rs` are intentional only for the legacy
+non-live path. Matches in `src/tools` must not occur for deferred live policy
+events.
+The second grep should only return fields explicitly allowed by the half-delta
+contract, or intentional legacy non-live code.
 
 ## Suggested Commit Sequence
 

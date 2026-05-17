@@ -184,6 +184,7 @@ async fn tool_rejects_role_mismatch_without_persisting_result() {
         turn_id: Some(TurnId::new("turn_2")),
         exec_sessions: Arc::new(ExecSessionManager::default()),
         policy: Arc::new(PolicyManager::default()),
+        defer_policy_events: false,
     };
 
     let mut registry = ToolRegistry::new();

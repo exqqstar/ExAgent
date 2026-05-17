@@ -527,6 +527,101 @@ async fn events_subscribe_receives_live_turn_lifecycle_events() {
     wait_for_turn_completed(&service, &thread.thread.id, &turn.turn.id).await;
 }
 
+#[tokio::test]
+async fn events_subscribe_receives_live_approval_requested_events() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("scratch")).unwrap();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            policy_mode: PolicyMode::Enforced,
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![
+            AssistantTurn {
+                text: Some("try risky command".into()),
+                tool_calls: vec![ToolCall {
+                    id: "call_risky_live_subscribe".into(),
+                    name: "run_command".into(),
+                    arguments: serde_json::json!({ "command": "rm -rf scratch" }),
+                }],
+            },
+            AssistantTurn {
+                text: Some("waiting for approval".into()),
+                tool_calls: vec![],
+            },
+        ])),
+        run_command_registry,
+    );
+
+    let thread = service
+        .thread_start(ThreadStartParams {
+            workspace_root: None,
+            cwd: None,
+        })
+        .unwrap();
+    let mut events = service
+        .events_subscribe(exagent::app_server::protocol::EventsSubscribeParams {
+            thread_id: thread.thread.id.clone(),
+            workspace_root: None,
+            after_event_id: None,
+        })
+        .unwrap();
+
+    let _turn = service
+        .turn_start(TurnStartParams {
+            thread_id: thread.thread.id.clone(),
+            prompt: "request approval".into(),
+            workspace_root: None,
+            turn_context: None,
+        })
+        .await
+        .unwrap();
+
+    let approval_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let event = events.recv().await.expect("live event channel open");
+            if matches!(event.kind, RuntimeEventKind::ApprovalRequested { .. }) {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("approval request must be delivered through live subscribe");
+
+    assert!(matches!(
+        approval_event.kind,
+        RuntimeEventKind::ApprovalRequested { .. }
+    ));
+    let read_at_approval = service
+        .thread_read(ThreadReadParams {
+            thread_id: thread.thread.id.clone(),
+            workspace_root: None,
+        })
+        .unwrap();
+    assert_eq!(
+        read_at_approval.thread.status,
+        ThreadStatus::WaitingApproval
+    );
+
+    wait_for_thread_event(&service, &thread.thread.id, |kind| {
+        matches!(kind, RuntimeEventKind::TurnCompleted)
+    })
+    .await;
+    let read = service
+        .thread_read(ThreadReadParams {
+            thread_id: thread.thread.id.clone(),
+            workspace_root: None,
+        })
+        .unwrap();
+    assert!(read.thread.turns.iter().any(|turn| {
+        turn.items
+            .iter()
+            .any(|item| matches!(item, ThreadItem::ApprovalRequested { .. }))
+    }));
+}
+
 #[test]
 fn events_subscribe_rejects_missing_thread() {
     let dir = tempdir().unwrap();

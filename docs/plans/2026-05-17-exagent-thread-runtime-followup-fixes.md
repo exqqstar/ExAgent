@@ -724,15 +724,17 @@ Additional targeted checks at the end:
 
 ```bash
 # Live path event/snapshot writes must only originate from thread_session
-rg "append_json_line|append_runtime_event|write_json" src/agent.rs src/runtime
+rg "append_json_line|append_runtime_event|write_json" src/agent.rs src/runtime src/tools
 
 # Agent must not touch fields outside the documented half-delta surface
 rg "snapshot\." src/agent.rs | rg -v \
     "conversation|open_exec_sessions|pending_approvals|workspace_root|cwd|session_id|normalize_lineage"
 ```
 
-Both greps should return empty (or only intentional matches inside the
-legacy non-live `run_session_snapshot` path).
+The first grep may return intentional matches inside `ThreadSession`, tests,
+or legacy non-live `run_legacy_session_snapshot` code. It must not show live policy
+events being persisted directly from tools. The second grep should return empty
+or only fields explicitly allowed by the half-delta contract.
 
 Manual smoke test:
 

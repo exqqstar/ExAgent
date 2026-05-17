@@ -35,28 +35,36 @@ impl ThreadSession {
     ) -> Result<ThreadOpResult> {
         // Push user message into the live snapshot first so the TurnStarted
         // event records a snapshot that already contains the user input.
-        self.snapshot
+        let mut snapshot = self
+            .live_state
+            .read()
+            .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?
+            .snapshot
+            .clone();
+        snapshot
             .conversation
             .push(ConversationMessage::user(prompt));
-        self.append_and_broadcast(Some(&turn_id), RuntimeEventKind::TurnStarted)?;
+        self.append_and_broadcast_snapshot(
+            &snapshot,
+            Some(&turn_id),
+            RuntimeEventKind::TurnStarted,
+        )?;
 
         let turn_cwd = turn_context.and_then(|context| context.cwd);
         let Self {
-            agent,
-            snapshot,
-            recorder,
-            ..
+            agent, recorder, ..
         } = self;
 
         let final_turn = if let Some(interrupt) = interrupt {
             let runtime_turn_id = turn_id.clone();
             tokio::select! {
-                result = agent.run_live_turn(snapshot, runtime_turn_id, turn_cwd, recorder) => {
+                result = agent.run_live_turn(&mut snapshot, runtime_turn_id, turn_cwd, recorder) => {
                     match result {
                         Ok(output) => output.final_turn,
                         Err(err) => {
                             let message = err.to_string();
-                            self.append_and_broadcast(
+                            self.append_and_broadcast_snapshot(
+                                &snapshot,
                                 Some(&turn_id),
                                 RuntimeEventKind::RuntimeError { message },
                             )?;
@@ -65,7 +73,8 @@ impl ThreadSession {
                     }
                 }
                 _ = interrupt.interrupt_rx => {
-                    self.append_and_broadcast(
+                    self.append_and_broadcast_snapshot(
+                        &snapshot,
                         Some(&turn_id),
                         RuntimeEventKind::TurnInterrupted,
                     )?;
@@ -78,13 +87,14 @@ impl ThreadSession {
             }
         } else {
             match agent
-                .run_live_turn(snapshot, turn_id.clone(), turn_cwd, recorder)
+                .run_live_turn(&mut snapshot, turn_id.clone(), turn_cwd, recorder)
                 .await
             {
                 Ok(output) => output.final_turn,
                 Err(err) => {
                     let message = err.to_string();
-                    self.append_and_broadcast(
+                    self.append_and_broadcast_snapshot(
+                        &snapshot,
                         Some(&turn_id),
                         RuntimeEventKind::RuntimeError { message },
                     )?;
@@ -93,10 +103,13 @@ impl ThreadSession {
             }
         };
 
-        self.append_and_broadcast(Some(&turn_id), RuntimeEventKind::TurnCompleted)?;
+        self.append_and_broadcast_snapshot(
+            &snapshot,
+            Some(&turn_id),
+            RuntimeEventKind::TurnCompleted,
+        )?;
 
-        let paths =
-            crate::transcript::session_paths(&self.snapshot.workspace_root, &self.thread_id);
+        let paths = crate::transcript::session_paths(&snapshot.workspace_root, &self.thread_id);
         let output = AgentRunOutput {
             final_turn,
             session_id: self.thread_id.clone(),
@@ -295,22 +308,28 @@ mod tests {
         }
 
         impl LiveEventSink for CapturingSink {
-            fn record(
+            fn reserve_event_id(&mut self) -> EventId {
+                let event_id = EventId::new(format!("evt_capture_{}", self.next_id));
+                self.next_id += 1;
+                event_id
+            }
+
+            fn record_reserved(
                 &mut self,
                 snapshot: &SessionSnapshot,
                 turn_id: Option<&TurnId>,
+                event_id: EventId,
                 kind: RuntimeEventKind,
             ) -> Result<RuntimeEvent> {
                 self.conversation_lens_at_record
                     .push(snapshot.conversation.len());
                 self.event_kinds.push(kind.clone());
                 let event = RuntimeEvent {
-                    event_id: EventId::new(format!("evt_capture_{}", self.next_id)),
+                    event_id,
                     session_id: self.thread_id.clone(),
                     turn_id: turn_id.cloned(),
                     kind,
                 };
-                self.next_id += 1;
                 Ok(event)
             }
         }

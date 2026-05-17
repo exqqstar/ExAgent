@@ -20,6 +20,7 @@ fn test_context() -> (tempfile::TempDir, ToolContext) {
         turn_id: None,
         exec_sessions: Arc::new(ExecSessionManager::default()),
         policy: Arc::new(PolicyManager::default()),
+        defer_policy_events: false,
     };
     (dir, ctx)
 }

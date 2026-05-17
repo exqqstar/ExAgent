@@ -151,12 +151,14 @@ async fn handle_approval_decision(
 
     match decision {
         "approved" => {
-            record_approval_decision_event(
-                ctx,
-                &pending.session_id,
-                &approval_id,
-                ApprovalStatus::Approved,
-            )?;
+            if !ctx.defer_policy_events {
+                record_approval_decision_event(
+                    ctx,
+                    &pending.session_id,
+                    &approval_id,
+                    ApprovalStatus::Approved,
+                )?;
+            }
 
             if pending.persistent {
                 let snapshot = ctx
@@ -200,12 +202,14 @@ async fn handle_approval_decision(
             }
         }
         "denied" => {
-            record_approval_decision_event(
-                ctx,
-                &pending.session_id,
-                &approval_id,
-                ApprovalStatus::Denied,
-            )?;
+            if !ctx.defer_policy_events {
+                record_approval_decision_event(
+                    ctx,
+                    &pending.session_id,
+                    &approval_id,
+                    ApprovalStatus::Denied,
+                )?;
+            }
             Ok(CommandOutcome {
                 status: ToolStatus::Error,
                 content: "Approval denied".into(),
@@ -311,20 +315,33 @@ async fn maybe_require_approval(
                     reason.clone(),
                 )
                 .await;
-            let event_id = record_approval_request_event(ctx, &approval)?;
+            let event_id = if ctx.defer_policy_events {
+                None
+            } else {
+                Some(record_approval_request_event(ctx, &approval)?)
+            };
 
-            Ok(Some(CommandOutcome {
-                status: ToolStatus::ReviewRequired,
-                content: format!("Command requires approval: {}", reason),
-                meta: json!({
+            let mut meta = json!({
                     "approval_id": approval.approval_id.as_str(),
                     "approval_status": "pending",
                     "approval_reason": reason,
                     "policy_decision": "review_required",
-                    "approval_event_id": event_id.as_str(),
                     "command": command,
                     "cwd": cwd,
-                }),
+            });
+            if let Some(event_id) = event_id {
+                if let Some(object) = meta.as_object_mut() {
+                    object.insert(
+                        "approval_event_id".into(),
+                        Value::String(event_id.as_str().into()),
+                    );
+                }
+            }
+
+            Ok(Some(CommandOutcome {
+                status: ToolStatus::ReviewRequired,
+                content: format!("Command requires approval: {}", reason),
+                meta,
             }))
         }
     }

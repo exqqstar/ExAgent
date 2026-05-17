@@ -851,6 +851,17 @@ async fn fork_route_ignores_cwd_override_and_keeps_parent_context_authoritative(
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({
+            "text": "unused",
+            "tool_calls": [],
+            "session_id": "session_child",
+            "snapshot_path": ".exagent/sessions/session_child/snapshot.json",
+            "events_path": ".exagent/sessions/session_child/events.jsonl"
+        })
+    );
 }
 
 #[tokio::test]
@@ -1346,7 +1357,7 @@ async fn thread_spawn_child_route_accepts_parent_role_and_prompt() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/thread_spawn_child")
+                .uri("/thread/spawn_child")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -1380,101 +1391,6 @@ async fn thread_spawn_child_route_accepts_parent_role_and_prompt() {
                 "snapshot_path": ".exagent/sessions/session_child/snapshot.json",
                 "events_path": ".exagent/sessions/session_child/events.jsonl"
             }
-        })
-    );
-}
-
-#[tokio::test]
-async fn thread_spawn_child_slash_route_accepts_parent_role_and_prompt() {
-    let app = build_router(Arc::new(StubRunner {
-        response: sample_run_response("unused"),
-        inspect_response: sample_inspect_response(),
-        collect_response: sample_collect_response(),
-        thread_start_response: sample_thread_start_response(),
-        thread_read_response: sample_thread_read_response(),
-        thread_resume_response: sample_thread_resume_response(),
-        turn_start_response: sample_turn_start_response(),
-        thread_spawn_child_response: sample_thread_spawn_child_response(),
-        events_replay_response: sample_events_replay_response(),
-        calls: Mutex::new(vec![]),
-    }));
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/thread/spawn_child")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "parent_thread_id": "session_123",
-                        "agent_role": "spec",
-                        "prompt": "draft goals",
-                        "workspace_root": ".",
-                        "cwd": "ignored",
-                        "spawned_by_turn_id": "turn_1"
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn events_replay_route_returns_runtime_events() {
-    let app = build_router(Arc::new(StubRunner {
-        response: sample_run_response("unused"),
-        inspect_response: sample_inspect_response(),
-        collect_response: sample_collect_response(),
-        thread_start_response: sample_thread_start_response(),
-        thread_read_response: sample_thread_read_response(),
-        thread_resume_response: sample_thread_resume_response(),
-        turn_start_response: sample_turn_start_response(),
-        thread_spawn_child_response: sample_thread_spawn_child_response(),
-        events_replay_response: sample_events_replay_response(),
-        calls: Mutex::new(vec![]),
-    }));
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/events_replay")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "thread_id": "session_123",
-                        "workspace_root": "."
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    assert_eq!(
-        serde_json::from_slice::<Value>(&body).unwrap(),
-        json!({
-            "thread_id": "session_123",
-            "events": [{
-                "event_id": "evt_1",
-                "session_id": "session_123",
-                "turn_id": "turn_1",
-                "kind": {
-                    "type": "assistant_turn",
-                    "turn": {
-                        "text": "turn complete",
-                        "tool_calls": []
-                    }
-                }
-            }]
         })
     );
 }
@@ -1552,7 +1468,7 @@ async fn events_subscribe_route_maps_missing_thread_errors_to_not_found() {
 }
 
 #[tokio::test]
-async fn events_replay_slash_route_returns_runtime_events() {
+async fn events_replay_route_returns_runtime_events() {
     let app = build_router(Arc::new(StubRunner {
         response: sample_run_response("unused"),
         inspect_response: sample_inspect_response(),
@@ -1585,6 +1501,25 @@ async fn events_replay_slash_route_returns_runtime_events() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({
+            "thread_id": "session_123",
+            "events": [{
+                "event_id": "evt_1",
+                "session_id": "session_123",
+                "turn_id": "turn_1",
+                "kind": {
+                    "type": "assistant_turn",
+                    "turn": {
+                        "text": "turn complete",
+                        "tool_calls": []
+                    }
+                }
+            }]
+        })
+    );
 }
 
 #[tokio::test]
@@ -1597,7 +1532,7 @@ async fn events_replay_route_maps_missing_thread_errors_to_not_found() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/events_replay")
+                .uri("/events/replay")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({

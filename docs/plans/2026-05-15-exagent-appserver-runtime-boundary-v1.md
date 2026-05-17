@@ -46,7 +46,7 @@
 - Test: `tests/api_server.rs`
 
 **Steps:**
-1. Write failing API tests for `/thread/start`, `/turn/start`, `/thread_spawn_child`, and `/events_replay`, and update adapter tests to verify route handlers call the boundary shape.
+1. Write failing API tests for `/thread/start`, `/turn/start`, `/thread/spawn_child`, and `/events/replay`, and update adapter tests to verify route handlers call the boundary shape.
 2. Run `cargo test --test api_server -- --nocapture` and confirm failures.
 3. Refactor API routes to call `AppServerService` through an adapter trait.
 4. Refactor CLI command handling to call `AppServerService` for run/resume/fork/inspect/collect.

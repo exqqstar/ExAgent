@@ -56,9 +56,7 @@ pub fn build_router(boundary: Arc<dyn AppServerBoundary>) -> Router {
         .route("/turn/interrupt", post(turn_interrupt))
         .route("/thread/op", post(thread_op))
         .route("/thread/spawn_child", post(thread_spawn_child))
-        .route("/thread_spawn_child", post(thread_spawn_child))
         .route("/events/replay", post(events_replay))
-        .route("/events_replay", post(events_replay))
         .route("/events/subscribe", post(events_subscribe))
         .with_state(ApiState { boundary })
 }

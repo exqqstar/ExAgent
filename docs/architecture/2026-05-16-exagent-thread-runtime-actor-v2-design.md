@@ -314,6 +314,28 @@ keeps that snapshot in memory while the thread is live. Disk remains the
 recovery and replay surface; normal turn execution should not reconstruct the
 agent state from disk for every user input. While a runtime is loaded,
 `thread/read` should prefer `ThreadRuntime::live_view()` over direct disk reads.
+The live event list exposed by that view is a bounded recent window; clients
+that need the complete timeline must use `events/replay`, which reads the full
+persisted `events.jsonl`.
+
+### Live Runtime Ownership Matrix
+
+The live turn path intentionally uses a half-delta contract. `Agent` is allowed
+to mutate the in-memory `SessionSnapshot` fields that are part of executing a
+turn, but `ThreadSession` remains the owner of persistence, event ids,
+broadcast, and client-visible state publication.
+
+| Component | Owns | Must Not Own |
+| --- | --- | --- |
+| `ThreadManager` | Runtime registry, start/resume/factory policy, app-server override resolution. | Agent execution, event streaming, active turn cancellation internals. |
+| `ThreadRuntime` | Mailbox handle, guarded user-turn submission, active-turn interrupt handle, live subscriptions. | `SessionSnapshot` mutation, event id assignment, event append. |
+| `ThreadRuntimeLoop` | Serial mailbox dispatch from `ThreadOp` to `ThreadSession`. | Agent execution details, durable transcript writes, protocol DTOs. |
+| `ThreadSession` | Live snapshot state, event id assignment, `events.jsonl` append, snapshot checkpoint, event broadcast, live read view, status updates. | CLI/HTTP protocol parsing, request-scoped config resolution. |
+| `Agent` | Turn execution and in-place mutation of `snapshot.conversation`, `snapshot.open_exec_sessions`, and `snapshot.pending_approvals`. | `RuntimeEvent` ids, event persistence, snapshot file writes, live broadcast, thread status. |
+
+This is the ExAgent equivalent of Codex's `Session::send_event` split:
+execution code may produce state changes, but the session object owns recording
+and delivery.
 
 The first implementation is intentionally small:
 
@@ -386,6 +408,11 @@ ThreadSession emits event
   -> append to events.jsonl
   -> broadcast to live subscribers
 ```
+
+Tools do not own live runtime event delivery. When a tool needs policy approval,
+it returns approval metadata; the live Agent path records
+`ApprovalRequested`/`ApprovalDecision` through `ThreadSession` so event ids,
+persistence, live broadcast, and `thread_read` publication stay on one path.
 
 Each persisted event must carry a stable event id or cursor. Live delivery is
 allowed to be best-effort, but replay must be able to recover from a known

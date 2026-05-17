@@ -282,7 +282,8 @@ Runtime Boundary V1 surface. The legacy runtime-control prototype has been
 removed so thread and turn lifecycle cannot enter through a competing runtime
 path.
 
-The legacy aliases `POST /thread_spawn_child` and `POST /events_replay` remain as compatibility routes, but new clients should use the slash form.
+The legacy aliases `POST /thread_spawn_child` and `POST /events_replay` are
+not part of the boundary surface. Clients must use the slash routes.
 
 The route shape can evolve, but the rule is stable: HTTP handlers translate JSON into protocol requests and delegate to the app-server boundary.
 

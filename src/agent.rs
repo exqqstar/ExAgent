@@ -142,7 +142,7 @@ impl Agent {
             crate::transcript::read_session_events(&self.config.workspace_root, session_id)?.len()
                 + 1;
 
-        self.run_session_snapshot(
+        self.run_legacy_session_snapshot(
             &mut snapshot,
             runtime_turn_id,
             turn_cwd,
@@ -203,7 +203,7 @@ impl Agent {
             crate::transcript::session_paths(&snapshot.workspace_root, &snapshot.session_id);
         let mut next_event_index =
             crate::transcript::read_json_lines::<RuntimeEvent>(&paths.events_path)?.len() + 1;
-        self.run_session_snapshot(
+        self.run_legacy_session_snapshot(
             &mut snapshot,
             runtime_turn_id,
             turn_cwd,
@@ -244,6 +244,7 @@ impl Agent {
             turn_id: None,
             exec_sessions: self.exec_sessions.clone(),
             policy: self.policy.clone(),
+            defer_policy_events: true,
         };
         for _ in 0..self.config.max_turns {
             let turn = self
@@ -275,7 +276,7 @@ impl Agent {
                 ctx.turn_id = Some(runtime_turn_id.clone());
                 let result = self.registry.execute(call, Some(&ctx)).await;
                 apply_exec_session_update(snapshot, &result);
-                apply_pending_approval_update(snapshot, &result);
+                record_deferred_policy_event(snapshot, &result, &runtime_turn_id, sink)?;
 
                 let tool_message = ConversationMessage::tool(
                     result.tool_call_id.clone(),
@@ -300,7 +301,10 @@ impl Agent {
         ))
     }
 
-    async fn run_session_snapshot(
+    // Compatibility-only non-live execution path. The app-server/runtime path
+    // uses `run_live_session_snapshot`, where ThreadSession owns persistence,
+    // event ids, and broadcasting.
+    async fn run_legacy_session_snapshot(
         &self,
         snapshot: &mut SessionSnapshot,
         runtime_turn_id: Option<TurnId>,
@@ -325,6 +329,7 @@ impl Agent {
             turn_id: None,
             exec_sessions: self.exec_sessions.clone(),
             policy: self.policy.clone(),
+            defer_policy_events: false,
         };
         let mut next_turn_index = messages
             .iter()
@@ -376,7 +381,7 @@ impl Agent {
                 ctx.turn_id = Some(turn_id.clone());
                 let result = self.registry.execute(call, Some(&ctx)).await;
                 apply_exec_session_update(snapshot, &result);
-                apply_pending_approval_update(snapshot, &result);
+                apply_pending_approval_update(snapshot, &result, None);
                 let tool_event = RuntimeEvent {
                     event_id: EventId::new(format!("evt_{}", *next_event_index)),
                     session_id: session_id.clone(),
@@ -448,9 +453,80 @@ fn apply_exec_session_update(snapshot: &mut SessionSnapshot, result: &crate::typ
     });
 }
 
+fn record_deferred_policy_event(
+    snapshot: &mut SessionSnapshot,
+    result: &crate::types::ToolResult,
+    turn_id: &TurnId,
+    sink: &mut dyn LiveEventSink,
+) -> Result<()> {
+    let Some(meta) = result.meta.as_ref() else {
+        return Ok(());
+    };
+    let Some(approval_id) = meta.get("approval_id").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    let Some(approval_status) = meta
+        .get("approval_status")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(());
+    };
+
+    let approval_id = ApprovalId::new(approval_id);
+    match approval_status {
+        "pending" => {
+            let event_id = sink.reserve_event_id();
+            apply_pending_approval_update(snapshot, result, Some(event_id.clone()));
+            let reason = meta
+                .get("approval_reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("approval required")
+                .to_string();
+            sink.record_reserved(
+                snapshot,
+                Some(turn_id),
+                event_id,
+                RuntimeEventKind::ApprovalRequested {
+                    approval_id,
+                    tool_name: result.tool_name.clone(),
+                    reason,
+                },
+            )?;
+        }
+        "approved" => {
+            apply_pending_approval_update(snapshot, result, None);
+            sink.record(
+                snapshot,
+                Some(turn_id),
+                RuntimeEventKind::ApprovalDecision {
+                    approval_id,
+                    status: ApprovalStatus::Approved,
+                    note: None,
+                },
+            )?;
+        }
+        "denied" => {
+            apply_pending_approval_update(snapshot, result, None);
+            sink.record(
+                snapshot,
+                Some(turn_id),
+                RuntimeEventKind::ApprovalDecision {
+                    approval_id,
+                    status: ApprovalStatus::Denied,
+                    note: None,
+                },
+            )?;
+        }
+        _ => return Ok(()),
+    }
+
+    Ok(())
+}
+
 fn apply_pending_approval_update(
     snapshot: &mut SessionSnapshot,
     result: &crate::types::ToolResult,
+    requested_event_id: Option<EventId>,
 ) {
     let Some(meta) = result.meta.as_ref() else {
         return;
@@ -474,10 +550,12 @@ fn apply_pending_approval_update(
         return;
     }
 
-    let requested_event_id = meta
-        .get("approval_event_id")
-        .and_then(serde_json::Value::as_str)
-        .map(EventId::new)
+    let requested_event_id = requested_event_id
+        .or_else(|| {
+            meta.get("approval_event_id")
+                .and_then(serde_json::Value::as_str)
+                .map(EventId::new)
+        })
         .unwrap_or_else(|| EventId::new("approval_evt_unknown"));
     let reason = meta
         .get("approval_reason")

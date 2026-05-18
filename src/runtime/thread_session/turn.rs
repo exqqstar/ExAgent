@@ -1,14 +1,20 @@
-use anyhow::Result;
+use std::path::PathBuf;
 
-use super::{RuntimeInterrupt, ThreadSession};
-use crate::agent::AgentRunOutput;
+use anyhow::{anyhow, Result};
+
+use super::{LiveEventSink, RuntimeInterrupt, ThreadEventRecorder, ThreadSession};
+use crate::agent::Agent;
 use crate::events::RuntimeEventKind;
 use crate::runtime::thread_runtime::{
     ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus, ThreadTurnContext,
 };
-use crate::types::{ConversationMessage, TurnId};
-// LiveEventSink not imported directly; the recorder field implements it and is
-// passed by trait object to Agent::run_live_turn.
+use crate::runtime::tool_call_runtime::{
+    ApprovalUpdate, ExecSessionUpdate, ToolEffect, ToolExecutionOutcome,
+};
+use crate::session::{
+    ApprovalStatus, ExecSessionRef, ExecSessionStatus, PendingApproval, SessionSnapshot,
+};
+use crate::types::{AssistantTurn, ConversationMessage, TurnId};
 
 impl ThreadSession {
     pub(crate) async fn handle_user_input(
@@ -58,9 +64,9 @@ impl ThreadSession {
         let final_turn = if let Some(interrupt) = interrupt {
             let runtime_turn_id = turn_id.clone();
             tokio::select! {
-                result = agent.run_live_turn(&mut snapshot, runtime_turn_id, turn_cwd, recorder) => {
+                result = run_session_turn(agent, recorder, &mut snapshot, runtime_turn_id, turn_cwd) => {
                     match result {
-                        Ok(output) => output.final_turn,
+                        Ok(turn) => turn,
                         Err(err) => {
                             let message = err.to_string();
                             self.append_and_broadcast_snapshot(
@@ -86,11 +92,9 @@ impl ThreadSession {
                 }
             }
         } else {
-            match agent
-                .run_live_turn(&mut snapshot, turn_id.clone(), turn_cwd, recorder)
-                .await
+            match run_session_turn(agent, recorder, &mut snapshot, turn_id.clone(), turn_cwd).await
             {
-                Ok(output) => output.final_turn,
+                Ok(turn) => turn,
                 Err(err) => {
                     let message = err.to_string();
                     self.append_and_broadcast_snapshot(
@@ -109,36 +113,257 @@ impl ThreadSession {
             RuntimeEventKind::TurnCompleted,
         )?;
 
-        let paths = crate::transcript::session_paths(&snapshot.workspace_root, &self.thread_id);
-        let output = AgentRunOutput {
+        Ok(ThreadOpResult::UserInput {
+            turn_id,
             final_turn,
-            session_id: self.thread_id.clone(),
-            snapshot_path: paths.snapshot_path,
-            events_path: paths.events_path,
-            events: Vec::new(),
-        };
-
-        Ok(ThreadOpResult::UserInput { turn_id, output })
+        })
     }
+}
+
+async fn run_session_turn(
+    agent: &Agent,
+    recorder: &mut ThreadEventRecorder,
+    snapshot: &mut SessionSnapshot,
+    runtime_turn_id: TurnId,
+    turn_cwd: Option<PathBuf>,
+) -> Result<AssistantTurn> {
+    snapshot.normalize_lineage();
+    let cwd = turn_cwd.unwrap_or_else(|| snapshot.cwd.clone());
+    let tool_runtime = agent.tool_runtime(
+        snapshot.session_id.clone(),
+        runtime_turn_id.clone(),
+        snapshot.workspace_root.clone(),
+        cwd,
+    );
+
+    for _ in 0..agent.max_turns() {
+        let prompt = snapshot.conversation.clone();
+        let turn = agent
+            .sample_assistant_turn(&prompt, &tool_runtime.schemas())
+            .await?;
+        record_assistant_turn(recorder, snapshot, &runtime_turn_id, &turn)?;
+
+        if turn.tool_calls.is_empty() {
+            return Ok(turn);
+        }
+
+        for call in turn.tool_calls.clone() {
+            let outcome = tool_runtime.execute(call).await;
+            record_tool_outcome(recorder, snapshot, &runtime_turn_id, outcome)?;
+        }
+    }
+
+    Err(anyhow!(
+        "Agent reached max turns ({}) without a final assistant turn",
+        agent.max_turns()
+    ))
+}
+
+fn record_assistant_turn(
+    recorder: &mut ThreadEventRecorder,
+    snapshot: &mut SessionSnapshot,
+    turn_id: &TurnId,
+    turn: &AssistantTurn,
+) -> Result<()> {
+    if turn.text.is_some() || !turn.tool_calls.is_empty() {
+        snapshot.conversation.push(ConversationMessage::assistant(
+            turn.text.clone(),
+            turn.tool_calls.clone(),
+        ));
+    }
+    recorder.record(
+        snapshot,
+        Some(turn_id),
+        RuntimeEventKind::AssistantTurn { turn: turn.clone() },
+    )?;
+    Ok(())
+}
+
+fn record_tool_outcome(
+    recorder: &mut ThreadEventRecorder,
+    snapshot: &mut SessionSnapshot,
+    turn_id: &TurnId,
+    outcome: ToolExecutionOutcome,
+) -> Result<()> {
+    for effect in outcome.effects {
+        apply_tool_effect(recorder, snapshot, turn_id, effect)?;
+    }
+
+    let result = outcome.result;
+    snapshot.conversation.push(ConversationMessage::tool(
+        result.tool_call_id.clone(),
+        serde_json::to_string(&result)?,
+    ));
+    recorder.record(
+        snapshot,
+        Some(turn_id),
+        RuntimeEventKind::ToolResult {
+            result: result.clone(),
+        },
+    )?;
+    Ok(())
+}
+
+fn apply_tool_effect(
+    recorder: &mut ThreadEventRecorder,
+    snapshot: &mut SessionSnapshot,
+    turn_id: &TurnId,
+    effect: ToolEffect,
+) -> Result<()> {
+    match effect {
+        ToolEffect::ExecSessionUpdate(update) => {
+            apply_exec_session_update(snapshot, update);
+            Ok(())
+        }
+        ToolEffect::ApprovalUpdate(update) => {
+            apply_approval_update(recorder, snapshot, turn_id, update)
+        }
+    }
+}
+
+fn apply_exec_session_update(snapshot: &mut SessionSnapshot, update: ExecSessionUpdate) {
+    let exec_session_id = match &update {
+        ExecSessionUpdate::Running {
+            exec_session_id, ..
+        }
+        | ExecSessionUpdate::NotRunning { exec_session_id } => exec_session_id.clone(),
+    };
+    snapshot
+        .open_exec_sessions
+        .retain(|entry| entry.exec_session_id != exec_session_id);
+
+    if let ExecSessionUpdate::Running {
+        exec_session_id,
+        command,
+        cwd,
+    } = update
+    {
+        snapshot.open_exec_sessions.push(ExecSessionRef {
+            exec_session_id,
+            command,
+            cwd,
+            status: ExecSessionStatus::Running,
+        });
+    }
+}
+
+fn apply_approval_update(
+    recorder: &mut ThreadEventRecorder,
+    snapshot: &mut SessionSnapshot,
+    turn_id: &TurnId,
+    update: ApprovalUpdate,
+) -> Result<()> {
+    let approval_id = match &update {
+        ApprovalUpdate::Requested { approval_id, .. }
+        | ApprovalUpdate::Approved { approval_id }
+        | ApprovalUpdate::Denied { approval_id } => approval_id.clone(),
+    };
+    snapshot
+        .pending_approvals
+        .retain(|entry| entry.approval_id != approval_id);
+
+    match update {
+        ApprovalUpdate::Requested {
+            approval_id,
+            tool_name,
+            reason,
+        } => {
+            let event_id = recorder.reserve_event_id();
+            snapshot.pending_approvals.push(PendingApproval {
+                approval_id: approval_id.clone(),
+                requested_event_id: event_id.clone(),
+                tool_name: tool_name.clone(),
+                reason: reason.clone(),
+                status: ApprovalStatus::Pending,
+            });
+            recorder.record_reserved(
+                snapshot,
+                Some(turn_id),
+                event_id,
+                RuntimeEventKind::ApprovalRequested {
+                    approval_id,
+                    tool_name,
+                    reason,
+                },
+            )?;
+        }
+        ApprovalUpdate::Approved { approval_id } => {
+            recorder.record(
+                snapshot,
+                Some(turn_id),
+                RuntimeEventKind::ApprovalDecision {
+                    approval_id,
+                    status: ApprovalStatus::Approved,
+                    note: None,
+                },
+            )?;
+        }
+        ApprovalUpdate::Denied { approval_id } => {
+            recorder.record(
+                snapshot,
+                Some(turn_id),
+                RuntimeEventKind::ApprovalDecision {
+                    approval_id,
+                    status: ApprovalStatus::Denied,
+                    note: None,
+                },
+            )?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use anyhow::Result;
+    use async_trait::async_trait;
     use tempfile::tempdir;
+    use tokio::sync::Mutex as AsyncMutex;
 
     use crate::agent::Agent;
     use crate::config::AgentConfig;
-    use crate::events::{RuntimeEvent, RuntimeEventKind};
-    use crate::llm::MockLlm;
+    use crate::events::RuntimeEventKind;
+    use crate::llm::{LlmClient, MockLlm};
     use crate::registry::ToolRegistry;
     use crate::runtime::thread_runtime::{AgentFactory, ThreadOpResult};
-    use crate::runtime::thread_session::{LiveEventSink, ThreadSession, ThreadSessionOptions};
+    use crate::runtime::thread_session::{ThreadSession, ThreadSessionOptions};
     use crate::session::SessionSnapshot;
-    use crate::types::{AssistantTurn, ConversationMessage, EventId, SessionId, ToolCall, TurnId};
+    use crate::types::{AssistantTurn, ConversationMessage, SessionId, ToolCall, TurnId};
+
+    struct RecordingLlm {
+        turns: AsyncMutex<VecDeque<AssistantTurn>>,
+        prompt_lens: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl RecordingLlm {
+        fn new(turns: Vec<AssistantTurn>, prompt_lens: Arc<Mutex<Vec<usize>>>) -> Self {
+            Self {
+                turns: AsyncMutex::new(turns.into()),
+                prompt_lens,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for RecordingLlm {
+        async fn complete(
+            &self,
+            messages: &[ConversationMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<AssistantTurn> {
+            self.prompt_lens.lock().unwrap().push(messages.len());
+            self.turns
+                .lock()
+                .await
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("RecordingLlm is out of scripted turns"))
+        }
+    }
 
     #[tokio::test]
     async fn thread_session_handles_user_input_and_records_turn_lifecycle() {
@@ -180,13 +405,10 @@ mod tests {
             .await
             .expect("run turn");
 
-        let ThreadOpResult::UserInput { output, .. } = result else {
+        let ThreadOpResult::UserInput { final_turn, .. } = result else {
             panic!("expected user input result");
         };
-        assert_eq!(
-            output.final_turn.text.as_deref(),
-            Some("session turn complete")
-        );
+        assert_eq!(final_turn.text.as_deref(), Some("session turn complete"));
 
         let replay = crate::transcript::read_session_events(&config.workspace_root, &thread_id)
             .expect("read events");
@@ -252,25 +474,25 @@ mod tests {
             .expect("second turn");
 
         let ThreadOpResult::UserInput {
-            output: first_output,
+            final_turn: first_final_turn,
             ..
         } = first
         else {
             panic!("expected first user input result");
         };
         let ThreadOpResult::UserInput {
-            output: second_output,
+            final_turn: second_final_turn,
             ..
         } = second
         else {
             panic!("expected second user input result");
         };
         assert_eq!(
-            first_output.final_turn.text.as_deref(),
+            first_final_turn.text.as_deref(),
             Some("first turn complete")
         );
         assert_eq!(
-            second_output.final_turn.text.as_deref(),
+            second_final_turn.text.as_deref(),
             Some("second turn complete")
         );
         assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
@@ -293,119 +515,141 @@ mod tests {
         );
     }
 
-    /// Verifies the F2 streaming contract: Agent calls the sink once per
-    /// produced event (not batched at end of turn), and the snapshot passed
-    /// to each record() call already reflects the message that produced that
-    /// event. This proves a mid-turn reader of the live state would observe
-    /// monotonically growing conversation history paired with event records.
     #[tokio::test]
-    async fn agent_streams_events_through_live_event_sink_paired_with_snapshot() {
-        struct CapturingSink {
-            event_kinds: Vec<RuntimeEventKind>,
-            conversation_lens_at_record: Vec<usize>,
-            thread_id: SessionId,
-            next_id: usize,
-        }
-
-        impl LiveEventSink for CapturingSink {
-            fn reserve_event_id(&mut self) -> EventId {
-                let event_id = EventId::new(format!("evt_capture_{}", self.next_id));
-                self.next_id += 1;
-                event_id
-            }
-
-            fn record_reserved(
-                &mut self,
-                snapshot: &SessionSnapshot,
-                turn_id: Option<&TurnId>,
-                event_id: EventId,
-                kind: RuntimeEventKind,
-            ) -> Result<RuntimeEvent> {
-                self.conversation_lens_at_record
-                    .push(snapshot.conversation.len());
-                self.event_kinds.push(kind.clone());
-                let event = RuntimeEvent {
-                    event_id,
-                    session_id: self.thread_id.clone(),
-                    turn_id: turn_id.cloned(),
-                    kind,
-                };
-                Ok(event)
-            }
-        }
-
+    async fn thread_session_next_sampling_uses_committed_history() {
         let dir = tempdir().unwrap();
-        let thread_id = SessionId::new("session_streaming_capture");
+        let thread_id = SessionId::new("session_thread_session_committed_history");
+        let turn_id = TurnId::new("turn_1");
         let config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         };
-
-        // Two-step turn: a tool call (which fails because no tool is
-        // registered, giving a deterministic ToolResult event) followed by a
-        // final assistant turn.
-        let llm = MockLlm::new(vec![
-            AssistantTurn {
-                text: None,
-                tool_calls: vec![ToolCall {
-                    id: "call_x".into(),
-                    name: "missing_tool".into(),
-                    arguments: serde_json::json!({}),
-                }],
-            },
-            AssistantTurn {
-                text: Some("done".into()),
-                tool_calls: vec![],
-            },
-        ]);
-
-        let agent = Agent::new(config.clone(), Box::new(llm), ToolRegistry::new());
-        let mut snapshot = SessionSnapshot::new_thread(
+        let snapshot = SessionSnapshot::new_thread(
             thread_id.clone(),
             config.workspace_root.clone(),
             config.cwd.clone(),
         );
-        snapshot
-            .conversation
-            .push(ConversationMessage::user("hi".to_string()));
-        let starting_len = snapshot.conversation.len();
+        let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
+        crate::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+        let prompt_lens = Arc::new(Mutex::new(Vec::new()));
+        let prompt_lens_for_llm = prompt_lens.clone();
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(RecordingLlm::new(
+                    vec![
+                        AssistantTurn {
+                            text: None,
+                            tool_calls: vec![ToolCall {
+                                id: "call_missing".into(),
+                                name: "missing_tool".into(),
+                                arguments: serde_json::json!({}),
+                            }],
+                        },
+                        AssistantTurn {
+                            text: Some("done".into()),
+                            tool_calls: vec![],
+                        },
+                    ],
+                    prompt_lens_for_llm.clone(),
+                )),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config,
+            agent_factory,
+        ))
+        .expect("create thread session");
 
-        let mut sink = CapturingSink {
-            event_kinds: Vec::new(),
-            conversation_lens_at_record: Vec::new(),
-            thread_id: thread_id.clone(),
-            next_id: 1,
+        session
+            .handle_user_input(turn_id, "use a tool".into(), None, None)
+            .await
+            .expect("run turn");
+
+        assert_eq!(*prompt_lens.lock().unwrap(), vec![1, 3]);
+    }
+
+    /// Verifies the F2 streaming contract at the ThreadSession boundary:
+    /// assistant/tool events are recorded one step at a time, and the final
+    /// snapshot contains the conversation items that produced those events.
+    #[tokio::test]
+    async fn thread_session_streams_events_paired_with_snapshot() {
+        let dir = tempdir().unwrap();
+        let thread_id = SessionId::new("session_streaming_capture");
+        let turn_id = TurnId::new("turn_1");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        let snapshot = SessionSnapshot::new_thread(
+            thread_id.clone(),
+            config.workspace_root.clone(),
+            config.cwd.clone(),
+        );
+        let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
+        crate::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(MockLlm::new(vec![
+                    AssistantTurn {
+                        text: None,
+                        tool_calls: vec![ToolCall {
+                            id: "call_x".into(),
+                            name: "missing_tool".into(),
+                            arguments: serde_json::json!({}),
+                        }],
+                    },
+                    AssistantTurn {
+                        text: Some("done".into()),
+                        tool_calls: vec![],
+                    },
+                ])),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config.clone(),
+            agent_factory,
+        ))
+        .expect("create thread session");
+
+        let result = session
+            .handle_user_input(turn_id.clone(), "hi".into(), None, None)
+            .await
+            .expect("session should complete the two-step turn");
+        let ThreadOpResult::UserInput { final_turn, .. } = result else {
+            panic!("expected user input result");
         };
 
-        let output = agent
-            .run_live_turn(&mut snapshot, TurnId::new("turn_1"), None, &mut sink)
-            .await
-            .expect("agent should complete the two-step turn");
-
-        assert_eq!(output.final_turn.text.as_deref(), Some("done"));
-        // Three sink.record() calls -- AssistantTurn (tool call),
-        // ToolResult (no-tool error), AssistantTurn (final). Proves events
-        // are recorded one at a time, not batched at end of turn.
-        assert_eq!(sink.event_kinds.len(), 3, "expected three streamed events");
+        assert_eq!(final_turn.text.as_deref(), Some("done"));
+        let replay = crate::transcript::read_session_events(&config.workspace_root, &thread_id)
+            .expect("read events");
+        assert_eq!(replay.len(), 5, "expected lifecycle plus three step events");
+        assert!(matches!(replay[0].kind, RuntimeEventKind::TurnStarted));
         assert!(matches!(
-            sink.event_kinds[0],
+            replay[1].kind,
             RuntimeEventKind::AssistantTurn { .. }
         ));
         assert!(matches!(
-            sink.event_kinds[1],
+            replay[2].kind,
             RuntimeEventKind::ToolResult { .. }
         ));
         assert!(matches!(
-            sink.event_kinds[2],
+            replay[3].kind,
             RuntimeEventKind::AssistantTurn { .. }
         ));
-        // Each record() saw a snapshot that already included that step's
-        // conversation push, and the conversation grew monotonically.
-        assert!(sink
-            .conversation_lens_at_record
-            .windows(2)
-            .all(|window| window[1] >= window[0]));
-        assert!(sink.conversation_lens_at_record[0] > starting_len);
+        assert!(matches!(replay[4].kind, RuntimeEventKind::TurnCompleted));
+
+        let snapshot = crate::transcript::read_session_snapshot(&config.workspace_root, &thread_id)
+            .expect("read snapshot");
+        assert_eq!(snapshot.conversation.len(), 4);
+        assert_eq!(snapshot.conversation[0].content, "hi");
+        assert_eq!(snapshot.conversation[3].content, "done");
     }
 }

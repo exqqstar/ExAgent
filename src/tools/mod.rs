@@ -1,12 +1,14 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::registry::ToolContext;
 use crate::types::{ToolCall, ToolResult};
 
 pub mod read_file;
+pub mod registry;
 pub mod run_command;
 pub mod write_file;
+
+use registry::ToolContext;
 
 #[async_trait]
 pub trait Tool: Send + Sync {

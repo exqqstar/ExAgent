@@ -81,7 +81,7 @@ Delete public Agent methods that execute outside `ThreadSession`:
 Keep:
 
 - constructors
-- `run_live_turn`
+- `legacy live-turn runner`
 - live execution helpers used by `ThreadSession`
 
 ### Task 5: Delete Legacy Orchestration And Structured Result Surface

@@ -147,13 +147,10 @@ async fn thread_runtime_runs_user_input_through_agent_and_records_turn_lifecycle
         .await
         .expect("run turn");
 
-    let ThreadOpResult::UserInput { output, .. } = result else {
+    let ThreadOpResult::UserInput { final_turn, .. } = result else {
         panic!("expected user input result");
     };
-    assert_eq!(
-        output.final_turn.text.as_deref(),
-        Some("runtime turn complete")
-    );
+    assert_eq!(final_turn.text.as_deref(), Some("runtime turn complete"));
 
     let replay = exagent::transcript::read_session_events(&config.workspace_root, &thread_id)
         .expect("read events");

@@ -1,12 +1,12 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::broadcast;
 
-use crate::agent::{Agent, AgentRunOutput};
+use crate::agent::Agent;
 use crate::app_server::override_policy::{OverridePolicy, RuntimeOverrides};
 use crate::app_server::protocol::{
     AgentRunResponse, BoundaryCapability, BoundaryOp, BoundaryOpResponse, EventsReplayParams,
@@ -29,7 +29,7 @@ use crate::runtime::thread_runtime::{
     ThreadTurnContext,
 };
 use crate::session::SessionSnapshot;
-use crate::types::{SessionId, TurnId};
+use crate::types::{AssistantTurn, SessionId, TurnId};
 
 type RegistryFactory = Arc<dyn Fn() -> ToolRegistry + Send + Sync>;
 
@@ -90,13 +90,14 @@ pub struct NewThread {
     pub events_path: PathBuf,
 }
 
-struct TurnStartRun {
-    output: AgentRunOutput,
-}
-
 struct TurnStartStarted {
     thread_id: SessionId,
     turn_id: TurnId,
+}
+
+struct LoadedRuntime {
+    runtime: Arc<ThreadRuntime>,
+    workspace_root: PathBuf,
 }
 
 pub struct ThreadManager {
@@ -219,30 +220,34 @@ impl ThreadManager {
     }
 
     pub fn thread_read(&self, params: ThreadReadParams) -> Result<ThreadReadResponse> {
+        let requested_workspace_root = params.workspace_root.clone();
         let config = OverridePolicy::merge_thread_read(&self.base_config, params.workspace_root)?;
-        self.thread_read_resolved(params.thread_id, &config.workspace_root)
+        self.thread_read_resolved(
+            params.thread_id,
+            requested_workspace_root.is_some(),
+            &config.workspace_root,
+        )
     }
 
     fn thread_read_resolved(
         &self,
         thread_id: SessionId,
-        workspace_root: &std::path::Path,
+        requested_workspace_root: bool,
+        workspace_root: &Path,
     ) -> Result<ThreadReadResponse> {
-        if let Some(runtime) = self.runtime_for(&thread_id) {
+        if let Some(loaded) =
+            self.resolve_loaded_runtime(&thread_id, requested_workspace_root, workspace_root)?
+        {
+            let runtime = loaded.runtime;
             let live_view = runtime.live_view();
-            if live_view.snapshot.workspace_root == workspace_root {
-                let paths = crate::transcript::session_paths(
-                    &live_view.snapshot.workspace_root,
-                    &thread_id,
-                );
-                return Ok(self.thread_read_from_snapshot_events(
-                    thread_id,
-                    live_view.snapshot,
-                    live_view.events,
-                    paths.snapshot_path,
-                    paths.events_path,
-                ));
-            }
+            let paths = crate::transcript::session_paths(&loaded.workspace_root, &thread_id);
+            return Ok(self.thread_read_from_snapshot_events(
+                thread_id,
+                live_view.snapshot,
+                live_view.events,
+                paths.snapshot_path,
+                paths.events_path,
+            ));
         }
 
         let paths = crate::transcript::session_paths(workspace_root, &thread_id);
@@ -302,15 +307,30 @@ impl ThreadManager {
 
     pub fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse> {
         let ignored_overrides = ignored_resume_overrides(&params);
+        let requested_workspace_root = params.workspace_root.clone();
+        let requested_workspace_root = requested_workspace_root.is_some();
         let config = OverridePolicy::merge_thread_resume(&self.base_config, params.workspace_root)?;
         let workspace_root = config.workspace_root.clone();
+        if let Some(loaded) = self.resolve_loaded_runtime(
+            &params.thread_id,
+            requested_workspace_root,
+            &workspace_root,
+        )? {
+            let thread =
+                self.thread_read_resolved(params.thread_id, false, &loaded.workspace_root)?;
+            return Ok(ThreadResumeResponse {
+                thread: thread.thread,
+                ignored_overrides,
+            });
+        }
+
         let new_thread = self.start_thread_with_options(StartThreadOptions {
             config,
             initial_history: InitialHistory::Resume {
                 thread_id: params.thread_id,
             },
         })?;
-        let thread = self.thread_read_resolved(new_thread.thread_id, &workspace_root)?;
+        let thread = self.thread_read_resolved(new_thread.thread_id, false, &workspace_root)?;
 
         Ok(ThreadResumeResponse {
             thread: thread.thread,
@@ -329,22 +349,24 @@ impl ThreadManager {
     }
 
     async fn turn_start_and_wait(&self, params: TurnStartParams) -> Result<AgentRunResponse> {
-        let TurnStartRun { output, .. } = self.run_turn_through_runtime(params).await?;
-        Ok(agent_run_response(output))
+        let (thread_id, workspace_root, final_turn) = self.run_turn_through_runtime(params).await?;
+        Ok(agent_run_response(thread_id, final_turn, &workspace_root))
     }
 
     pub async fn turn_interrupt(
         &self,
         params: TurnInterruptParams,
     ) -> Result<TurnInterruptResponse> {
+        let requested_workspace_root = params.workspace_root.clone();
+        let requested_workspace_root = requested_workspace_root.is_some();
         let config =
             OverridePolicy::merge_turn_start(&self.base_config, params.workspace_root.clone())?;
-        let paths = crate::transcript::session_paths(&config.workspace_root, &params.thread_id);
-        if !paths.snapshot_path.exists() {
-            return Err(AppServerError::ThreadNotFound(params.thread_id).into());
-        }
-
-        if let Some(runtime) = self.runtime_for(&params.thread_id) {
+        if let Some(loaded) = self.resolve_loaded_runtime(
+            &params.thread_id,
+            requested_workspace_root,
+            &config.workspace_root,
+        )? {
+            let runtime = loaded.runtime;
             if runtime.active_turn_id().is_some() {
                 let turn_id = runtime
                     .interrupt_active_turn(params.turn_id.as_ref())
@@ -370,6 +392,12 @@ impl ThreadManager {
                 }),
             });
         }
+
+        let paths = crate::transcript::session_paths(&config.workspace_root, &params.thread_id);
+        if !paths.snapshot_path.exists() {
+            return Err(AppServerError::ThreadNotFound(params.thread_id).into());
+        }
+
         self.interrupt_waiting_approval_turn(params, &config.workspace_root)
             .await
     }
@@ -454,14 +482,20 @@ impl ThreadManager {
         })
     }
 
-    async fn run_turn_through_runtime(&self, params: TurnStartParams) -> Result<TurnStartRun> {
+    async fn run_turn_through_runtime(
+        &self,
+        params: TurnStartParams,
+    ) -> Result<(SessionId, PathBuf, AssistantTurn)> {
+        let requested_workspace_root = params.workspace_root.clone();
+        let requested_workspace_root = requested_workspace_root.is_some();
         let config = OverridePolicy::merge_turn_start(&self.base_config, params.workspace_root)?;
         let thread_id = params.thread_id;
-        let runtime = self.ensure_runtime_loaded(&thread_id, config)?;
+        let runtime = self.ensure_runtime_loaded(&thread_id, config, requested_workspace_root)?;
         let turn_id = runtime.next_turn_id();
+        let live_view = runtime.live_view();
+        let runtime_workspace_root = live_view.snapshot.workspace_root.clone();
         let turn_cwd = if let Some(turn_context) = params.turn_context {
-            let snapshot = runtime.live_view().snapshot;
-            let snapshot = OverridePolicy::apply_turn_context(&snapshot, turn_context)?;
+            let snapshot = OverridePolicy::apply_turn_context(&live_view.snapshot, turn_context)?;
             Some(snapshot.cwd)
         } else {
             None
@@ -475,24 +509,26 @@ impl ThreadManager {
             )
             .await
             .map_err(map_thread_runtime_error)?;
-        let ThreadOpResult::UserInput { output, .. } = result else {
+        let ThreadOpResult::UserInput { final_turn, .. } = result else {
             return Err(AppServerError::InvalidRequest(
                 "turn_start returned non-user-input runtime result".into(),
             )
             .into());
         };
 
-        Ok(TurnStartRun { output })
+        Ok((thread_id, runtime_workspace_root, final_turn))
     }
 
     async fn start_turn_in_background(&self, params: TurnStartParams) -> Result<TurnStartStarted> {
+        let requested_workspace_root = params.workspace_root.clone();
+        let requested_workspace_root = requested_workspace_root.is_some();
         let config = OverridePolicy::merge_turn_start(&self.base_config, params.workspace_root)?;
         let thread_id = params.thread_id;
-        let runtime = self.ensure_runtime_loaded(&thread_id, config)?;
+        let runtime = self.ensure_runtime_loaded(&thread_id, config, requested_workspace_root)?;
         let turn_id = runtime.next_turn_id();
+        let live_view = runtime.live_view();
         let turn_cwd = if let Some(turn_context) = params.turn_context {
-            let snapshot = runtime.live_view().snapshot;
-            let snapshot = OverridePolicy::apply_turn_context(&snapshot, turn_context)?;
+            let snapshot = OverridePolicy::apply_turn_context(&live_view.snapshot, turn_context)?;
             Some(snapshot.cwd)
         } else {
             None
@@ -538,21 +574,29 @@ impl ThreadManager {
     }
 
     pub fn events_replay(&self, params: EventsReplayParams) -> Result<EventsReplayResponse> {
+        let requested_workspace_root = params.workspace_root.clone();
+        let requested_workspace_root = requested_workspace_root.is_some();
         let config =
             OverridePolicy::merge_events_replay(&self.base_config, params.workspace_root.clone())?;
-        let paths = crate::transcript::session_paths(&config.workspace_root, &params.thread_id);
+        let workspace_root = self
+            .resolve_loaded_runtime(
+                &params.thread_id,
+                requested_workspace_root,
+                &config.workspace_root,
+            )?
+            .map(|loaded| loaded.workspace_root)
+            .unwrap_or_else(|| config.workspace_root.clone());
+        let paths = crate::transcript::session_paths(&workspace_root, &params.thread_id);
         if !paths.snapshot_path.exists() {
             return Err(AppServerError::ThreadNotFound(params.thread_id).into());
         }
         let events = filter_replay_events(
-            crate::transcript::replay_session(&config.workspace_root, &params.thread_id)?,
+            crate::transcript::replay_session(&workspace_root, &params.thread_id)?,
             &params,
         );
         let snapshot = if params.include_snapshot {
-            let snapshot = crate::transcript::read_session_snapshot(
-                &config.workspace_root,
-                &params.thread_id,
-            )?;
+            let snapshot =
+                crate::transcript::read_session_snapshot(&workspace_root, &params.thread_id)?;
             Some(replay_snapshot_view(snapshot))
         } else {
             None
@@ -569,13 +613,23 @@ impl ThreadManager {
         &self,
         params: EventsSubscribeParams,
     ) -> Result<broadcast::Receiver<RuntimeEvent>> {
+        let requested_workspace_root = params.workspace_root.clone();
+        let requested_workspace_root = requested_workspace_root.is_some();
         let config =
             OverridePolicy::merge_events_replay(&self.base_config, params.workspace_root.clone())?;
+        if let Some(loaded) = self.resolve_loaded_runtime(
+            &params.thread_id,
+            requested_workspace_root,
+            &config.workspace_root,
+        )? {
+            return Ok(loaded.runtime.subscribe_events());
+        }
         let paths = crate::transcript::session_paths(&config.workspace_root, &params.thread_id);
         if !paths.snapshot_path.exists() {
             return Err(AppServerError::ThreadNotFound(params.thread_id).into());
         }
-        let runtime = self.ensure_runtime_loaded(&params.thread_id, config)?;
+        let runtime =
+            self.ensure_runtime_loaded(&params.thread_id, config, requested_workspace_root)?;
         Ok(runtime.subscribe_events())
     }
 
@@ -608,7 +662,7 @@ impl ThreadManager {
                 );
                 let paths = crate::transcript::session_paths(&snapshot.workspace_root, &thread_id);
                 crate::transcript::write_json(&paths.snapshot_path, &snapshot)?;
-                let runtime = self.ensure_runtime_loaded(&thread_id, options.config)?;
+                let runtime = self.ensure_runtime_loaded(&thread_id, options.config, false)?;
 
                 Ok(NewThread {
                     thread_id,
@@ -623,7 +677,7 @@ impl ThreadManager {
                 if !paths.snapshot_path.exists() {
                     return Err(AppServerError::ThreadNotFound(thread_id).into());
                 }
-                let runtime = self.ensure_runtime_loaded(&thread_id, options.config)?;
+                let runtime = self.ensure_runtime_loaded(&thread_id, options.config, false)?;
 
                 Ok(NewThread {
                     thread_id,
@@ -639,9 +693,14 @@ impl ThreadManager {
         &self,
         thread_id: &SessionId,
         config: AgentConfig,
+        requested_workspace_root: bool,
     ) -> Result<Arc<ThreadRuntime>> {
-        if let Some(runtime) = self.runtime_for(thread_id) {
-            return Ok(runtime);
+        if let Some(loaded) = self.resolve_loaded_runtime(
+            thread_id,
+            requested_workspace_root,
+            &config.workspace_root,
+        )? {
+            return Ok(loaded.runtime);
         }
 
         let runtime = ThreadRuntime::spawn(
@@ -660,6 +719,29 @@ impl ThreadManager {
             .lock()
             .ok()
             .and_then(|loaded_threads| loaded_threads.get(thread_id.as_str()).cloned())
+    }
+
+    fn resolve_loaded_runtime(
+        &self,
+        thread_id: &SessionId,
+        requested_workspace_root: bool,
+        workspace_root: &Path,
+    ) -> Result<Option<LoadedRuntime>> {
+        let Some(runtime) = self.runtime_for(thread_id) else {
+            return Ok(None);
+        };
+        let live_workspace_root = runtime.live_view().snapshot.workspace_root;
+        if requested_workspace_root && live_workspace_root != workspace_root {
+            return Err(workspace_mismatch_error(
+                thread_id,
+                workspace_root,
+                &live_workspace_root,
+            ));
+        }
+        Ok(Some(LoadedRuntime {
+            runtime,
+            workspace_root: live_workspace_root,
+        }))
     }
 
     #[cfg(test)]
@@ -690,6 +772,20 @@ fn unexpected_boundary_response(operation: &str, response: &BoundaryOpResponse) 
         "{operation} returned unexpected {} response",
         boundary_response_name(response)
     ))
+}
+
+fn workspace_mismatch_error(
+    thread_id: &SessionId,
+    requested_workspace_root: &Path,
+    active_workspace_root: &Path,
+) -> anyhow::Error {
+    AppServerError::InvalidRequest(format!(
+        "thread {} belongs to workspace `{}`, but request targeted workspace `{}`",
+        thread_id.as_str(),
+        active_workspace_root.display(),
+        requested_workspace_root.display()
+    ))
+    .into()
 }
 
 fn boundary_response_name(response: &BoundaryOpResponse) -> &'static str {
@@ -953,13 +1049,18 @@ fn replay_snapshot_view(snapshot: SessionSnapshot) -> ReplaySnapshotView {
     }
 }
 
-fn agent_run_response(output: AgentRunOutput) -> AgentRunResponse {
+fn agent_run_response(
+    thread_id: SessionId,
+    final_turn: AssistantTurn,
+    workspace_root: &std::path::Path,
+) -> AgentRunResponse {
+    let paths = crate::transcript::session_paths(workspace_root, &thread_id);
     AgentRunResponse {
-        text: output.final_turn.text,
-        tool_calls: output.final_turn.tool_calls,
-        session_id: output.session_id,
-        snapshot_path: output.snapshot_path,
-        events_path: output.events_path,
+        text: final_turn.text,
+        tool_calls: final_turn.tool_calls,
+        session_id: thread_id,
+        snapshot_path: paths.snapshot_path,
+        events_path: paths.events_path,
     }
 }
 
@@ -1024,5 +1125,141 @@ mod tests {
         assert_eq!(resumed.thread.id, started.thread.id);
         let resumed_runtime = manager.runtime_for(&started.thread.id).unwrap();
         assert!(Arc::ptr_eq(&started_runtime, &resumed_runtime));
+    }
+
+    #[test]
+    fn thread_resume_uses_loaded_runtime_workspace_when_request_omits_workspace_root() {
+        let base_dir = tempdir().unwrap();
+        let thread_dir = tempdir().unwrap();
+        let base_root = std::fs::canonicalize(base_dir.path()).unwrap();
+        let thread_root = std::fs::canonicalize(thread_dir.path()).unwrap();
+        let manager = ThreadManager::with_llm(
+            AgentConfig {
+                workspace_root: base_root.clone(),
+                cwd: base_root,
+                ..AgentConfig::default()
+            },
+            Box::new(MockLlm::new(vec![])),
+            || ToolRegistry::new(),
+        );
+
+        let started = manager
+            .thread_start(ThreadStartParams {
+                workspace_root: Some(thread_root.display().to_string()),
+                cwd: None,
+            })
+            .expect("thread start");
+        let resumed = manager
+            .thread_resume(ThreadResumeParams {
+                thread_id: started.thread.id.clone(),
+                workspace_root: None,
+                cwd: None,
+            })
+            .expect("thread resume");
+
+        assert_eq!(resumed.thread.id, started.thread.id);
+        assert!(resumed.thread.snapshot_path.starts_with(&thread_root));
+    }
+
+    #[test]
+    fn thread_resume_rejects_loaded_runtime_workspace_mismatch() {
+        let thread_dir = tempdir().unwrap();
+        let other_dir = tempdir().unwrap();
+        let thread_root = std::fs::canonicalize(thread_dir.path()).unwrap();
+        let other_root = std::fs::canonicalize(other_dir.path()).unwrap();
+        let manager = ThreadManager::with_llm(
+            AgentConfig::default(),
+            Box::new(MockLlm::new(vec![])),
+            || ToolRegistry::new(),
+        );
+
+        let started = manager
+            .thread_start(ThreadStartParams {
+                workspace_root: Some(thread_root.display().to_string()),
+                cwd: None,
+            })
+            .expect("thread start");
+        let err = manager
+            .thread_resume(ThreadResumeParams {
+                thread_id: started.thread.id.clone(),
+                workspace_root: Some(other_root.display().to_string()),
+                cwd: None,
+            })
+            .expect_err("workspace mismatch must be rejected");
+
+        assert!(err.to_string().contains("belongs to workspace"));
+    }
+
+    #[tokio::test]
+    async fn run_turn_uses_loaded_runtime_workspace_when_request_omits_workspace_root() {
+        let base_dir = tempdir().unwrap();
+        let thread_dir = tempdir().unwrap();
+        let base_root = std::fs::canonicalize(base_dir.path()).unwrap();
+        let thread_root = std::fs::canonicalize(thread_dir.path()).unwrap();
+        let manager = ThreadManager::with_llm(
+            AgentConfig {
+                workspace_root: base_root.clone(),
+                cwd: base_root.clone(),
+                ..AgentConfig::default()
+            },
+            Box::new(MockLlm::new(vec![AssistantTurn {
+                text: Some("done in loaded workspace".into()),
+                tool_calls: vec![],
+            }])),
+            || ToolRegistry::new(),
+        );
+
+        let started = manager
+            .thread_start(ThreadStartParams {
+                workspace_root: Some(thread_root.display().to_string()),
+                cwd: None,
+            })
+            .expect("thread start");
+        let (thread_id, workspace_root, final_turn) = manager
+            .run_turn_through_runtime(TurnStartParams {
+                thread_id: started.thread.id.clone(),
+                prompt: "continue".into(),
+                workspace_root: None,
+                turn_context: None,
+            })
+            .await
+            .expect("turn");
+        let response = agent_run_response(thread_id, final_turn, &workspace_root);
+
+        assert_eq!(workspace_root, thread_root);
+        assert!(response.snapshot_path.starts_with(&thread_root));
+        assert!(!response.snapshot_path.starts_with(&base_root));
+        assert_eq!(response.text.as_deref(), Some("done in loaded workspace"));
+    }
+
+    #[tokio::test]
+    async fn run_turn_rejects_loaded_runtime_workspace_mismatch() {
+        let thread_dir = tempdir().unwrap();
+        let other_dir = tempdir().unwrap();
+        let thread_root = std::fs::canonicalize(thread_dir.path()).unwrap();
+        let other_root = std::fs::canonicalize(other_dir.path()).unwrap();
+        let manager = ThreadManager::with_llm(
+            AgentConfig::default(),
+            Box::new(MockLlm::new(vec![])),
+            || ToolRegistry::new(),
+        );
+
+        let started = manager
+            .thread_start(ThreadStartParams {
+                workspace_root: Some(thread_root.display().to_string()),
+                cwd: None,
+            })
+            .expect("thread start");
+        let err = manager
+            .run_turn_through_runtime(TurnStartParams {
+                thread_id: started.thread.id,
+                prompt: "continue".into(),
+                workspace_root: Some(other_root.display().to_string()),
+                turn_context: None,
+            })
+            .await
+            .expect_err("workspace mismatch must be rejected");
+
+        assert!(err.to_string().contains("belongs to workspace"));
     }
 }

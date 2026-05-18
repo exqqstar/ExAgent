@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use std::future::Future;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 
-use crate::agent::{Agent, AgentRunOutput};
+use crate::agent::Agent;
 use crate::config::AgentConfig;
 use crate::events::RuntimeEvent;
 use crate::policy::PolicyManager;
@@ -13,7 +13,7 @@ use crate::runtime::thread_session::{
     RuntimeInterrupt, ThreadSession, ThreadSessionLiveState, ThreadSessionLiveView,
     ThreadSessionOptions,
 };
-use crate::types::{SessionId, TurnId};
+use crate::types::{AssistantTurn, SessionId, TurnId};
 
 const THREAD_OP_CHANNEL_CAPACITY: usize = 64;
 const THREAD_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -66,7 +66,7 @@ pub enum ThreadOp {
 pub enum ThreadOpResult {
     UserInput {
         turn_id: TurnId,
-        output: AgentRunOutput,
+        final_turn: AssistantTurn,
     },
     Interrupted {
         turn_id: TurnId,

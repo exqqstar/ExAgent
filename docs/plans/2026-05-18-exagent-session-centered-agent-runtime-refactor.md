@@ -427,7 +427,7 @@ Approval approved/denied records `ApprovalDecision`.
 Replace:
 
 ```rust
-agent.legacy live-turn runner(&mut snapshot, turn_id.clone(), turn_cwd, recorder)
+agent.run_legacy_live_turn(&mut snapshot, turn_id.clone(), turn_cwd, recorder)
 ```
 
 with:

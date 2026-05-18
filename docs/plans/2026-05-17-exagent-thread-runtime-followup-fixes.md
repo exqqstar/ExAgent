@@ -135,7 +135,7 @@ During `ThreadSession::handle_user_input`, the visible sequence is:
 ```text
 1. snapshot.conversation.push(user_message)
 2. checkpoint_snapshot()              -- live_state.snapshot now includes user msg
-3. agent.legacy live-turn runner(&mut snapshot, ...)
+3. agent.run_legacy_live_turn(&mut snapshot, ...)
      - LLM call (seconds)
      - tool call (seconds)
      - LLM call again
@@ -193,7 +193,7 @@ pub trait LiveEventSink: Send {
 }
 
 impl Agent {
-    pub(crate) async fn legacy live-turn runner<S: LiveEventSink>(
+    pub(crate) async fn run_legacy_live_turn<S: LiveEventSink>(
         &self,
         snapshot: &mut SessionSnapshot,
         turn_id: TurnId,
@@ -217,7 +217,7 @@ drains it concurrently with the turn future:
 
 ```rust
 let (event_tx, mut event_rx) = mpsc::channel(64);
-let turn_future = self.agent.legacy live-turn runner(&mut self.snapshot, ..., event_tx);
+let turn_future = self.agent.run_legacy_live_turn(&mut self.snapshot, ..., event_tx);
 tokio::select! {
     result = turn_future => { ... }
     Some(kind) = event_rx.recv() => self.append_and_broadcast(...)

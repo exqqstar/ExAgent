@@ -31,7 +31,7 @@ ThreadRuntime::spawn
   -> creates ThreadSession once
   -> ThreadRuntimeLoop owns it
   -> turn_start submits ThreadOp::UserInput
-  -> ThreadSession calls Agent::run_live_turn(&mut snapshot, ...)
+  -> ThreadSession calls legacy Agent live-turn runner(&mut snapshot, ...)
 ```
 
 That gives us a long-lived session object, but the responsibilities are still split incorrectly. `ThreadSession` owns `SessionSnapshot`, yet `Agent` still writes the snapshot and appends assistant/tool events. `ThreadSession` writes lifecycle events and broadcasts. `thread_read` still reads snapshot/events from disk, even when a runtime is loaded.
@@ -64,7 +64,7 @@ AppServerService / AppServerBoundary
   -> ThreadSession::new(...)
   -> ThreadRuntimeLoop owns ThreadSession
   -> ThreadSession::handle_user_input(...)
-  -> Agent::run_live_turn(&mut SessionSnapshot, ...)
+  -> legacy Agent live-turn runner(&mut SessionSnapshot, ...)
 ```
 
 Important files:
@@ -427,7 +427,7 @@ The exact name can change, but the contract must be clear: no assigned event IDs
 
 **Step 2: Split live execution from persistence**
 
-Keep existing non-live `run`, `resume`, and fork APIs working. For the live path, replace `run_live_turn` with a method that accepts mutable snapshot state and returns deltas without calling:
+Keep existing non-live `run`, `resume`, and fork APIs working. For the live path, replace `legacy live-turn runner` with a method that accepts mutable snapshot state and returns deltas without calling:
 
 - `crate::transcript::append_json_line`
 - `crate::transcript::append_runtime_event`

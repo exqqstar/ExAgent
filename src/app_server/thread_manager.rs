@@ -325,8 +325,7 @@ impl ThreadManager {
     }
 
     async fn turn_start_and_wait(&self, params: TurnStartParams) -> Result<AgentRunResponse> {
-        let (thread_id, workspace_root, final_turn) =
-            self.run_turn_through_runtime(params).await?;
+        let (thread_id, workspace_root, final_turn) = self.run_turn_through_runtime(params).await?;
         Ok(agent_run_response(thread_id, final_turn, &workspace_root))
     }
 

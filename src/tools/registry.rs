@@ -19,6 +19,7 @@ pub struct ToolContext {
     pub defer_policy_events: bool,
 }
 
+#[derive(Clone)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
 }

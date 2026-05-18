@@ -33,7 +33,7 @@ and live read publication.
 ```
 
 Fix: live `ToolContext` should defer approval event recording. `run_command`
-returns policy metadata only; `Agent::run_live_turn` records approval events
+returns policy metadata only; `legacy Agent live-turn runner` records approval events
 through the live `LiveEventSink`.
 
 ### P2: Bounded Live Event Buffer Changes thread_read Semantics

@@ -37,7 +37,8 @@ flowchart TB
     Manager["ThreadManager"]
     Runtime["ThreadRuntime"]
     Session["ThreadSession"]
-    Agent["Agent::run_live_turn(...)"]
+    Agent["Agent sampling"]
+    ToolRuntime["ToolCallRuntime"]
     Registry["ToolRegistry"]
     Tools["read_file / write_file / run_command"]
     Snapshot["snapshot.json"]
@@ -49,8 +50,9 @@ flowchart TB
     Manager --> Runtime
     Runtime --> Session
     Session --> Agent
+    Session --> ToolRuntime
+    ToolRuntime --> Registry
     Registry --> Tools
-    Agent --> Registry
     Session --> Snapshot
     Session --> Events
 ```
@@ -216,7 +218,12 @@ Rust is a good fit here because the project is runtime infrastructure, not a one
 
 ## Repository Layout
 
-- [src](src): runtime, API, tools, app-server boundary, persistence
+- [src/entrypoints](src/entrypoints): CLI and HTTP adapters
+- [src/app_server](src/app_server): typed app-server boundary, protocol, thread manager
+- [src/runtime](src/runtime): live execution kernel, thread actor, session turn loop, agent sampling, tool runtime, policy, exec sessions
+- [src/tools](src/tools): tool trait, registry, and built-in tools
+- [src/state](src/state): durable snapshot/event/transcript models and persistence helpers
+- [src/model](src/model): LLM client adapter and conversation/tool-call types
 - [tests](tests): integration coverage for agent loop, replay, policy, exec sessions, API, and thread runtime
 - [docs/plans](docs/plans): design notes, roadmap, and implementation plans
 - [docs/architecture](docs/architecture): architecture and interview-oriented summaries

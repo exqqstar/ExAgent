@@ -1,23 +1,27 @@
-pub mod agent;
-pub mod api;
 pub mod app_server;
-pub mod cli;
-pub mod cli_adapter;
 pub mod config;
-pub mod events;
-pub mod exec_session;
-pub mod llm;
-pub mod policy;
-pub mod registry;
+pub mod entrypoints;
+pub mod model;
 pub mod runtime;
-pub mod session;
+pub mod state;
 pub mod tools;
-pub mod transcript;
-pub mod types;
 pub mod workspace;
 
-pub fn default_tool_registry() -> registry::ToolRegistry {
-    let mut registry = registry::ToolRegistry::new();
+pub use entrypoints::api;
+pub use entrypoints::cli;
+pub use entrypoints::cli_adapter;
+pub use model::llm;
+pub use model::types;
+pub use runtime::agent;
+pub use runtime::exec_session;
+pub use runtime::policy;
+pub use state::events;
+pub use state::session;
+pub use state::transcript;
+pub use tools::registry;
+
+pub fn default_tool_registry() -> tools::registry::ToolRegistry {
+    let mut registry = tools::registry::ToolRegistry::new();
     registry.register(tools::read_file::ReadFileTool);
     registry.register(tools::write_file::WriteFileTool);
     registry.register(tools::run_command::RunCommandTool);

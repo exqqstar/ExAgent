@@ -14,7 +14,7 @@ The authoritative-runtime plan (2026-05-17) landed P0-P2 successfully:
 
 - `thread_read` now prefers `runtime.live_view()` when a runtime is loaded.
 - `ThreadSession` is the only writer for live runtime events.
-- `Agent::run_live_turn` returns `event_kinds` deltas instead of writing events to disk.
+- `legacy Agent live-turn runner` returns `event_kinds` deltas instead of writing events to disk.
 - `broadcast_events_since` and `persisted_event_count` are gone.
 - `checkpoint_snapshot()` is an explicit, single-callsite snapshot persistence path.
 - Raw `submit(ThreadOp::UserInput)` is no longer reachable from public API.
@@ -135,7 +135,7 @@ During `ThreadSession::handle_user_input`, the visible sequence is:
 ```text
 1. snapshot.conversation.push(user_message)
 2. checkpoint_snapshot()              -- live_state.snapshot now includes user msg
-3. agent.run_live_turn(&mut snapshot, ...)
+3. agent.legacy live-turn runner(&mut snapshot, ...)
      - LLM call (seconds)
      - tool call (seconds)
      - LLM call again
@@ -159,7 +159,7 @@ After several seconds, the reader suddenly sees a burst of
 
 ### Root Cause
 
-`Agent::run_live_turn` accumulates `event_kinds: Vec<RuntimeEventKind>`
+`legacy Agent live-turn runner` accumulates `event_kinds: Vec<RuntimeEventKind>`
 locally and returns the whole vector at the end of the turn. The
 ThreadSession-as-event-owner refactor moved persistence into `ThreadSession`
 but kept Agent's batched return shape, so events are only recorded after the
@@ -193,7 +193,7 @@ pub trait LiveEventSink: Send {
 }
 
 impl Agent {
-    pub(crate) async fn run_live_turn<S: LiveEventSink>(
+    pub(crate) async fn legacy live-turn runner<S: LiveEventSink>(
         &self,
         snapshot: &mut SessionSnapshot,
         turn_id: TurnId,
@@ -217,7 +217,7 @@ drains it concurrently with the turn future:
 
 ```rust
 let (event_tx, mut event_rx) = mpsc::channel(64);
-let turn_future = self.agent.run_live_turn(&mut self.snapshot, ..., event_tx);
+let turn_future = self.agent.legacy live-turn runner(&mut self.snapshot, ..., event_tx);
 tokio::select! {
     result = turn_future => { ... }
     Some(kind) = event_rx.recv() => self.append_and_broadcast(...)
@@ -469,7 +469,7 @@ need appears (e.g., write-ahead delta logs, transactional turn rollback).
 
 ```text
 10. Agent may mutate snapshot.conversation, snapshot.open_exec_sessions,
-    and snapshot.pending_approvals in place during run_live_turn.
+    and snapshot.pending_approvals in place during legacy live-turn runner.
     No other in-place mutation of snapshot is allowed from Agent.
 ```
 
@@ -650,7 +650,7 @@ in order so each commit is independently testable.
 
 1. Define `LiveEventSink` trait in `runtime/thread_session/events.rs`.
 2. Implement it for `ThreadSession`.
-3. Change `Agent::run_live_turn` signature to take `&mut impl LiveEventSink`
+3. Change `legacy Agent live-turn runner` signature to take `&mut impl LiveEventSink`
    and call `sink.record(kind).await` instead of pushing to
    `event_kinds`.
 4. Remove the `event_kinds` field from `AgentLiveTurnOutput`.

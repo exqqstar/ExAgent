@@ -79,6 +79,11 @@ The response contains a `thread` view:
 }
 ```
 
+`snapshot_path` and `events_path` are compatibility fields in the public
+protocol. For rollout-backed new sessions they are not durable state files and
+may not exist on disk. The durable thread record is
+`.exagent/threads/<thread_id>/rollout.jsonl`.
+
 `workspace_root` and `cwd` are durable context for a newly created thread.
 `cwd` must resolve inside `workspace_root`.
 
@@ -186,7 +191,8 @@ is emitted as an `assistant_turn` event.
 
 ## Event Replay
 
-`POST /events/replay` reads the durable event log:
+`POST /events/replay` reads persisted `EventMsg` entries from rollout storage
+or the loaded runtime's live event buffer:
 
 ```json
 {
@@ -217,7 +223,7 @@ When `include_snapshot` is true, the response includes a stable snapshot view:
 }
 ```
 
-`events/replay` is the complete persisted timeline source. It does not depend
+`events/replay` is the durable replay source for persisted runtime events. It does not depend
 on a runtime still being loaded in memory.
 
 ## `thread/read` Versus `events/replay`

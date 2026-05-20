@@ -29,6 +29,10 @@ use crate::runtime::thread_runtime::{
     ThreadTurnContext,
 };
 use crate::session::SessionSnapshot;
+use crate::state::rollout::{
+    events_from_rollout_items, rollout_paths, session_meta_from_snapshot,
+    snapshot_from_rollout_items, RolloutItem, RolloutStore,
+};
 use crate::types::{AssistantTurn, SessionId, TurnId};
 
 type RegistryFactory = Arc<dyn Fn() -> ToolRegistry + Send + Sync>;
@@ -98,6 +102,13 @@ struct TurnStartStarted {
 struct LoadedRuntime {
     runtime: Arc<ThreadRuntime>,
     workspace_root: PathBuf,
+}
+
+struct StoredThreadState {
+    snapshot: SessionSnapshot,
+    events: Vec<RuntimeEvent>,
+    snapshot_path: PathBuf,
+    events_path: PathBuf,
 }
 
 pub struct ThreadManager {
@@ -250,19 +261,15 @@ impl ThreadManager {
             ));
         }
 
-        let paths = crate::transcript::session_paths(workspace_root, &thread_id);
-        if !paths.snapshot_path.exists() {
+        let Some(stored) = read_thread_state_from_storage(workspace_root, &thread_id)? else {
             return Err(AppServerError::ThreadNotFound(thread_id).into());
-        }
-
-        let snapshot = crate::transcript::read_session_snapshot(workspace_root, &thread_id)?;
-        let events = crate::transcript::read_session_events(workspace_root, &thread_id)?;
+        };
         Ok(self.thread_read_from_snapshot_events(
             thread_id,
-            snapshot,
-            events,
-            paths.snapshot_path,
-            paths.events_path,
+            stored.snapshot,
+            stored.events,
+            stored.snapshot_path,
+            stored.events_path,
         ))
     }
 
@@ -586,20 +593,29 @@ impl ThreadManager {
             )?
             .map(|loaded| loaded.workspace_root)
             .unwrap_or_else(|| config.workspace_root.clone());
-        let paths = crate::transcript::session_paths(&workspace_root, &params.thread_id);
-        if !paths.snapshot_path.exists() {
-            return Err(AppServerError::ThreadNotFound(params.thread_id).into());
-        }
-        let events = filter_replay_events(
-            crate::transcript::replay_session(&workspace_root, &params.thread_id)?,
-            &params,
-        );
-        let snapshot = if params.include_snapshot {
-            let snapshot =
-                crate::transcript::read_session_snapshot(&workspace_root, &params.thread_id)?;
-            Some(replay_snapshot_view(snapshot))
+        let (events, snapshot) = if let Some(loaded) = self.resolve_loaded_runtime(
+            &params.thread_id,
+            requested_workspace_root,
+            &config.workspace_root,
+        )? {
+            let live_view = loaded.runtime.live_view();
+            (
+                filter_replay_events(live_view.events, &params),
+                params
+                    .include_snapshot
+                    .then(|| replay_snapshot_view(live_view.snapshot)),
+            )
         } else {
-            None
+            let Some(stored) = read_thread_state_from_storage(&workspace_root, &params.thread_id)?
+            else {
+                return Err(AppServerError::ThreadNotFound(params.thread_id).into());
+            };
+            (
+                filter_replay_events(stored.events, &params),
+                params
+                    .include_snapshot
+                    .then(|| replay_snapshot_view(stored.snapshot)),
+            )
         };
 
         Ok(EventsReplayResponse {
@@ -624,8 +640,7 @@ impl ThreadManager {
         )? {
             return Ok(loaded.runtime.subscribe_events());
         }
-        let paths = crate::transcript::session_paths(&config.workspace_root, &params.thread_id);
-        if !paths.snapshot_path.exists() {
+        if !thread_exists_in_storage(&config.workspace_root, &params.thread_id) {
             return Err(AppServerError::ThreadNotFound(params.thread_id).into());
         }
         let runtime =
@@ -661,7 +676,10 @@ impl ThreadManager {
                     options.config.cwd.clone(),
                 );
                 let paths = crate::transcript::session_paths(&snapshot.workspace_root, &thread_id);
-                crate::transcript::write_json(&paths.snapshot_path, &snapshot)?;
+                let rollout_paths = rollout_paths(&snapshot.workspace_root, &thread_id);
+                RolloutStore::new(rollout_paths.rollout_path).append_items_blocking(&[
+                    RolloutItem::SessionMeta(session_meta_from_snapshot(&snapshot)),
+                ])?;
                 let runtime = self.ensure_runtime_loaded(&thread_id, options.config, false)?;
 
                 Ok(NewThread {
@@ -674,7 +692,7 @@ impl ThreadManager {
             InitialHistory::Resume { thread_id } => {
                 let paths =
                     crate::transcript::session_paths(&options.config.workspace_root, &thread_id);
-                if !paths.snapshot_path.exists() {
+                if !thread_exists_in_storage(&options.config.workspace_root, &thread_id) {
                     return Err(AppServerError::ThreadNotFound(thread_id).into());
                 }
                 let runtime = self.ensure_runtime_loaded(&thread_id, options.config, false)?;
@@ -1001,6 +1019,47 @@ fn filter_replay_events(
     }
 }
 
+fn thread_exists_in_storage(workspace_root: &Path, thread_id: &SessionId) -> bool {
+    let rollout_paths = rollout_paths(workspace_root, thread_id);
+    if std::fs::metadata(&rollout_paths.rollout_path)
+        .map(|metadata| metadata.len() > 0)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    let legacy_paths = crate::transcript::session_paths(workspace_root, thread_id);
+    legacy_paths.snapshot_path.exists()
+}
+
+fn read_thread_state_from_storage(
+    workspace_root: &Path,
+    thread_id: &SessionId,
+) -> Result<Option<StoredThreadState>> {
+    let rollout_paths = rollout_paths(workspace_root, thread_id);
+    let rollout_items = RolloutStore::read_items_blocking(&rollout_paths.rollout_path)?;
+    let legacy_paths = crate::transcript::session_paths(workspace_root, thread_id);
+    if !rollout_items.is_empty() {
+        return Ok(Some(StoredThreadState {
+            snapshot: snapshot_from_rollout_items(thread_id, &rollout_items)?,
+            events: events_from_rollout_items(&rollout_items),
+            snapshot_path: legacy_paths.snapshot_path,
+            events_path: legacy_paths.events_path,
+        }));
+    }
+
+    if !legacy_paths.snapshot_path.exists() {
+        return Ok(None);
+    }
+
+    Ok(Some(StoredThreadState {
+        snapshot: crate::transcript::read_session_snapshot(workspace_root, thread_id)?,
+        events: crate::transcript::read_session_events(workspace_root, thread_id)?,
+        snapshot_path: legacy_paths.snapshot_path,
+        events_path: legacy_paths.events_path,
+    }))
+}
+
 fn runtime_event_kind_matches(filter: &RuntimeEventKindFilter, kind: &RuntimeEventKind) -> bool {
     matches!(
         (filter, kind),
@@ -1125,6 +1184,29 @@ mod tests {
         assert_eq!(resumed.thread.id, started.thread.id);
         let resumed_runtime = manager.runtime_for(&started.thread.id).unwrap();
         assert!(Arc::ptr_eq(&started_runtime, &resumed_runtime));
+    }
+
+    #[test]
+    fn thread_start_writes_rollout_without_legacy_snapshot_or_events() {
+        let dir = tempdir().unwrap();
+        let manager = ThreadManager::with_llm(
+            AgentConfig::default(),
+            Box::new(MockLlm::new(vec![])),
+            || ToolRegistry::new(),
+        );
+
+        let started = manager
+            .thread_start(ThreadStartParams {
+                workspace_root: Some(dir.path().display().to_string()),
+                cwd: None,
+            })
+            .expect("thread start");
+
+        let rollout_paths = crate::state::rollout::rollout_paths(dir.path(), &started.thread.id);
+        let legacy_paths = crate::transcript::session_paths(dir.path(), &started.thread.id);
+        assert!(rollout_paths.rollout_path.exists());
+        assert!(!legacy_paths.snapshot_path.exists());
+        assert!(!legacy_paths.events_path.exists());
     }
 
     #[test]

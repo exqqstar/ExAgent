@@ -7,13 +7,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::Mutex;
 
-use crate::events::{ExecOutputStream, RuntimeEvent, RuntimeEventKind};
+use crate::events::ExecOutputStream;
 use crate::session::{ExecSessionId, ExecSessionStatus};
-use crate::transcript;
-use crate::types::{EventId, SessionId};
+use crate::types::SessionId;
 
 static EXEC_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
-static EXEC_EVENT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Default)]
 pub struct ExecSessionManager {
@@ -52,7 +50,7 @@ struct ExecSessionState {
 impl ExecSessionManager {
     pub async fn start(
         &self,
-        workspace_root: &Path,
+        _workspace_root: &Path,
         session_id: &SessionId,
         command: &str,
         cwd: PathBuf,
@@ -95,18 +93,8 @@ impl ExecSessionManager {
         });
 
         self.insert_handle(handle.clone()).await;
-        spawn_output_task(
-            workspace_root.to_path_buf(),
-            handle.clone(),
-            ExecOutputStream::Stdout,
-            stdout,
-        );
-        spawn_output_task(
-            workspace_root.to_path_buf(),
-            handle.clone(),
-            ExecOutputStream::Stderr,
-            stderr,
-        );
+        spawn_output_task(handle.clone(), ExecOutputStream::Stdout, stdout);
+        spawn_output_task(handle.clone(), ExecOutputStream::Stderr, stderr);
 
         self.snapshot(handle).await
     }
@@ -234,12 +222,8 @@ impl ExecSessionManager {
     }
 }
 
-fn spawn_output_task<R>(
-    workspace_root: PathBuf,
-    handle: Arc<ActiveExecSession>,
-    stream: ExecOutputStream,
-    reader: R,
-) where
+fn spawn_output_task<R>(handle: Arc<ActiveExecSession>, stream: ExecOutputStream, reader: R)
+where
     R: AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
@@ -260,21 +244,6 @@ fn spawn_output_task<R>(
                     ExecOutputStream::Stderr => state.stderr.push_str(&chunk),
                 }
             }
-
-            let event = RuntimeEvent {
-                event_id: new_exec_event_id(),
-                session_id: handle.session_id.clone(),
-                turn_id: None,
-                kind: RuntimeEventKind::ExecOutput {
-                    exec_session_id: handle.exec_session_id.clone(),
-                    stream: stream.clone(),
-                    chunk,
-                },
-            };
-            let _ = transcript::append_json_line(
-                &transcript::session_paths(&workspace_root, &handle.session_id).events_path,
-                &event,
-            );
         }
     });
 }
@@ -282,9 +251,4 @@ fn spawn_output_task<R>(
 fn new_exec_session_id() -> ExecSessionId {
     let next = EXEC_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
     ExecSessionId::new(format!("exec_{next}"))
-}
-
-fn new_exec_event_id() -> EventId {
-    let next = EXEC_EVENT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    EventId::new(format!("exec_evt_{next}"))
 }

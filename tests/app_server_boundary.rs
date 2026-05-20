@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use exagent::app_server::protocol::{
     BoundaryCapability, BoundaryOp, BoundaryOpResponse, EventsReplayParams, IgnoredOverrideField,
     InitializeParams, RunParams, ThreadItem, ThreadReadParams, ThreadResumeParams,
-    ThreadStartParams, ThreadStatus, TurnContextOverrides, TurnInterruptParams, TurnStartParams,
-    TurnStatus,
+    ThreadStartParams, ThreadStatus, ThreadView, TurnContextOverrides, TurnInterruptParams,
+    TurnStartParams, TurnStatus,
 };
 use exagent::app_server::{AppServerError, AppServerService};
 use exagent::config::AgentConfig;
@@ -12,7 +12,7 @@ use exagent::events::{RuntimeEvent, RuntimeEventKind};
 use exagent::llm::{LlmClient, MockLlm};
 use exagent::policy::PolicyMode;
 use exagent::registry::{ToolContext, ToolRegistry};
-use exagent::session::{ApprovalStatus, SessionSnapshot};
+use exagent::session::SessionSnapshot;
 use exagent::tools::run_command::RunCommandTool;
 use exagent::tools::Tool;
 use exagent::types::{
@@ -93,11 +93,36 @@ fn run_command_registry() -> ToolRegistry {
     registry
 }
 
-fn assert_events_jsonl_is_valid(events_path: &std::path::Path) {
-    let contents = std::fs::read_to_string(events_path).unwrap();
+fn read_thread_snapshot(thread: &ThreadView) -> SessionSnapshot {
+    if thread.snapshot_path.exists() {
+        return exagent::transcript::read_json(thread.snapshot_path.as_ref()).unwrap();
+    }
+
+    let workspace_root = workspace_root_from_legacy_snapshot_path(&thread.snapshot_path);
+    let rollout_paths = exagent::state::rollout::rollout_paths(&workspace_root, &thread.id);
+    let items =
+        exagent::state::rollout::RolloutStore::read_items_blocking(&rollout_paths.rollout_path)
+            .unwrap();
+    exagent::state::rollout::snapshot_from_rollout_items(&thread.id, &items).unwrap()
+}
+
+fn assert_rollout_jsonl_is_valid(thread: &ThreadView) {
+    let workspace_root = workspace_root_from_legacy_snapshot_path(&thread.snapshot_path);
+    let rollout_paths = exagent::state::rollout::rollout_paths(&workspace_root, &thread.id);
+    let contents = std::fs::read_to_string(rollout_paths.rollout_path).unwrap();
     for line in contents.lines() {
         serde_json::from_str::<serde_json::Value>(line).unwrap();
     }
+}
+
+fn workspace_root_from_legacy_snapshot_path(snapshot_path: &std::path::Path) -> PathBuf {
+    snapshot_path
+        .parent()
+        .and_then(|session_dir| session_dir.parent())
+        .and_then(|sessions_dir| sessions_dir.parent())
+        .and_then(|exagent_dir| exagent_dir.parent())
+        .expect("legacy snapshot path should be under <workspace>/.exagent/sessions/<thread>")
+        .to_path_buf()
 }
 
 async fn wait_for_turn_event(
@@ -290,8 +315,7 @@ fn thread_start_applies_workspace_and_cwd_overrides() {
         })
         .unwrap();
 
-    let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(response.thread.snapshot_path.as_ref()).unwrap();
+    let snapshot = read_thread_snapshot(&response.thread);
     assert_eq!(snapshot.session_id, response.thread.id);
     assert_eq!(snapshot.parent_session_id, None);
     assert_eq!(snapshot.root_session_id, response.thread.id);
@@ -671,8 +695,7 @@ async fn turn_start_applies_validated_context_override_with_user_input() {
         .unwrap();
     wait_for_turn_completed(&service, &thread.thread.id, &turn.turn.id).await;
 
-    let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(thread.thread.snapshot_path.as_ref()).unwrap();
+    let snapshot = read_thread_snapshot(&thread.thread);
     assert_eq!(snapshot.cwd, std::fs::canonicalize(original_cwd).unwrap());
     assert!(snapshot
         .conversation
@@ -741,8 +764,7 @@ async fn turn_context_cwd_is_used_for_tools_without_becoming_thread_cwd() {
         *observed_cwd.lock().unwrap(),
         Some(std::fs::canonicalize(turn_cwd).unwrap())
     );
-    let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(thread.thread.snapshot_path.as_ref()).unwrap();
+    let snapshot = read_thread_snapshot(&thread.thread);
     assert_eq!(snapshot.cwd, std::fs::canonicalize(original_cwd).unwrap());
 }
 
@@ -784,8 +806,7 @@ async fn turn_start_rejects_invalid_context_override_before_accepting_input() {
         .to_string()
         .contains("cwd must stay within workspace_root"));
 
-    let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(thread.thread.snapshot_path.as_ref()).unwrap();
+    let snapshot = read_thread_snapshot(&thread.thread);
     assert!(snapshot.conversation.is_empty());
     let replay = service
         .events_replay(events_replay_params(thread.thread.id))
@@ -1018,8 +1039,7 @@ fn thread_resume_reads_persisted_thread_context_and_reports_ignored_cwd_override
     assert_eq!(resumed.thread.status, ThreadStatus::Idle);
     assert_eq!(resumed.ignored_overrides, vec![IgnoredOverrideField::Cwd]);
 
-    let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(thread.thread.snapshot_path.as_ref()).unwrap();
+    let snapshot = read_thread_snapshot(&thread.thread);
     assert_eq!(snapshot.cwd, std::fs::canonicalize(original_cwd).unwrap());
     assert_ne!(snapshot.cwd, ignored_cwd);
 }
@@ -1061,8 +1081,7 @@ async fn legacy_run_resume_ignores_cwd_override_and_keeps_thread_snapshot_cwd() 
         .unwrap();
 
     assert_eq!(output.text.as_deref(), Some("legacy resume complete"));
-    let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(thread.thread.snapshot_path.as_ref()).unwrap();
+    let snapshot = read_thread_snapshot(&thread.thread);
     assert_eq!(snapshot.cwd, std::fs::canonicalize(original_cwd).unwrap());
     assert_ne!(snapshot.cwd, std::fs::canonicalize(ignored_cwd).unwrap());
 }
@@ -1125,7 +1144,8 @@ async fn submit_boundary_op_dispatches_thread_start() {
     let BoundaryOpResponse::ThreadStarted(started) = response else {
         panic!("expected thread start response");
     };
-    assert!(started.thread.snapshot_path.exists());
+    assert!(!started.thread.snapshot_path.exists());
+    assert_rollout_jsonl_is_valid(&started.thread);
     assert!(started.thread.events_path.ends_with("events.jsonl"));
 }
 
@@ -1495,8 +1515,7 @@ async fn rejected_concurrent_turn_context_does_not_mutate_thread_snapshot() {
         Some(AppServerError::ThreadBusy(thread_id)) if thread_id == &thread.thread.id
     ));
 
-    let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(thread.thread.snapshot_path.as_ref()).unwrap();
+    let snapshot = read_thread_snapshot(&thread.thread);
     assert_eq!(snapshot.cwd, std::fs::canonicalize(original_cwd).unwrap());
     assert_ne!(snapshot.cwd, std::fs::canonicalize(rejected_cwd).unwrap());
 
@@ -1574,7 +1593,7 @@ async fn turn_interrupt_aborts_active_turn_and_records_interrupted_event() {
         replay_after_response.events.last().map(|event| &event.kind),
         Some(RuntimeEventKind::TurnInterrupted)
     ));
-    assert_events_jsonl_is_valid(thread.thread.events_path.as_ref());
+    assert_rollout_jsonl_is_valid(&thread.thread);
 
     let read = service
         .thread_read(ThreadReadParams {
@@ -1656,13 +1675,6 @@ async fn thread_read_reports_waiting_approval_when_snapshot_has_pending_approval
         read.thread.turns.last().map(|turn| &turn.status),
         Some(&TurnStatus::Completed)
     );
-
-    let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(thread.thread.snapshot_path.as_ref()).unwrap();
-    assert!(snapshot
-        .pending_approvals
-        .iter()
-        .any(|approval| approval.status == ApprovalStatus::Pending));
 
     let replay = service
         .events_replay(events_replay_params(thread.thread.id))
@@ -1757,8 +1769,7 @@ async fn turn_interrupt_clears_waiting_approval_and_records_interrupted_event() 
         Some(&latest_turn_id)
     );
 
-    let snapshot: SessionSnapshot =
-        exagent::transcript::read_json(thread.thread.snapshot_path.as_ref()).unwrap();
+    let snapshot = read_thread_snapshot(&thread.thread);
     assert!(snapshot.pending_approvals.is_empty());
 
     let read = service

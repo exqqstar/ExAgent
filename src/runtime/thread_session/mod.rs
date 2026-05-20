@@ -11,11 +11,13 @@ use crate::agent::Agent;
 use crate::config::AgentConfig;
 use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::policy::PolicyManager;
+use crate::runtime::context::ContextManager;
 use crate::runtime::thread_runtime::{
     AgentFactory, ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus,
 };
 use crate::session::{ApprovalStatus, SessionSnapshot};
-use crate::types::{SessionId, TurnId};
+use crate::state::rollout::{rollout_paths, session_meta_from_snapshot, RolloutItem, RolloutStore};
+use crate::types::{EventId, SessionId, TurnId};
 
 const DEFAULT_THREAD_EVENT_CHANNEL_CAPACITY: usize = 256;
 const DEFAULT_LIVE_EVENT_BUFFER_CAP: usize = 2048;
@@ -75,6 +77,8 @@ pub struct ThreadSession {
     thread_id: SessionId,
     agent: Agent,
     recorder: ThreadEventRecorder,
+    rollout_store: RolloutStore,
+    context_manager: ContextManager,
     status_tx: watch::Sender<ThreadRuntimeStatus>,
     live_state: Arc<RwLock<ThreadSessionLiveState>>,
     policy: Arc<PolicyManager>,
@@ -131,11 +135,21 @@ impl ThreadSession {
             live_event_buffer_cap,
         } = options;
         let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
-        let mut snapshot: SessionSnapshot = crate::transcript::read_json(&paths.snapshot_path)?;
-        snapshot.normalize_lineage();
-        let mut events = crate::transcript::read_json_lines::<RuntimeEvent>(&paths.events_path)?;
+        let rollout_paths = rollout_paths(&config.workspace_root, &thread_id);
+        let rollout_store = RolloutStore::new(rollout_paths.rollout_path);
+        let rollout_items = RolloutStore::read_items_blocking(rollout_store.path())?;
+        let (snapshot, mut events, context_manager) = if rollout_items.is_empty() {
+            let mut snapshot: SessionSnapshot = crate::transcript::read_json(&paths.snapshot_path)?;
+            snapshot.normalize_lineage();
+            ensure_session_meta_rollout(&snapshot, &rollout_store)?;
+            let events = crate::transcript::read_json_lines::<RuntimeEvent>(&paths.events_path)?;
+            let context_manager = ContextManager::from_snapshot(&snapshot);
+            (snapshot, events, context_manager)
+        } else {
+            restore_from_rollout(&thread_id, &rollout_items)?
+        };
         let live_event_buffer_cap = live_event_buffer_cap.max(1);
-        let next_event_index = events.len() + 1;
+        let next_event_index = next_event_index(&events);
         let overflow = events.len().saturating_sub(live_event_buffer_cap);
         if overflow > 0 {
             events.drain(0..overflow);
@@ -148,8 +162,7 @@ impl ThreadSession {
         }));
         let recorder = ThreadEventRecorder::new(
             thread_id.clone(),
-            paths.snapshot_path,
-            paths.events_path,
+            rollout_store.clone(),
             event_tx,
             live_state.clone(),
             next_event_index,
@@ -160,6 +173,8 @@ impl ThreadSession {
             thread_id,
             agent,
             recorder,
+            rollout_store,
+            context_manager,
             status_tx,
             live_state,
             policy,
@@ -280,6 +295,83 @@ impl ThreadSession {
             turn_id: interrupted_turn_id,
         })
     }
+}
+
+fn restore_from_rollout(
+    requested_thread_id: &SessionId,
+    items: &[RolloutItem],
+) -> anyhow::Result<(SessionSnapshot, Vec<RuntimeEvent>, ContextManager)> {
+    let meta = items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::SessionMeta(meta) => Some(meta),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("rollout is missing SessionMeta"))?;
+    if &meta.thread_id != requested_thread_id {
+        return Err(anyhow::anyhow!(
+            "rollout thread id {} does not match requested thread id {}",
+            meta.thread_id.as_str(),
+            requested_thread_id.as_str()
+        ));
+    }
+
+    let context_manager = ContextManager::from_rollout_items(items);
+    let mut snapshot = SessionSnapshot {
+        session_id: meta.thread_id.clone(),
+        parent_session_id: meta.parent_thread_id.clone(),
+        root_session_id: meta.root_thread_id.clone(),
+        spawned_by_turn_id: meta.spawned_by_turn_id.clone(),
+        agent_role: meta.agent_role.clone(),
+        workspace_root: meta.workspace_root.clone(),
+        cwd: meta.initial_cwd.clone(),
+        reference_turn_context: context_manager.reference_turn_context(),
+        conversation: context_manager.for_prompt(),
+        open_exec_sessions: vec![],
+        latest_compaction: None,
+        pending_approvals: vec![],
+    };
+    snapshot.normalize_lineage();
+
+    let events = items
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::EventMsg(event) => Some(event.clone()),
+            _ => None,
+        })
+        .collect();
+
+    Ok((snapshot, events, context_manager))
+}
+
+fn next_event_index(events: &[RuntimeEvent]) -> usize {
+    events
+        .iter()
+        .filter_map(|event| parse_event_index(&event.event_id))
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn parse_event_index(event_id: &EventId) -> Option<usize> {
+    event_id.as_str().strip_prefix("evt_")?.parse().ok()
+}
+
+fn ensure_session_meta_rollout(
+    snapshot: &SessionSnapshot,
+    store: &RolloutStore,
+) -> anyhow::Result<()> {
+    let should_initialize = std::fs::metadata(store.path())
+        .map(|metadata| metadata.len() == 0)
+        .unwrap_or(true);
+    if !should_initialize {
+        return Ok(());
+    }
+
+    store.append_items_blocking(&[RolloutItem::SessionMeta(session_meta_from_snapshot(
+        snapshot,
+    ))])?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -431,8 +523,19 @@ mod tests {
         assert_eq!(live_view.events[0].event_id, EventId::new("evt_4"));
         assert_eq!(live_view.events[1].event_id, EventId::new("evt_5"));
 
-        let replay = crate::transcript::read_session_events(&config.workspace_root, &thread_id)
-            .expect("read replay events");
-        assert_eq!(replay.len(), 5);
+        let legacy_replay =
+            crate::transcript::read_session_events(&config.workspace_root, &thread_id)
+                .expect("read legacy replay events");
+        assert_eq!(legacy_replay.len(), 4);
+        let rollout_paths =
+            crate::state::rollout::rollout_paths(&config.workspace_root, &thread_id);
+        let rollout_items =
+            crate::state::rollout::RolloutStore::read_items_blocking(&rollout_paths.rollout_path)
+                .expect("read rollout items");
+        assert!(rollout_items.iter().any(|item| matches!(
+            item,
+            crate::state::rollout::RolloutItem::EventMsg(event)
+                if event.event_id == EventId::new("evt_5")
+        )));
     }
 }

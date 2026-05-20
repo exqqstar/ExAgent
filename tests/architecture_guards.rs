@@ -51,3 +51,36 @@ fn agent_does_not_parse_tool_meta() {
         );
     }
 }
+
+#[test]
+fn turn_loop_does_not_sample_from_session_snapshot_conversation() {
+    let source =
+        std::fs::read_to_string("src/runtime/thread_session/turn.rs").expect("read turn loop");
+
+    assert!(!source.contains("snapshot.conversation.clone()"));
+    assert!(!source.contains("ContextManager::for_prompt(snapshot)"));
+    assert!(source.contains("context_manager.for_prompt()"));
+}
+
+#[test]
+fn context_manager_is_stateful_history_owner() {
+    let source = std::fs::read_to_string("src/runtime/context.rs").expect("read context manager");
+
+    assert!(source.contains("items: Vec<ConversationMessage>"));
+    assert!(source.contains("reference_turn_context: Option<TurnContextItem>"));
+}
+
+#[test]
+fn rollout_schema_has_codex_style_top_level_items() {
+    let source = std::fs::read_to_string("src/state/rollout.rs").expect("read rollout schema");
+
+    for expected in [
+        "SessionMeta",
+        "ResponseItem",
+        "TurnContext",
+        "Compacted",
+        "EventMsg",
+    ] {
+        assert!(source.contains(expected), "missing {expected}");
+    }
+}

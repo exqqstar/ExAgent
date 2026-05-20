@@ -2,12 +2,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use exagent::config::AgentConfig;
-use exagent::events::{ExecOutputStream, RuntimeEvent, RuntimeEventKind};
 use exagent::exec_session::ExecSessionManager;
 use exagent::policy::PolicyManager;
 use exagent::registry::{ToolContext, ToolRegistry};
 use exagent::tools::run_command::RunCommandTool;
-use exagent::transcript::replay_session;
 use exagent::types::{SessionId, ToolCall};
 use serde_json::json;
 use tempfile::tempdir;
@@ -28,20 +26,6 @@ fn test_context() -> (tempfile::TempDir, SessionId, ToolContext) {
         defer_policy_events: false,
     };
     (dir, session_id, ctx)
-}
-
-fn has_exec_output_event(
-    replay: &[RuntimeEvent],
-    expected_stream: &ExecOutputStream,
-    expected_chunk: &str,
-) -> bool {
-    replay.iter().any(|event| {
-        matches!(
-            &event.kind,
-            RuntimeEventKind::ExecOutput { stream, chunk, .. }
-                if stream == expected_stream && chunk.contains(expected_chunk)
-        )
-    })
 }
 
 #[tokio::test]
@@ -115,12 +99,12 @@ async fn persistent_exec_session_accepts_stdin_across_multiple_calls() {
 }
 
 #[tokio::test]
-async fn persistent_exec_session_streams_output_into_runtime_events() {
+async fn persistent_exec_session_streams_output_without_legacy_event_log() {
     let (dir, session_id, ctx) = test_context();
     let mut registry = ToolRegistry::new();
     registry.register(RunCommandTool);
 
-    registry
+    let started = registry
         .execute(
             ToolCall {
                 id: "call_stream".into(),
@@ -133,31 +117,41 @@ async fn persistent_exec_session_streams_output_into_runtime_events() {
             Some(&ctx),
         )
         .await;
+    let exec_session_id = started.meta.as_ref().unwrap()["exec_session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let deadline = Instant::now() + Duration::from_secs(2);
-    let replay = loop {
-        let replay = replay_session(dir.path(), &session_id).unwrap();
-        if has_exec_output_event(&replay, &ExecOutputStream::Stdout, "stdout-line")
-            && has_exec_output_event(&replay, &ExecOutputStream::Stderr, "stderr-line")
-        {
-            break replay;
+    let meta = loop {
+        let polled = registry
+            .execute(
+                ToolCall {
+                    id: "call_poll_stream".into(),
+                    name: "run_command".into(),
+                    arguments: json!({
+                        "exec_session_id": exec_session_id
+                    }),
+                },
+                Some(&ctx),
+            )
+            .await;
+        let meta = polled.meta.unwrap();
+        let stdout = meta["stdout"].as_str().unwrap();
+        let stderr = meta["stderr"].as_str().unwrap();
+        if stdout.contains("stdout-line") && stderr.contains("stderr-line") {
+            break meta;
         }
         if Instant::now() >= deadline {
-            break replay;
+            break meta;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
 
-    assert!(has_exec_output_event(
-        &replay,
-        &ExecOutputStream::Stdout,
-        "stdout-line"
-    ));
-    assert!(has_exec_output_event(
-        &replay,
-        &ExecOutputStream::Stderr,
-        "stderr-line"
-    ));
+    assert!(meta["stdout"].as_str().unwrap().contains("stdout-line"));
+    assert!(meta["stderr"].as_str().unwrap().contains("stderr-line"));
+    let legacy_paths = exagent::transcript::session_paths(dir.path(), &session_id);
+    assert!(!legacy_paths.events_path.exists());
 }
 
 #[tokio::test]

@@ -5,6 +5,7 @@ use anyhow::{anyhow, Result};
 use super::{LiveEventSink, RuntimeInterrupt, ThreadEventRecorder, ThreadSession};
 use crate::agent::Agent;
 use crate::events::RuntimeEventKind;
+use crate::runtime::context::{ContextManager, PromptContext, TurnPaths};
 use crate::runtime::thread_runtime::{
     ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus, ThreadTurnContext,
 };
@@ -14,6 +15,7 @@ use crate::runtime::tool_call_runtime::{
 use crate::session::{
     ApprovalStatus, ExecSessionRef, ExecSessionStatus, PendingApproval, SessionSnapshot,
 };
+use crate::state::rollout::RolloutItem;
 use crate::types::{AssistantTurn, ConversationMessage, TurnId};
 
 impl ThreadSession {
@@ -39,32 +41,52 @@ impl ThreadSession {
         turn_context: Option<ThreadTurnContext>,
         interrupt: Option<RuntimeInterrupt>,
     ) -> Result<ThreadOpResult> {
-        // Push user message into the live snapshot first so the TurnStarted
-        // event records a snapshot that already contains the user input.
+        let turn_cwd = turn_context.and_then(|context| context.cwd);
+
+        // Apply model-visible runtime context before the user message so the
+        // sampling prompt has stable background for this turn.
         let mut snapshot = self
             .live_state
             .read()
             .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?
             .snapshot
             .clone();
-        snapshot
-            .conversation
-            .push(ConversationMessage::user(prompt));
+        let context_cwd = turn_cwd.clone().unwrap_or_else(|| snapshot.cwd.clone());
+        let prompt_context = PromptContext::for_turn(
+            self.agent.config(),
+            TurnPaths {
+                workspace_root: snapshot.workspace_root.clone(),
+                cwd: context_cwd,
+            },
+        );
+        let turn_context = prompt_context.turn_context.clone();
+        let context_messages = self.context_manager.apply_context_updates(prompt_context);
+        let user_message = ConversationMessage::user(prompt);
+        self.context_manager.record_items([user_message.clone()]);
+        self.context_manager.sync_snapshot(&mut snapshot);
+        let mut rollout_items = Vec::with_capacity(context_messages.len() + 2);
+        rollout_items.push(RolloutItem::TurnContext(turn_context));
+        rollout_items.extend(context_messages.into_iter().map(RolloutItem::ResponseItem));
+        rollout_items.push(RolloutItem::ResponseItem(user_message));
+        self.rollout_store.append_items_blocking(&rollout_items)?;
         self.append_and_broadcast_snapshot(
             &snapshot,
             Some(&turn_id),
             RuntimeEventKind::TurnStarted,
         )?;
 
-        let turn_cwd = turn_context.and_then(|context| context.cwd);
         let Self {
-            agent, recorder, ..
+            agent,
+            recorder,
+            rollout_store,
+            context_manager,
+            ..
         } = self;
 
         let final_turn = if let Some(interrupt) = interrupt {
             let runtime_turn_id = turn_id.clone();
             tokio::select! {
-                result = run_session_turn(agent, recorder, &mut snapshot, runtime_turn_id, turn_cwd) => {
+                result = run_session_turn(agent, recorder, rollout_store, context_manager, &mut snapshot, runtime_turn_id, turn_cwd) => {
                     match result {
                         Ok(turn) => turn,
                         Err(err) => {
@@ -92,7 +114,16 @@ impl ThreadSession {
                 }
             }
         } else {
-            match run_session_turn(agent, recorder, &mut snapshot, turn_id.clone(), turn_cwd).await
+            match run_session_turn(
+                agent,
+                recorder,
+                rollout_store,
+                context_manager,
+                &mut snapshot,
+                turn_id.clone(),
+                turn_cwd,
+            )
+            .await
             {
                 Ok(turn) => turn,
                 Err(err) => {
@@ -123,6 +154,8 @@ impl ThreadSession {
 async fn run_session_turn(
     agent: &Agent,
     recorder: &mut ThreadEventRecorder,
+    rollout_store: &crate::state::rollout::RolloutStore,
+    context_manager: &mut ContextManager,
     snapshot: &mut SessionSnapshot,
     runtime_turn_id: TurnId,
     turn_cwd: Option<PathBuf>,
@@ -137,11 +170,18 @@ async fn run_session_turn(
     );
 
     for _ in 0..agent.max_turns() {
-        let prompt = snapshot.conversation.clone();
+        let prompt = context_manager.for_prompt();
         let turn = agent
             .sample_assistant_turn(&prompt, &tool_runtime.schemas())
             .await?;
-        record_assistant_turn(recorder, snapshot, &runtime_turn_id, &turn)?;
+        record_assistant_turn(
+            recorder,
+            rollout_store,
+            context_manager,
+            snapshot,
+            &runtime_turn_id,
+            &turn,
+        )?;
 
         if turn.tool_calls.is_empty() {
             return Ok(turn);
@@ -149,7 +189,14 @@ async fn run_session_turn(
 
         for call in turn.tool_calls.clone() {
             let outcome = tool_runtime.execute(call).await;
-            record_tool_outcome(recorder, snapshot, &runtime_turn_id, outcome)?;
+            record_tool_outcome(
+                recorder,
+                rollout_store,
+                context_manager,
+                snapshot,
+                &runtime_turn_id,
+                outcome,
+            )?;
         }
     }
 
@@ -161,15 +208,17 @@ async fn run_session_turn(
 
 fn record_assistant_turn(
     recorder: &mut ThreadEventRecorder,
+    rollout_store: &crate::state::rollout::RolloutStore,
+    context_manager: &mut ContextManager,
     snapshot: &mut SessionSnapshot,
     turn_id: &TurnId,
     turn: &AssistantTurn,
 ) -> Result<()> {
     if turn.text.is_some() || !turn.tool_calls.is_empty() {
-        snapshot.conversation.push(ConversationMessage::assistant(
-            turn.text.clone(),
-            turn.tool_calls.clone(),
-        ));
+        let message = ConversationMessage::assistant(turn.text.clone(), turn.tool_calls.clone());
+        context_manager.record_items([message.clone()]);
+        context_manager.sync_snapshot(snapshot);
+        rollout_store.append_items_blocking(&[RolloutItem::ResponseItem(message)])?;
     }
     recorder.record(
         snapshot,
@@ -181,6 +230,8 @@ fn record_assistant_turn(
 
 fn record_tool_outcome(
     recorder: &mut ThreadEventRecorder,
+    rollout_store: &crate::state::rollout::RolloutStore,
+    context_manager: &mut ContextManager,
     snapshot: &mut SessionSnapshot,
     turn_id: &TurnId,
     outcome: ToolExecutionOutcome,
@@ -190,10 +241,11 @@ fn record_tool_outcome(
     }
 
     let result = outcome.result;
-    snapshot.conversation.push(ConversationMessage::tool(
-        result.tool_call_id.clone(),
-        serde_json::to_string(&result)?,
-    ));
+    let message =
+        ConversationMessage::tool(result.tool_call_id.clone(), serde_json::to_string(&result)?);
+    context_manager.record_items([message.clone()]);
+    context_manager.sync_snapshot(snapshot);
+    rollout_store.append_items_blocking(&[RolloutItem::ResponseItem(message)])?;
     recorder.record(
         snapshot,
         Some(turn_id),
@@ -338,6 +390,7 @@ mod tests {
     struct RecordingLlm {
         turns: AsyncMutex<VecDeque<AssistantTurn>>,
         prompt_lens: Arc<Mutex<Vec<usize>>>,
+        prompt_contents: Option<Arc<Mutex<Vec<Vec<String>>>>>,
     }
 
     impl RecordingLlm {
@@ -345,6 +398,19 @@ mod tests {
             Self {
                 turns: AsyncMutex::new(turns.into()),
                 prompt_lens,
+                prompt_contents: None,
+            }
+        }
+
+        fn with_prompt_contents(
+            turns: Vec<AssistantTurn>,
+            prompt_lens: Arc<Mutex<Vec<usize>>>,
+            prompt_contents: Arc<Mutex<Vec<Vec<String>>>>,
+        ) -> Self {
+            Self {
+                turns: AsyncMutex::new(turns.into()),
+                prompt_lens,
+                prompt_contents: Some(prompt_contents),
             }
         }
     }
@@ -357,6 +423,14 @@ mod tests {
             _tools: &[serde_json::Value],
         ) -> Result<AssistantTurn> {
             self.prompt_lens.lock().unwrap().push(messages.len());
+            if let Some(prompt_contents) = &self.prompt_contents {
+                prompt_contents.lock().unwrap().push(
+                    messages
+                        .iter()
+                        .map(|message| message.content.clone())
+                        .collect(),
+                );
+            }
             self.turns
                 .lock()
                 .await
@@ -410,8 +484,9 @@ mod tests {
         };
         assert_eq!(final_turn.text.as_deref(), Some("session turn complete"));
 
-        let replay = crate::transcript::read_session_events(&config.workspace_root, &thread_id)
-            .expect("read events");
+        let live_view =
+            ThreadSession::live_view_from_state(thread_id.clone(), &session.live_state_handle());
+        let replay = live_view.events;
         assert!(matches!(replay[0].kind, RuntimeEventKind::TurnStarted));
         assert!(matches!(
             replay[1].kind,
@@ -420,6 +495,15 @@ mod tests {
         assert!(matches!(replay[2].kind, RuntimeEventKind::TurnCompleted));
         assert_eq!(replay[0].turn_id.as_ref(), Some(&turn_id));
         assert_eq!(replay[2].turn_id.as_ref(), Some(&turn_id));
+
+        let snapshot = live_view.snapshot;
+        assert!(snapshot.reference_turn_context.is_some());
+        assert!(snapshot.conversation[0]
+            .content
+            .contains("Runtime context:"));
+        assert!(snapshot.conversation[1]
+            .content
+            .contains("Environment context:"));
     }
 
     #[tokio::test]
@@ -497,16 +581,20 @@ mod tests {
         );
         assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
 
-        let snapshot = crate::transcript::read_session_snapshot(&config.workspace_root, &thread_id)
-            .expect("read snapshot");
+        let snapshot =
+            ThreadSession::live_view_from_state(thread_id.clone(), &session.live_state_handle())
+                .snapshot;
         let contents = snapshot
             .conversation
             .iter()
             .map(|message| message.content.as_str())
             .collect::<Vec<_>>();
+        assert_eq!(contents.len(), 6);
+        assert!(contents[0].contains("Runtime context:"));
+        assert!(contents[1].contains("Environment context:"));
         assert_eq!(
-            contents,
-            vec![
+            &contents[2..],
+            &[
                 "first input",
                 "first turn complete",
                 "second input",
@@ -569,7 +657,62 @@ mod tests {
             .await
             .expect("run turn");
 
-        assert_eq!(*prompt_lens.lock().unwrap(), vec![1, 3]);
+        assert_eq!(*prompt_lens.lock().unwrap(), vec![3, 5]);
+    }
+
+    #[tokio::test]
+    async fn thread_session_sampling_prompt_includes_runtime_context() {
+        let dir = tempdir().unwrap();
+        let thread_id = SessionId::new("session_thread_session_prompt_context");
+        let turn_id = TurnId::new("turn_1");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().join("subdir"),
+            ..AgentConfig::default()
+        };
+        let snapshot = SessionSnapshot::new_thread(
+            thread_id.clone(),
+            config.workspace_root.clone(),
+            config.cwd.clone(),
+        );
+        let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
+        crate::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+        let prompt_lens = Arc::new(Mutex::new(Vec::new()));
+        let prompt_contents = Arc::new(Mutex::new(Vec::new()));
+        let prompt_lens_for_llm = prompt_lens.clone();
+        let prompt_contents_for_llm = prompt_contents.clone();
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(RecordingLlm::with_prompt_contents(
+                    vec![AssistantTurn {
+                        text: Some("context received".into()),
+                        tool_calls: vec![],
+                    }],
+                    prompt_lens_for_llm.clone(),
+                    prompt_contents_for_llm.clone(),
+                )),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config,
+            agent_factory,
+        ))
+        .expect("create thread session");
+
+        session
+            .handle_user_input(turn_id, "inspect context".into(), None, None)
+            .await
+            .expect("run turn");
+
+        let prompts = prompt_contents.lock().unwrap();
+        assert_eq!(*prompt_lens.lock().unwrap(), vec![3]);
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0][0].contains("Runtime context:"));
+        assert!(prompts[0][1].contains("Environment context:"));
+        assert_eq!(prompts[0][2], "inspect context");
     }
 
     /// Verifies the F2 streaming contract at the ThreadSession boundary:
@@ -628,8 +771,9 @@ mod tests {
         };
 
         assert_eq!(final_turn.text.as_deref(), Some("done"));
-        let replay = crate::transcript::read_session_events(&config.workspace_root, &thread_id)
-            .expect("read events");
+        let replay =
+            ThreadSession::live_view_from_state(thread_id.clone(), &session.live_state_handle())
+                .events;
         assert_eq!(replay.len(), 5, "expected lifecycle plus three step events");
         assert!(matches!(replay[0].kind, RuntimeEventKind::TurnStarted));
         assert!(matches!(
@@ -646,10 +790,17 @@ mod tests {
         ));
         assert!(matches!(replay[4].kind, RuntimeEventKind::TurnCompleted));
 
-        let snapshot = crate::transcript::read_session_snapshot(&config.workspace_root, &thread_id)
-            .expect("read snapshot");
-        assert_eq!(snapshot.conversation.len(), 4);
-        assert_eq!(snapshot.conversation[0].content, "hi");
-        assert_eq!(snapshot.conversation[3].content, "done");
+        let snapshot =
+            ThreadSession::live_view_from_state(thread_id.clone(), &session.live_state_handle())
+                .snapshot;
+        assert_eq!(snapshot.conversation.len(), 6);
+        assert!(snapshot.conversation[0]
+            .content
+            .contains("Runtime context:"));
+        assert!(snapshot.conversation[1]
+            .content
+            .contains("Environment context:"));
+        assert_eq!(snapshot.conversation[2].content, "hi");
+        assert_eq!(snapshot.conversation[5].content, "done");
     }
 }

@@ -80,15 +80,35 @@ pub struct ConversationMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub injected: bool,
 }
 
 impl ConversationMessage {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: MessageRole::System,
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls: vec![],
+            injected: false,
+        }
+    }
+
+    pub fn injected_system(content: impl Into<String>) -> Self {
+        Self {
+            injected: true,
+            ..Self::system(content)
+        }
+    }
+
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: MessageRole::User,
             content: content.into(),
             tool_call_id: None,
             tool_calls: vec![],
+            injected: false,
         }
     }
 
@@ -98,6 +118,7 @@ impl ConversationMessage {
             content: content.unwrap_or_default(),
             tool_call_id: None,
             tool_calls,
+            injected: false,
         }
     }
 
@@ -107,6 +128,11 @@ impl ConversationMessage {
             content: content.into(),
             tool_call_id: Some(tool_call_id.into()),
             tool_calls: vec![],
+            injected: false,
         }
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }

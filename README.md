@@ -62,7 +62,7 @@ flowchart TB
 Key persistence rule:
 
 - `rollout.jsonl` is the durable source of truth for new thread records
-- legacy `snapshot.json` and `events.jsonl` files are migration inputs and v2 compatibility fields
+- legacy `snapshot.json` and `events.jsonl` files are not runtime inputs; v2 still returns their paths as compatibility-only fields
 - `ContextManager` owns prompt-visible history while a thread is loaded
 - `RuntimeOverlay` owns live-only approvals and open exec session references
 - cold rollout replay never recreates live-only approvals or running exec sessions
@@ -227,7 +227,7 @@ Rust is a good fit here because the project is runtime infrastructure, not a one
 - [src/app_server](src/app_server): typed app-server boundary, protocol, thread manager
 - [src/runtime](src/runtime): live execution kernel, thread actor, session turn loop, agent sampling, tool runtime, policy, exec sessions
 - [src/tools](src/tools): tool trait, registry, and built-in tools
-- [src/state](src/state): durable rollout models plus legacy transcript compatibility helpers
+- [src/state](src/state): durable rollout models plus protocol compatibility path helpers
 - [src/model](src/model): LLM client adapter and conversation/tool-call types
 - [tests](tests): integration coverage for agent loop, replay, policy, exec sessions, API, and thread runtime
 - [docs/plans](docs/plans): design notes, roadmap, and implementation plans

@@ -264,9 +264,9 @@ session metadata, prompt-visible conversation items, turn context records,
 compaction checkpoints, and selected runtime events.
 
 Legacy `.exagent/sessions/<thread_id>/snapshot.json` and `events.jsonl` files
-are migration inputs only. The v2 protocol still returns `snapshot_path` and
-`events_path` for compatibility, but new rollout-backed sessions do not rely on
-those files.
+are not runtime inputs. The v2 protocol still returns `snapshot_path` and
+`events_path` for compatibility, but rollout-backed sessions do not create or
+load those files.
 
 For the full client-facing protocol contract, see
 [docs/protocol/app-server-boundary-v2.md](../protocol/app-server-boundary-v2.md).

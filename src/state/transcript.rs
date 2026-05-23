@@ -1,3 +1,9 @@
+//! JSON helpers plus v2 compatibility path construction.
+//!
+//! Runtime state is restored from `.exagent/threads/<thread_id>/rollout.jsonl`.
+//! The `.exagent/sessions/<thread_id>/snapshot.json` and `events.jsonl` paths
+//! are retained only because the v2 protocol still returns those fields.
+
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -8,9 +14,7 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::events::{RuntimeEvent, RuntimeEventKind};
-use crate::session::SessionSnapshot;
-use crate::types::{EventId, SessionId, TurnId};
+use crate::types::SessionId;
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -84,45 +88,4 @@ pub fn session_paths(workspace_root: &Path, session_id: &SessionId) -> SessionPa
         events_path: session_dir.join("events.jsonl"),
         session_dir,
     }
-}
-
-pub fn read_session_events(
-    workspace_root: &Path,
-    session_id: &SessionId,
-) -> Result<Vec<RuntimeEvent>> {
-    let paths = session_paths(workspace_root, session_id);
-    read_json_lines(&paths.events_path)
-}
-
-pub fn read_session_snapshot(
-    workspace_root: &Path,
-    session_id: &SessionId,
-) -> Result<SessionSnapshot> {
-    let paths = session_paths(workspace_root, session_id);
-    read_json(&paths.snapshot_path)
-}
-
-pub fn replay_session(workspace_root: &Path, session_id: &SessionId) -> Result<Vec<RuntimeEvent>> {
-    read_session_events(workspace_root, session_id)
-}
-
-pub fn append_runtime_event(
-    workspace_root: &Path,
-    session_id: &SessionId,
-    turn_id: Option<&TurnId>,
-    kind: RuntimeEventKind,
-) -> Result<RuntimeEvent> {
-    let next_event_id = EventId::new(format!(
-        "evt_{}",
-        read_session_events(workspace_root, session_id)?.len() + 1
-    ));
-    let event = RuntimeEvent {
-        event_id: next_event_id,
-        session_id: session_id.clone(),
-        turn_id: turn_id.cloned(),
-        kind,
-    };
-    let paths = session_paths(workspace_root, session_id);
-    append_json_line(&paths.events_path, &event)?;
-    Ok(event)
 }

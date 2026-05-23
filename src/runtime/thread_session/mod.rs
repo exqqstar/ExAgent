@@ -18,7 +18,10 @@ use crate::runtime::thread_runtime::{
     AgentFactory, ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus,
 };
 use crate::session::SessionSnapshot;
-use crate::state::rollout::{rollout_paths, session_meta_from_snapshot, RolloutItem, RolloutStore};
+use crate::state::rollout::{
+    events_from_rollout_items, rollout_paths, snapshot_from_rollout_items, RolloutItem,
+    RolloutStore,
+};
 use crate::types::{EventId, SessionId, TurnId};
 
 const DEFAULT_THREAD_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -138,20 +141,11 @@ impl ThreadSession {
             policy,
             live_event_buffer_cap,
         } = options;
-        let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
         let rollout_paths = rollout_paths(&config.workspace_root, &thread_id);
         let rollout_store = RolloutStore::new(rollout_paths.rollout_path);
         let rollout_items = RolloutStore::read_items_blocking(rollout_store.path())?;
-        let (snapshot, mut events, context_manager) = if rollout_items.is_empty() {
-            let mut snapshot: SessionSnapshot = crate::transcript::read_json(&paths.snapshot_path)?;
-            snapshot.normalize_lineage();
-            ensure_session_meta_rollout(&snapshot, &rollout_store)?;
-            let events = crate::transcript::read_json_lines::<RuntimeEvent>(&paths.events_path)?;
-            let context_manager = ContextManager::from_snapshot(&snapshot);
-            (snapshot, events, context_manager)
-        } else {
-            restore_from_rollout(&thread_id, &rollout_items)?
-        };
+        let (snapshot, mut events, context_manager) =
+            restore_from_rollout(&thread_id, &rollout_items)?;
         let live_event_buffer_cap = live_event_buffer_cap.max(1);
         let next_event_index = next_event_index(&events);
         let overflow = events.len().saturating_sub(live_event_buffer_cap);
@@ -299,45 +293,10 @@ fn restore_from_rollout(
     requested_thread_id: &SessionId,
     items: &[RolloutItem],
 ) -> anyhow::Result<(SessionSnapshot, Vec<RuntimeEvent>, ContextManager)> {
-    let meta = items
-        .iter()
-        .find_map(|item| match item {
-            RolloutItem::SessionMeta(meta) => Some(meta),
-            _ => None,
-        })
-        .ok_or_else(|| anyhow::anyhow!("rollout is missing SessionMeta"))?;
-    if &meta.thread_id != requested_thread_id {
-        return Err(anyhow::anyhow!(
-            "rollout thread id {} does not match requested thread id {}",
-            meta.thread_id.as_str(),
-            requested_thread_id.as_str()
-        ));
-    }
-
+    let mut snapshot = snapshot_from_rollout_items(requested_thread_id, items)?;
     let context_manager = ContextManager::from_rollout_items(items);
-    let mut snapshot = SessionSnapshot {
-        session_id: meta.thread_id.clone(),
-        parent_session_id: meta.parent_thread_id.clone(),
-        root_session_id: meta.root_thread_id.clone(),
-        spawned_by_turn_id: meta.spawned_by_turn_id.clone(),
-        agent_role: meta.agent_role.clone(),
-        workspace_root: meta.workspace_root.clone(),
-        cwd: meta.initial_cwd.clone(),
-        reference_turn_context: context_manager.reference_turn_context(),
-        conversation: context_manager.for_prompt(),
-        open_exec_sessions: vec![],
-        latest_compaction: None,
-        pending_approvals: vec![],
-    };
-    snapshot.normalize_lineage();
-
-    let events = items
-        .iter()
-        .filter_map(|item| match item {
-            RolloutItem::EventMsg(event) => Some(event.clone()),
-            _ => None,
-        })
-        .collect();
+    context_manager.sync_snapshot(&mut snapshot);
+    let events = events_from_rollout_items(items);
 
     Ok((snapshot, events, context_manager))
 }
@@ -355,23 +314,6 @@ fn parse_event_index(event_id: &EventId) -> Option<usize> {
     event_id.as_str().strip_prefix("evt_")?.parse().ok()
 }
 
-fn ensure_session_meta_rollout(
-    snapshot: &SessionSnapshot,
-    store: &RolloutStore,
-) -> anyhow::Result<()> {
-    let should_initialize = std::fs::metadata(store.path())
-        .map(|metadata| metadata.len() == 0)
-        .unwrap_or(true);
-    if !should_initialize {
-        return Ok(());
-    }
-
-    store.append_items_blocking(&[RolloutItem::SessionMeta(session_meta_from_snapshot(
-        snapshot,
-    ))])?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +327,20 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::tempdir;
 
+    fn write_rollout_meta(config: &AgentConfig, thread_id: &SessionId) {
+        let snapshot = SessionSnapshot::new_thread(
+            thread_id.clone(),
+            config.workspace_root.clone(),
+            config.cwd.clone(),
+        );
+        let rollout_paths = crate::state::rollout::rollout_paths(&config.workspace_root, thread_id);
+        crate::state::rollout::RolloutStore::new(rollout_paths.rollout_path)
+            .append_items_blocking(&[crate::state::rollout::RolloutItem::SessionMeta(
+                crate::state::rollout::session_meta_from_snapshot(&snapshot),
+            )])
+            .expect("write rollout session meta");
+    }
+
     #[tokio::test]
     async fn handle_interrupt_cancels_pending_policy_approvals() {
         let dir = tempdir().unwrap();
@@ -395,13 +351,7 @@ mod tests {
             ..AgentConfig::default()
         };
 
-        let snapshot = SessionSnapshot::new_thread(
-            thread_id.clone(),
-            config.workspace_root.clone(),
-            config.cwd.clone(),
-        );
-        let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
-        crate::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+        write_rollout_meta(&config, &thread_id);
 
         let policy = Arc::new(PolicyManager::default());
         let _registered = policy
@@ -474,20 +424,22 @@ mod tests {
             config.workspace_root.clone(),
             config.cwd.clone(),
         );
-        let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
-        crate::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+        let mut rollout_items = vec![crate::state::rollout::RolloutItem::SessionMeta(
+            crate::state::rollout::session_meta_from_snapshot(&snapshot),
+        )];
         for event_index in 1..=4 {
-            crate::transcript::append_json_line(
-                &paths.events_path,
-                &RuntimeEvent {
-                    event_id: EventId::new(format!("evt_{}", event_index)),
-                    session_id: thread_id.clone(),
-                    turn_id: Some(TurnId::new(format!("turn_{}", event_index))),
-                    kind: RuntimeEventKind::TurnStarted,
-                },
-            )
-            .unwrap();
+            rollout_items.push(crate::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
+                event_id: EventId::new(format!("evt_{}", event_index)),
+                session_id: thread_id.clone(),
+                turn_id: Some(TurnId::new(format!("turn_{}", event_index))),
+                kind: RuntimeEventKind::TurnStarted,
+            }));
         }
+        let rollout_paths =
+            crate::state::rollout::rollout_paths(&config.workspace_root, &thread_id);
+        crate::state::rollout::RolloutStore::new(rollout_paths.rollout_path.clone())
+            .append_items_blocking(&rollout_items)
+            .expect("write rollout items");
 
         let agent_factory: AgentFactory = Arc::new(move |config| {
             Ok(Agent::new(
@@ -523,12 +475,6 @@ mod tests {
         assert_eq!(live_view.events[0].event_id, EventId::new("evt_4"));
         assert_eq!(live_view.events[1].event_id, EventId::new("evt_5"));
 
-        let legacy_replay =
-            crate::transcript::read_session_events(&config.workspace_root, &thread_id)
-                .expect("read legacy replay events");
-        assert_eq!(legacy_replay.len(), 4);
-        let rollout_paths =
-            crate::state::rollout::rollout_paths(&config.workspace_root, &thread_id);
         let rollout_items =
             crate::state::rollout::RolloutStore::read_items_blocking(&rollout_paths.rollout_path)
                 .expect("read rollout items");

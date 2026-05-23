@@ -118,7 +118,7 @@ Do not persist child process handles or approval waiters.
 Do not make cold replay produce pending approvals.
 Do not make cold replay produce running exec sessions.
 Do not implement compaction in this change.
-Do not remove legacy transcript migration in this change.
+Do not restore pending approvals or exec sessions from rollout or legacy transcript files.
 ```
 
 ## Task 1: Add Cold Replay Invariant Tests

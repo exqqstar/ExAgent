@@ -4,9 +4,9 @@
 
 **Goal:** Replace ExAgent's `snapshot.json + events.jsonl` durable state model with a Codex-style `rollout.jsonl` source of truth, and make `ThreadSession` own a stateful `ContextManager`.
 
-**Status:** Implemented in the current working tree. New sessions write `rollout.jsonl`; `snapshot.json + events.jsonl` are legacy migration inputs.
+**Status:** Implemented in the current working tree. Runtime load and cold read use `rollout.jsonl`; `snapshot.json + events.jsonl` are no longer runtime or migration inputs.
 
-**Architecture:** Add a rollout schema/store first, then move runtime history ownership from `SessionSnapshot` into `ContextManager`, then switch new session persistence and resume to rollout. Keep legacy snapshot/events only as a migration input during the transition.
+**Architecture:** Add a rollout schema/store first, then move runtime history ownership from `SessionSnapshot` into `ContextManager`, then switch new session persistence and resume to rollout. Keep only v2 compatibility path fields for snapshot/events; do not read or migrate those files.
 
 **Tech Stack:** Rust, Tokio, serde JSONL, existing `ThreadSession`, `ThreadRuntime`, `RuntimeEvent`, `ConversationMessage`, `TurnContextItem`, `ToolCallRuntime`, app-server boundary tests.
 
@@ -800,7 +800,7 @@ pub fn rollout_paths(workspace_root: &std::path::Path, thread_id: &SessionId) ->
 }
 ```
 
-Do not delete `transcript.rs` yet. Mark it as legacy in module comments.
+Do not delete `transcript.rs` yet. Keep only JSON helpers and compatibility path construction there.
 
 **Step 4: Run tests**
 
@@ -1090,7 +1090,7 @@ hydrate runtime fields from selected EventMsg / effects where supported
 construct ThreadSession
 ```
 
-Keep snapshot fallback only for legacy sessions.
+Do not keep a snapshot fallback. Rollout is the only runtime load source.
 
 **Step 4: Run integration tests**
 
@@ -1108,7 +1108,7 @@ Expected:
 PASS
 ```
 
-## Task 12: Add Legacy Snapshot/Event Migration
+## Task 12: Remove Legacy Snapshot/Event Migration
 
 **Files:**
 
@@ -1116,68 +1116,35 @@ PASS
 - Modify: `src/state/transcript.rs`
 - Test: `src/state/rollout.rs`
 
-**Step 1: Write failing migration test**
+This task was superseded by the review decision that old sessions do not need
+to be migrated. Runtime load and cold read should reject snapshot-only state
+instead of synthesizing rollout from it.
 
-Add:
+**Step 1: Write failing no-fallback test**
 
 ```rust
-#[tokio::test]
-async fn legacy_snapshot_and_events_migrate_to_rollout_items() {
-    // Write legacy snapshot.json with conversation and reference_turn_context.
-    // Write legacy events.jsonl with TurnStarted/TurnCompleted.
-    // Run migrate_legacy_transcript_to_rollout(...)
-    // Assert rollout has SessionMeta, TurnContext, ResponseItems, selected EventMsg.
+#[test]
+fn legacy_snapshot_only_thread_is_not_loaded_as_runtime_state() {
+    // Write only .exagent/sessions/<thread_id>/snapshot.json.
+    // Attempt ThreadSession::new.
+    // Assert it returns an error because rollout is missing.
 }
 ```
 
-**Step 2: Run test to verify failure**
+**Step 2: Remove migration helpers**
+
+```text
+delete migrate_legacy_transcript_to_rollout
+delete read_session_snapshot/read_session_events/replay_session/append_runtime_event
+keep only JSON helpers and compatibility path construction in transcript.rs
+```
+
+**Step 3: Run tests**
 
 Run:
 
 ```bash
-cargo test legacy_snapshot_and_events_migrate_to_rollout_items --lib
-```
-
-Expected:
-
-```text
-FAIL because migration helper does not exist.
-```
-
-**Step 3: Implement migration helper**
-
-Add a helper:
-
-```rust
-pub async fn migrate_legacy_transcript_to_rollout(
-    workspace_root: &Path,
-    thread_id: &SessionId,
-) -> std::io::Result<Option<PathBuf>>
-```
-
-Rules:
-
-```text
-if rollout already exists:
-  do nothing
-if snapshot missing:
-  return Ok(None)
-read snapshot
-create SessionMeta
-if reference_turn_context exists:
-  write TurnContext
-write each snapshot.conversation item as ResponseItem
-read events.jsonl if present
-write selected EventMsg only
-return rollout path
-```
-
-**Step 4: Run migration tests**
-
-Run:
-
-```bash
-cargo test legacy_snapshot_and_events_migrate_to_rollout_items --lib
+cargo test --test thread_runtime legacy_snapshot_only_thread_is_not_loaded_as_runtime_state
 ```
 
 Expected:
@@ -1374,7 +1341,7 @@ not loaded:
   reconstruct derived view
 
 legacy only:
-  migrate snapshot/events first or return explicit legacy unsupported error
+  return not found / unsupported unless rollout exists
 ```
 
 **Step 4: Run boundary tests**
@@ -1461,7 +1428,7 @@ Document:
 
 ```text
 rollout.jsonl is source of truth
-snapshot/events are legacy migration inputs
+snapshot/events are compatibility-only protocol paths
 ContextManager is stateful
 selected EventMsg persistence policy
 resume/replay behavior
@@ -1478,7 +1445,7 @@ rg -n "snapshot\\.json|events\\.jsonl|SessionSnapshot|ThreadEventRecorder|source
 Expected:
 
 ```text
-Only legacy or migration references remain.
+Only compatibility-field or historical-plan references remain.
 ```
 
 ## Task 18: Final Verification

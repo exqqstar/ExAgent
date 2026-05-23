@@ -89,7 +89,6 @@ impl ToolCallRuntime {
             turn_id: Some(self.turn_id.clone()),
             exec_sessions: self.exec_sessions.clone(),
             policy: self.policy.clone(),
-            defer_policy_events: true,
         };
         let result = self.registry.execute(call, Some(&ctx)).await;
         let effects = tool_effects_from_result(&result, self.cwd.clone());

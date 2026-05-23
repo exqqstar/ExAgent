@@ -104,6 +104,15 @@ fn rollout_reconstruction_does_not_restore_runtime_overlay_fields() {
 }
 
 #[test]
+fn run_command_tool_does_not_write_legacy_transcript_events() {
+    let source =
+        std::fs::read_to_string("src/tools/run_command.rs").expect("read run command tool");
+
+    assert!(!source.contains("transcript::append_json_line"));
+    assert!(!source.contains("transcript::session_paths"));
+}
+
+#[test]
 fn turn_loop_does_not_mutate_snapshot_live_only_fields() {
     let source =
         std::fs::read_to_string("src/runtime/thread_session/turn.rs").expect("read turn loop");

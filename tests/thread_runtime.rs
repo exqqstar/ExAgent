@@ -15,10 +15,46 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 
+fn write_rollout_meta(config: &AgentConfig, thread_id: &SessionId) {
+    let rollout_paths = rollout_paths(&config.workspace_root, thread_id);
+    RolloutStore::new(rollout_paths.rollout_path)
+        .append_items_blocking(&[RolloutItem::SessionMeta(SessionMeta {
+            thread_id: thread_id.clone(),
+            root_thread_id: thread_id.clone(),
+            parent_thread_id: None,
+            spawned_by_turn_id: None,
+            agent_role: AgentRole::Primary,
+            workspace_root: config.workspace_root.clone(),
+            initial_cwd: config.cwd.clone(),
+            created_at: "2026-05-20T00:00:00Z".to_string(),
+        })])
+        .expect("write rollout session meta");
+}
+
 #[test]
 fn thread_session_can_be_constructed_as_runtime_state_owner() {
     let dir = tempdir().unwrap();
     let thread_id = SessionId::new("session_thread_session_construct");
+    let config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        ..AgentConfig::default()
+    };
+    write_rollout_meta(&config, &thread_id);
+    let session = ThreadSession::new(ThreadSessionOptions::new(
+        thread_id.clone(),
+        config,
+        agent_factory(vec![]),
+    ))
+    .expect("create thread session");
+
+    assert_eq!(session.thread_id(), &thread_id);
+}
+
+#[test]
+fn legacy_snapshot_only_thread_is_not_loaded_as_runtime_state() {
+    let dir = tempdir().unwrap();
+    let thread_id = SessionId::new("session_legacy_snapshot_only");
     let config = AgentConfig {
         workspace_root: dir.path().to_path_buf(),
         cwd: dir.path().to_path_buf(),
@@ -31,14 +67,14 @@ fn thread_session_can_be_constructed_as_runtime_state_owner() {
     );
     let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
     exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
-    let session = ThreadSession::new(ThreadSessionOptions::new(
-        thread_id.clone(),
+
+    let result = ThreadSession::new(ThreadSessionOptions::new(
+        thread_id,
         config,
         agent_factory(vec![]),
-    ))
-    .expect("create thread session");
+    ));
 
-    assert_eq!(session.thread_id(), &thread_id);
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -50,13 +86,7 @@ async fn thread_runtime_starts_idle_and_accepts_shutdown_op() {
         cwd: dir.path().to_path_buf(),
         ..AgentConfig::default()
     };
-    let snapshot = SessionSnapshot::new_thread(
-        thread_id.clone(),
-        config.workspace_root.clone(),
-        config.cwd.clone(),
-    );
-    let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
-    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+    write_rollout_meta(&config, &thread_id);
     let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
         thread_id.clone(),
         config,
@@ -73,7 +103,7 @@ async fn thread_runtime_starts_idle_and_accepts_shutdown_op() {
 }
 
 #[tokio::test]
-async fn thread_session_writes_rollout_session_meta() {
+async fn thread_session_loads_rollout_session_meta() {
     let dir = tempdir().unwrap();
     let thread_id = SessionId::new("thread_rollout_start");
     let config = AgentConfig {
@@ -81,13 +111,7 @@ async fn thread_session_writes_rollout_session_meta() {
         cwd: dir.path().to_path_buf(),
         ..AgentConfig::default()
     };
-    let snapshot = SessionSnapshot::new_thread(
-        thread_id.clone(),
-        config.workspace_root.clone(),
-        config.cwd.clone(),
-    );
-    let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
-    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+    write_rollout_meta(&config, &thread_id);
 
     let _session = ThreadSession::new(ThreadSessionOptions::new(
         thread_id.clone(),
@@ -164,6 +188,64 @@ async fn thread_resume_reconstructs_context_from_rollout_without_snapshot() {
 }
 
 #[tokio::test]
+async fn runtime_restore_uses_rollout_projection_for_compaction_metadata() {
+    let dir = tempdir().unwrap();
+    let thread_id = SessionId::new("thread_rollout_compaction_restore");
+    let config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        ..AgentConfig::default()
+    };
+    let rollout_paths = rollout_paths(&config.workspace_root, &thread_id);
+    let store = RolloutStore::new(rollout_paths.rollout_path.clone());
+    store
+        .append_items(&[
+            RolloutItem::SessionMeta(SessionMeta {
+                thread_id: thread_id.clone(),
+                root_thread_id: thread_id.clone(),
+                parent_thread_id: None,
+                spawned_by_turn_id: None,
+                agent_role: AgentRole::Primary,
+                workspace_root: config.workspace_root.clone(),
+                initial_cwd: config.cwd.clone(),
+                created_at: "2026-05-20T00:00:00Z".to_string(),
+            }),
+            RolloutItem::ResponseItem(ConversationMessage::user("pre-compaction user")),
+            RolloutItem::Compacted(exagent::state::rollout::CompactedItem {
+                message: "compacted history".to_string(),
+                replacement_history: Some(vec![ConversationMessage::assistant(
+                    Some("summary history".to_string()),
+                    vec![],
+                )]),
+            }),
+        ])
+        .await
+        .expect("write rollout");
+
+    let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
+        thread_id,
+        config,
+        agent_factory(vec![]),
+    ))
+    .expect("resume thread runtime");
+
+    let live_view = runtime.live_view();
+    assert_eq!(
+        live_view
+            .snapshot
+            .latest_compaction
+            .as_ref()
+            .map(|compaction| compaction.summary.as_str()),
+        Some("compacted history")
+    );
+    assert_eq!(live_view.snapshot.conversation.len(), 1);
+    assert_eq!(
+        live_view.snapshot.conversation[0].content,
+        "summary history"
+    );
+}
+
+#[tokio::test]
 async fn thread_runtime_live_view_uses_loaded_session_state_not_disk_mutations() {
     let dir = tempdir().unwrap();
     let thread_id = SessionId::new("session_runtime_live_view");
@@ -172,13 +254,8 @@ async fn thread_runtime_live_view_uses_loaded_session_state_not_disk_mutations()
         cwd: dir.path().to_path_buf(),
         ..AgentConfig::default()
     };
-    let snapshot = SessionSnapshot::new_thread(
-        thread_id.clone(),
-        config.workspace_root.clone(),
-        config.cwd.clone(),
-    );
+    write_rollout_meta(&config, &thread_id);
     let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
-    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
     let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
         thread_id.clone(),
         config.clone(),
@@ -216,13 +293,7 @@ async fn thread_runtime_runs_user_input_through_agent_and_records_turn_lifecycle
         cwd: dir.path().to_path_buf(),
         ..AgentConfig::default()
     };
-    let snapshot = SessionSnapshot::new_thread(
-        thread_id.clone(),
-        config.workspace_root.clone(),
-        config.cwd.clone(),
-    );
-    let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
-    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+    write_rollout_meta(&config, &thread_id);
     let final_turn = AssistantTurn {
         text: Some("runtime turn complete".into()),
         tool_calls: vec![],
@@ -284,13 +355,7 @@ async fn thread_turn_records_rollout_items_and_context_history() {
         cwd: dir.path().to_path_buf(),
         ..AgentConfig::default()
     };
-    let snapshot = SessionSnapshot::new_thread(
-        thread_id.clone(),
-        config.workspace_root.clone(),
-        config.cwd.clone(),
-    );
-    let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
-    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+    write_rollout_meta(&config, &thread_id);
     let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
         thread_id.clone(),
         config.clone(),
@@ -390,13 +455,8 @@ async fn thread_runtime_live_view_tracks_snapshot_after_turn_without_disk_read()
         cwd: dir.path().to_path_buf(),
         ..AgentConfig::default()
     };
-    let snapshot = SessionSnapshot::new_thread(
-        thread_id.clone(),
-        config.workspace_root.clone(),
-        config.cwd.clone(),
-    );
+    write_rollout_meta(&config, &thread_id);
     let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
-    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
     let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
         thread_id.clone(),
         config,
@@ -447,13 +507,8 @@ async fn thread_runtime_next_turn_id_uses_live_state_not_disk() {
         cwd: dir.path().to_path_buf(),
         ..AgentConfig::default()
     };
-    let snapshot = SessionSnapshot::new_thread(
-        thread_id.clone(),
-        config.workspace_root.clone(),
-        config.cwd.clone(),
-    );
+    write_rollout_meta(&config, &thread_id);
     let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
-    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
     let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
         thread_id.clone(),
         config,
@@ -514,13 +569,7 @@ async fn thread_runtime_marks_stopped_when_loop_handler_panics() {
         cwd: dir.path().to_path_buf(),
         ..AgentConfig::default()
     };
-    let snapshot = SessionSnapshot::new_thread(
-        thread_id.clone(),
-        config.workspace_root.clone(),
-        config.cwd.clone(),
-    );
-    let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
-    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+    write_rollout_meta(&config, &thread_id);
 
     let panicking_factory: AgentFactory =
         Arc::new(move |config| Ok(Agent::new(config, Box::new(PanicLlm), ToolRegistry::new())));

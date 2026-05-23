@@ -43,14 +43,6 @@ impl ContextManager {
         Self::default()
     }
 
-    pub(crate) fn from_snapshot(snapshot: &SessionSnapshot) -> Self {
-        Self {
-            items: snapshot.conversation.clone(),
-            history_version: 0,
-            reference_turn_context: snapshot.reference_turn_context.clone(),
-        }
-    }
-
     pub(crate) fn from_rollout_items(items: &[crate::state::rollout::RolloutItem]) -> Self {
         let mut manager = ContextManager::new();
         for item in items {

@@ -253,7 +253,7 @@ impl ThreadManager {
             let runtime = loaded.runtime;
             let live_view = runtime.live_view();
             let paths = crate::transcript::session_paths(&loaded.workspace_root, &thread_id);
-            return Ok(self.thread_read_from_snapshot_events(
+            return Ok(self.thread_read_from_state_view(
                 thread_id,
                 live_view.overlay,
                 live_view.events,
@@ -265,7 +265,7 @@ impl ThreadManager {
         let Some(stored) = read_thread_state_from_storage(workspace_root, &thread_id)? else {
             return Err(AppServerError::ThreadNotFound(thread_id).into());
         };
-        Ok(self.thread_read_from_snapshot_events(
+        Ok(self.thread_read_from_state_view(
             thread_id,
             RuntimeOverlay::default(),
             stored.events,
@@ -274,7 +274,7 @@ impl ThreadManager {
         ))
     }
 
-    fn thread_read_from_snapshot_events(
+    fn thread_read_from_state_view(
         &self,
         thread_id: SessionId,
         overlay: RuntimeOverlay,
@@ -397,13 +397,6 @@ impl ThreadManager {
             });
         }
 
-        let paths = crate::transcript::session_paths(&config.workspace_root, &params.thread_id);
-        if paths.snapshot_path.exists() {
-            return self
-                .interrupt_waiting_approval_turn(params, &config.workspace_root)
-                .await;
-        }
-
         if thread_exists_in_storage(&config.workspace_root, &params.thread_id) {
             return Err(AppServerError::TurnRejected {
                 thread_id: params.thread_id,
@@ -413,71 +406,6 @@ impl ThreadManager {
         }
 
         Err(AppServerError::ThreadNotFound(params.thread_id).into())
-    }
-
-    async fn interrupt_waiting_approval_turn(
-        &self,
-        params: TurnInterruptParams,
-        workspace_root: &std::path::Path,
-    ) -> Result<TurnInterruptResponse> {
-        let mut snapshot =
-            crate::transcript::read_session_snapshot(workspace_root, &params.thread_id)?;
-        let had_pending_approval = snapshot
-            .pending_approvals
-            .iter()
-            .any(|approval| matches!(approval.status, crate::session::ApprovalStatus::Pending));
-        if !had_pending_approval {
-            return Err(AppServerError::TurnRejected {
-                thread_id: params.thread_id,
-                reason: "thread has no active turn".to_string(),
-            }
-            .into());
-        }
-
-        let latest_turn = latest_turn_state(&crate::transcript::read_session_events(
-            workspace_root,
-            &params.thread_id,
-        )?);
-        let turn_id = params
-            .turn_id
-            .clone()
-            .or_else(|| latest_turn.as_ref().map(|turn| turn.turn_id.clone()))
-            .ok_or_else(|| AppServerError::TurnRejected {
-                thread_id: params.thread_id.clone(),
-                reason: "waiting approval has no turn id".to_string(),
-            })?;
-        if let Some(latest_turn) = latest_turn.as_ref() {
-            if latest_turn.turn_id != turn_id {
-                return Err(AppServerError::TurnRejected {
-                    thread_id: params.thread_id,
-                    reason: format!("waiting approval turn is {}", latest_turn.turn_id.as_str()),
-                }
-                .into());
-            }
-        }
-
-        snapshot
-            .pending_approvals
-            .retain(|approval| !matches!(approval.status, crate::session::ApprovalStatus::Pending));
-        let paths = crate::transcript::session_paths(workspace_root, &params.thread_id);
-        crate::transcript::write_json(&paths.snapshot_path, &snapshot)?;
-        self.policy
-            .cancel_pending_for_session(&params.thread_id)
-            .await;
-        crate::transcript::append_runtime_event(
-            workspace_root,
-            &params.thread_id,
-            Some(&turn_id),
-            RuntimeEventKind::TurnInterrupted,
-        )?;
-
-        Ok(TurnInterruptResponse {
-            thread_id: params.thread_id,
-            interrupted_turn: Some(TurnState {
-                turn_id,
-                status: TurnStatus::Interrupted,
-            }),
-        })
     }
 
     async fn turn_start_direct(&self, params: TurnStartParams) -> Result<TurnStartResponse> {
@@ -1026,15 +954,9 @@ fn filter_replay_events(
 
 fn thread_exists_in_storage(workspace_root: &Path, thread_id: &SessionId) -> bool {
     let rollout_paths = rollout_paths(workspace_root, thread_id);
-    if std::fs::metadata(&rollout_paths.rollout_path)
+    std::fs::metadata(&rollout_paths.rollout_path)
         .map(|metadata| metadata.len() > 0)
         .unwrap_or(false)
-    {
-        return true;
-    }
-
-    let legacy_paths = crate::transcript::session_paths(workspace_root, thread_id);
-    legacy_paths.snapshot_path.exists()
 }
 
 fn read_thread_state_from_storage(
@@ -1043,25 +965,16 @@ fn read_thread_state_from_storage(
 ) -> Result<Option<StoredThreadState>> {
     let rollout_paths = rollout_paths(workspace_root, thread_id);
     let rollout_items = RolloutStore::read_items_blocking(&rollout_paths.rollout_path)?;
-    let legacy_paths = crate::transcript::session_paths(workspace_root, thread_id);
-    if !rollout_items.is_empty() {
-        return Ok(Some(StoredThreadState {
-            snapshot: snapshot_from_rollout_items(thread_id, &rollout_items)?,
-            events: events_from_rollout_items(&rollout_items),
-            snapshot_path: legacy_paths.snapshot_path,
-            events_path: legacy_paths.events_path,
-        }));
-    }
-
-    if !legacy_paths.snapshot_path.exists() {
+    let compat_paths = crate::transcript::session_paths(workspace_root, thread_id);
+    if rollout_items.is_empty() {
         return Ok(None);
     }
 
     Ok(Some(StoredThreadState {
-        snapshot: crate::transcript::read_session_snapshot(workspace_root, thread_id)?,
-        events: crate::transcript::read_session_events(workspace_root, thread_id)?,
-        snapshot_path: legacy_paths.snapshot_path,
-        events_path: legacy_paths.events_path,
+        snapshot: snapshot_from_rollout_items(thread_id, &rollout_items)?,
+        events: events_from_rollout_items(&rollout_items),
+        snapshot_path: compat_paths.snapshot_path,
+        events_path: compat_paths.events_path,
     }))
 }
 

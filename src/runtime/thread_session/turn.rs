@@ -346,6 +346,20 @@ mod tests {
     use crate::session::SessionSnapshot;
     use crate::types::{AssistantTurn, ConversationMessage, SessionId, ToolCall, TurnId};
 
+    fn write_rollout_meta(config: &AgentConfig, thread_id: &SessionId) {
+        let snapshot = SessionSnapshot::new_thread(
+            thread_id.clone(),
+            config.workspace_root.clone(),
+            config.cwd.clone(),
+        );
+        let rollout_paths = crate::state::rollout::rollout_paths(&config.workspace_root, thread_id);
+        crate::state::rollout::RolloutStore::new(rollout_paths.rollout_path)
+            .append_items_blocking(&[crate::state::rollout::RolloutItem::SessionMeta(
+                crate::state::rollout::session_meta_from_snapshot(&snapshot),
+            )])
+            .expect("write rollout session meta");
+    }
+
     struct RecordingLlm {
         turns: AsyncMutex<VecDeque<AssistantTurn>>,
         prompt_lens: Arc<Mutex<Vec<usize>>>,
@@ -408,13 +422,7 @@ mod tests {
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         };
-        let snapshot = SessionSnapshot::new_thread(
-            thread_id.clone(),
-            config.workspace_root.clone(),
-            config.cwd.clone(),
-        );
-        let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
-        crate::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+        write_rollout_meta(&config, &thread_id);
         let final_turn = AssistantTurn {
             text: Some("session turn complete".into()),
             tool_calls: vec![],
@@ -474,13 +482,7 @@ mod tests {
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         };
-        let snapshot = SessionSnapshot::new_thread(
-            thread_id.clone(),
-            config.workspace_root.clone(),
-            config.cwd.clone(),
-        );
-        let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
-        crate::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+        write_rollout_meta(&config, &thread_id);
         let factory_calls = Arc::new(AtomicUsize::new(0));
         let factory_call_counter = factory_calls.clone();
         let agent_factory: AgentFactory = Arc::new(move |config| {
@@ -572,13 +574,7 @@ mod tests {
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         };
-        let snapshot = SessionSnapshot::new_thread(
-            thread_id.clone(),
-            config.workspace_root.clone(),
-            config.cwd.clone(),
-        );
-        let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
-        crate::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+        write_rollout_meta(&config, &thread_id);
         let prompt_lens = Arc::new(Mutex::new(Vec::new()));
         let prompt_lens_for_llm = prompt_lens.clone();
         let agent_factory: AgentFactory = Arc::new(move |config| {
@@ -629,13 +625,7 @@ mod tests {
             cwd: dir.path().join("subdir"),
             ..AgentConfig::default()
         };
-        let snapshot = SessionSnapshot::new_thread(
-            thread_id.clone(),
-            config.workspace_root.clone(),
-            config.cwd.clone(),
-        );
-        let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
-        crate::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+        write_rollout_meta(&config, &thread_id);
         let prompt_lens = Arc::new(Mutex::new(Vec::new()));
         let prompt_contents = Arc::new(Mutex::new(Vec::new()));
         let prompt_lens_for_llm = prompt_lens.clone();
@@ -687,13 +677,7 @@ mod tests {
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         };
-        let snapshot = SessionSnapshot::new_thread(
-            thread_id.clone(),
-            config.workspace_root.clone(),
-            config.cwd.clone(),
-        );
-        let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
-        crate::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+        write_rollout_meta(&config, &thread_id);
         let agent_factory: AgentFactory = Arc::new(move |config| {
             Ok(Agent::new(
                 config,

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
@@ -161,48 +161,6 @@ pub fn rollout_paths(workspace_root: &std::path::Path, thread_id: &SessionId) ->
         rollout_path: thread_dir.join("rollout.jsonl"),
         thread_dir,
     }
-}
-
-pub async fn migrate_legacy_transcript_to_rollout(
-    workspace_root: &Path,
-    thread_id: &SessionId,
-) -> std::io::Result<Option<PathBuf>> {
-    let rollout_paths = rollout_paths(workspace_root, thread_id);
-    if std::fs::metadata(&rollout_paths.rollout_path)
-        .map(|metadata| metadata.len() > 0)
-        .unwrap_or(false)
-    {
-        return Ok(Some(rollout_paths.rollout_path));
-    }
-
-    let legacy_paths = crate::transcript::session_paths(workspace_root, thread_id);
-    if !legacy_paths.snapshot_path.exists() {
-        return Ok(None);
-    }
-
-    let snapshot: SessionSnapshot =
-        crate::transcript::read_json(&legacy_paths.snapshot_path).map_err(std::io::Error::other)?;
-    let mut items = vec![RolloutItem::SessionMeta(session_meta_from_snapshot(
-        &snapshot,
-    ))];
-
-    if let Some(context) = snapshot.reference_turn_context.clone() {
-        items.push(RolloutItem::TurnContext(context));
-    }
-    items.extend(
-        snapshot
-            .conversation
-            .into_iter()
-            .map(RolloutItem::ResponseItem),
-    );
-
-    let events = crate::transcript::read_json_lines::<RuntimeEvent>(&legacy_paths.events_path)
-        .map_err(std::io::Error::other)?;
-    items.extend(events.into_iter().map(RolloutItem::EventMsg));
-
-    let store = RolloutStore::new(rollout_paths.rollout_path.clone());
-    store.append_items(&items).await?;
-    Ok(Some(rollout_paths.rollout_path))
 }
 
 fn current_utc_timestamp() -> String {
@@ -461,81 +419,5 @@ mod tests {
 
         assert!(paths.thread_dir.ends_with("thread_1"));
         assert!(paths.rollout_path.ends_with("rollout.jsonl"));
-    }
-
-    #[tokio::test]
-    async fn legacy_snapshot_and_events_migrate_to_rollout_items() {
-        let dir = tempfile::tempdir().unwrap();
-        let thread_id = SessionId::new("thread_legacy_migrate");
-        let workspace_root = dir.path().to_path_buf();
-        let mut snapshot = crate::session::SessionSnapshot::new_thread(
-            thread_id.clone(),
-            workspace_root.clone(),
-            workspace_root.clone(),
-        );
-        snapshot.reference_turn_context = Some(TurnContextItem {
-            workspace_root: workspace_root.clone(),
-            cwd: workspace_root.clone(),
-            model: "mock".to_string(),
-            policy_mode: crate::policy::PolicyMode::Off,
-            command_timeout_secs: 30,
-            max_output_bytes: 1024,
-            current_utc_date: Some("2026-05-20".to_string()),
-        });
-        snapshot.conversation = vec![
-            ConversationMessage::user("legacy user"),
-            ConversationMessage::assistant(Some("legacy assistant".to_string()), vec![]),
-        ];
-        let legacy_paths = crate::transcript::session_paths(&workspace_root, &thread_id);
-        crate::transcript::write_json(&legacy_paths.snapshot_path, &snapshot).unwrap();
-        crate::transcript::append_json_line(
-            &legacy_paths.events_path,
-            &RuntimeEvent {
-                event_id: EventId::new("evt_1"),
-                session_id: thread_id.clone(),
-                turn_id: Some(TurnId::new("turn_1")),
-                kind: RuntimeEventKind::TurnStarted,
-            },
-        )
-        .unwrap();
-        crate::transcript::append_json_line(
-            &legacy_paths.events_path,
-            &RuntimeEvent {
-                event_id: EventId::new("evt_2"),
-                session_id: thread_id.clone(),
-                turn_id: Some(TurnId::new("turn_1")),
-                kind: RuntimeEventKind::ExecOutput {
-                    exec_session_id: crate::session::ExecSessionId::new("exec_1"),
-                    stream: crate::events::ExecOutputStream::Stdout,
-                    chunk: "do not persist".to_string(),
-                },
-            },
-        )
-        .unwrap();
-
-        let migrated_path = migrate_legacy_transcript_to_rollout(&workspace_root, &thread_id)
-            .await
-            .expect("migrate legacy transcript")
-            .expect("migration path");
-        let items = RolloutStore::read_items(&migrated_path)
-            .await
-            .expect("read rollout");
-
-        assert!(matches!(items.first(), Some(RolloutItem::SessionMeta(_))));
-        assert!(items
-            .iter()
-            .any(|item| matches!(item, RolloutItem::TurnContext(_))));
-        assert!(items.iter().any(|item| matches!(
-            item,
-            RolloutItem::ResponseItem(message) if message.content == "legacy user"
-        )));
-        assert!(items.iter().any(|item| matches!(
-            item,
-            RolloutItem::EventMsg(event) if matches!(event.kind, RuntimeEventKind::TurnStarted)
-        )));
-        assert!(!items.iter().any(|item| matches!(
-            item,
-            RolloutItem::EventMsg(event) if matches!(event.kind, RuntimeEventKind::ExecOutput { .. })
-        )));
     }
 }

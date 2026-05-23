@@ -125,7 +125,7 @@ ThreadSession
   owns live runtime state
 ```
 
-New threads write `.exagent/threads/<thread_id>/rollout.jsonl` and do not create `snapshot.json` or `events.jsonl`. `snapshot.json + events.jsonl` remain as legacy migration inputs only.
+New threads write `.exagent/threads/<thread_id>/rollout.jsonl` and do not create `snapshot.json` or `events.jsonl`. Legacy `snapshot.json + events.jsonl` files are no longer runtime or migration inputs; v2 may still return their paths as compatibility-only response fields.
 
 `ContextManager` is now a real stateful object:
 
@@ -431,7 +431,6 @@ append items
 read items
 flush
 selected EventMsg persistence policy
-legacy migration helpers later
 ```
 
 ### `src/runtime/context.rs` Changes
@@ -543,25 +542,25 @@ Transition options:
 
 ```text
 Phase 1:
-  keep SessionSnapshot for compatibility tests and migration helpers
+  keep SessionSnapshot for protocol views and compatibility fields
 
 Phase 2:
   stop writing snapshot.json for new sessions
 
 Phase 3:
-  remove or move SessionSnapshot to legacy migration module
+  narrow SessionSnapshot to derived protocol/runtime projection data
 ```
 
 ### `src/state/transcript.rs` Changes
 
-Becomes legacy compatibility or is replaced by `state::rollout`.
+Keeps JSON helpers and v2 compatibility path construction only.
 
 Target:
 
 ```text
-new sessions use rollout paths
-legacy sessions can be migrated from snapshot/events
-no new code relies on transcript snapshot/event dual files
+runtime state uses rollout paths
+snapshot_path/events_path are compatibility-only response fields
+no runtime code relies on transcript snapshot/event dual files
 ```
 
 ### `src/app_server/thread_manager.rs` Changes

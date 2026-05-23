@@ -14,6 +14,7 @@ Target invariant:
 rollout.jsonl is the only durable source of truth.
 ThreadSession is the runtime owner.
 ContextManager is a stateful in-memory history manager owned by ThreadSession.
+RuntimeOverlay owns live-only state that rollout replay must not reconstruct.
 ```
 
 This replaces the current split:
@@ -30,6 +31,7 @@ with:
 rollout.jsonl records durable facts
 ThreadSession replays those facts into runtime memory
 ContextManager owns prompt-visible history and context baseline
+RuntimeOverlay owns pending approvals and open exec session refs
 ```
 
 The goal is not to copy every Codex field immediately. The goal is to adopt the same ownership model:
@@ -38,6 +40,7 @@ The goal is not to copy every Codex field immediately. The goal is to adopt the 
 persistence authority -> rollout
 runtime authority     -> ThreadSession
 prompt history owner  -> ContextManager
+live-only owner       -> RuntimeOverlay
 ```
 
 ## Previous ExAgent Architecture
@@ -137,6 +140,20 @@ pub(crate) struct ContextManager {
 The turn loop records context messages, user messages, assistant messages, and tool results into `ContextManager` and persists the same prompt-visible items as `RolloutItem::ResponseItem`. Sampling uses `context_manager.for_prompt()` and does not derive prompts from `SessionSnapshot`.
 
 `ThreadEventRecorder` now assigns event ids, updates the live event buffer, broadcasts events, and persists selected `RuntimeEvent`s as `RolloutItem::EventMsg`. It no longer checkpoints `snapshot.json` or appends `events.jsonl` for new sessions.
+
+`RuntimeOverlay` is the in-memory holder for state that only has meaning while a
+runtime process is alive:
+
+```text
+src/runtime/thread_session/overlay.rs
+  - pending_approvals
+  - open_exec_sessions
+  - helpers for applying ToolEffect lifecycle updates
+```
+
+Cold rollout replay intentionally creates an empty `RuntimeOverlay`. Historical
+`ApprovalRequested` events and old persistent-command tool results remain
+history, not current waiters or running processes.
 
 ## Current Pain
 
@@ -277,6 +294,9 @@ CLI / HTTP
           -> conversation items
           -> reference_turn_context
           -> token_info later
+      -> RuntimeOverlay
+          -> pending approvals
+          -> open exec session refs
       -> runtime view/status
       -> Agent sampling
       -> ToolCallRuntime
@@ -457,6 +477,7 @@ Responsibilities:
 ```text
 owns RolloutStore
 owns ContextManager
+owns RuntimeOverlay
 owns runtime live view
 loads thread from rollout
 hydrates ContextManager from rollout
@@ -478,8 +499,25 @@ append RolloutItem::TurnContext
 append RolloutItem::ResponseItem(user)
 sample from ContextManager::for_prompt()
 append assistant/tool ResponseItems
-apply tool effects to runtime fields
+apply tool effects to RuntimeOverlay
 persist selected EventMsg
+```
+
+RuntimeOverlay is never included in prompt history. It may affect UI projection
+and interrupt behavior, but not model-visible conversation.
+
+### `src/runtime/thread_session/overlay.rs` New
+
+Owns live-only runtime state.
+
+Responsibilities:
+
+```text
+track open persistent exec sessions while process handles exist
+track pending approvals while policy waiters exist
+clear approvals on interrupt or decision
+drop open exec refs when lifecycle reports not-running
+stay empty during cold rollout replay
 ```
 
 ### `src/runtime/thread_session/events.rs` Changes
@@ -586,12 +624,14 @@ Target ExAgent
   durable:
     rollout.jsonl
   runtime:
-    ThreadSession owns ContextManager + runtime fields
+    ThreadSession owns ContextManager + RuntimeOverlay
   prompt:
     ContextManager::for_prompt()
   context baseline:
     ContextManager.reference_turn_context
     persisted as RolloutItem::TurnContext
+  live-only:
+    RuntimeOverlay, never rebuilt from cold rollout
 
 Codex
   durable:
@@ -633,10 +673,13 @@ Architecture is complete when:
 New sessions can resume from rollout.jsonl alone.
 ThreadSession owns ContextManager as a stateful object.
 ContextManager owns conversation items and reference_turn_context.
+RuntimeOverlay owns pending approvals and open exec session refs.
 Sampling prompt is derived only from ContextManager::for_prompt().
+RuntimeOverlay is not included in model prompt history.
 SessionSnapshot is not written for new sessions.
 events.jsonl is not written for new sessions.
 Selected RuntimeEvent entries are persisted through RolloutItem::EventMsg.
+Cold rollout replay leaves pending approvals and open exec sessions empty.
 Compacted replacement_history has schema support.
 Legacy snapshot/events can be migrated or the breaking change is explicit.
 ```

@@ -1,7 +1,9 @@
 pub mod events;
+pub(crate) mod overlay;
 pub mod turn;
 
 pub(crate) use events::{LiveEventSink, ThreadEventRecorder};
+pub(crate) use overlay::RuntimeOverlay;
 
 use std::sync::{Arc, RwLock};
 
@@ -15,7 +17,7 @@ use crate::runtime::context::ContextManager;
 use crate::runtime::thread_runtime::{
     AgentFactory, ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus,
 };
-use crate::session::{ApprovalStatus, SessionSnapshot};
+use crate::session::SessionSnapshot;
 use crate::state::rollout::{rollout_paths, session_meta_from_snapshot, RolloutItem, RolloutStore};
 use crate::types::{EventId, SessionId, TurnId};
 
@@ -88,6 +90,7 @@ pub struct ThreadSession {
 pub struct ThreadSessionLiveView {
     pub thread_id: SessionId,
     pub snapshot: SessionSnapshot,
+    pub(crate) overlay: RuntimeOverlay,
     pub events: Vec<RuntimeEvent>,
     pub status: ThreadRuntimeStatus,
 }
@@ -102,6 +105,7 @@ pub struct ThreadSessionLiveView {
 #[derive(Debug)]
 pub(crate) struct ThreadSessionLiveState {
     pub(crate) snapshot: SessionSnapshot,
+    pub(crate) overlay: RuntimeOverlay,
     pub(crate) events: Vec<RuntimeEvent>,
     pub(crate) status: ThreadRuntimeStatus,
 }
@@ -157,6 +161,7 @@ impl ThreadSession {
         let agent = agent_factory(config.clone())?;
         let live_state = Arc::new(RwLock::new(ThreadSessionLiveState {
             snapshot: snapshot.clone(),
+            overlay: RuntimeOverlay::default(),
             events,
             status: ThreadRuntimeStatus::Idle,
         }));
@@ -213,6 +218,7 @@ impl ThreadSession {
         ThreadSessionLiveView {
             thread_id,
             snapshot: state.snapshot.clone(),
+            overlay: state.overlay.clone(),
             events: state.events.clone(),
             status: state.status,
         }
@@ -240,12 +246,7 @@ impl ThreadSession {
                 .live_state
                 .write()
                 .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?;
-            let has_pending_approval = state
-                .snapshot
-                .pending_approvals
-                .iter()
-                .any(|approval| matches!(approval.status, ApprovalStatus::Pending));
-            if !has_pending_approval {
+            if !state.overlay.has_pending_approval() {
                 return Err(ThreadRuntimeError::TurnRejected {
                     thread_id: self.thread_id.clone(),
                     reason: "thread has no active turn".to_string(),
@@ -274,10 +275,7 @@ impl ThreadSession {
                 }
             }
 
-            state
-                .snapshot
-                .pending_approvals
-                .retain(|approval| !matches!(approval.status, ApprovalStatus::Pending));
+            state.overlay.clear_pending_approvals();
             (interrupted_turn_id, state.snapshot.clone())
         };
         self.policy
@@ -382,7 +380,7 @@ mod tests {
     use crate::policy::PolicyManager;
     use crate::registry::ToolRegistry;
     use crate::runtime::thread_runtime::AgentFactory;
-    use crate::session::{ApprovalId, ApprovalStatus, PendingApproval};
+    use crate::session::ApprovalId;
     use crate::types::EventId;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -397,18 +395,11 @@ mod tests {
             ..AgentConfig::default()
         };
 
-        let mut snapshot = SessionSnapshot::new_thread(
+        let snapshot = SessionSnapshot::new_thread(
             thread_id.clone(),
             config.workspace_root.clone(),
             config.cwd.clone(),
         );
-        snapshot.pending_approvals.push(PendingApproval {
-            approval_id: ApprovalId::new("approval_test_1"),
-            requested_event_id: EventId::new("approval_evt_test_1"),
-            tool_name: "run_command".to_string(),
-            reason: "policy requires review".to_string(),
-            status: ApprovalStatus::Pending,
-        });
         let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
         crate::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
 
@@ -442,6 +433,15 @@ mod tests {
                 .with_policy(policy.clone()),
         )
         .expect("create thread session");
+        {
+            let mut state = session.live_state.write().expect("write live state");
+            state.overlay.apply_approval_requested(
+                ApprovalId::new("approval_test_1"),
+                EventId::new("approval_evt_test_1"),
+                "run_command".to_string(),
+                "policy requires review".to_string(),
+            );
+        }
 
         let turn_id = TurnId::new("turn_approval_1");
         let result = session

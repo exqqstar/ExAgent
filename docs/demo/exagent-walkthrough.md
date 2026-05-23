@@ -9,7 +9,7 @@ current runtime boundary:
 4. subscribe to runtime events
 5. start a turn
 6. read the thread view
-7. replay the durable event log
+7. replay the durable rollout history
 
 The current public boundary does not expose `fork`, `inspect`, `collect`, or
 `thread/spawn_child`. Child thread orchestration will return only after it is
@@ -91,6 +91,9 @@ Expected response shape:
 ```
 
 Save `thread.id` as `THREAD_ID`.
+
+`snapshot_path` and `events_path` are v2 compatibility fields. New thread state
+is stored in `.exagent/threads/<thread_id>/rollout.jsonl`.
 
 ## 4. Subscribe To Events
 
@@ -184,8 +187,9 @@ Expected response shape:
 ```
 
 When a runtime is loaded, `thread/read` prefers the live `ThreadSession` view.
-That live view contains the live snapshot and a bounded recent event window, so
-it is suitable for UI state.
+That live view contains durable materialized state, the in-memory
+`RuntimeOverlay`, and a bounded recent event window, so it is suitable for UI
+state.
 
 ## 7. Replay Durable Events
 
@@ -228,7 +232,7 @@ Expected response shape:
 ```
 
 `events/replay` supports `after_event_id`, `limit`, and `event_kinds` filters.
-It reads disk and remains available after process restart.
+It reads rollout history from disk and remains available after process restart.
 
 ## Optional: Interrupt A Turn
 
@@ -244,21 +248,25 @@ curl -s http://127.0.0.1:3000/turn/interrupt \
 ```
 
 The runtime records `turn_interrupted`. If the thread was waiting for command
-approval, pending approvals are removed from the snapshot and policy-side
-waiters are cancelled.
+approval, pending approvals are removed from the runtime overlay and
+policy-side waiters are cancelled.
 
 ## On-Disk Artifacts
 
 Each thread persists under:
 
 ```text
-.exagent/sessions/<thread_id>/
+.exagent/threads/<thread_id>/rollout.jsonl
 ```
 
-The two important files are:
+`rollout.jsonl` is the durable source of truth for new threads. It stores
+session metadata, prompt-visible conversation items, turn context records,
+compaction checkpoints, and selected runtime events.
 
-- `snapshot.json`: current recoverable state
-- `events.jsonl`: complete replayable runtime history
+Legacy `.exagent/sessions/<thread_id>/snapshot.json` and `events.jsonl` files
+are migration inputs only. The v2 protocol still returns `snapshot_path` and
+`events_path` for compatibility, but new rollout-backed sessions do not rely on
+those files.
 
 For the full client-facing protocol contract, see
 [docs/protocol/app-server-boundary-v2.md](../protocol/app-server-boundary-v2.md).

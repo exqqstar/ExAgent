@@ -9,12 +9,8 @@ use crate::runtime::context::{ContextManager, PromptContext, TurnPaths};
 use crate::runtime::thread_runtime::{
     ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus, ThreadTurnContext,
 };
-use crate::runtime::tool_call_runtime::{
-    ApprovalUpdate, ExecSessionUpdate, ToolEffect, ToolExecutionOutcome,
-};
-use crate::session::{
-    ApprovalStatus, ExecSessionRef, ExecSessionStatus, PendingApproval, SessionSnapshot,
-};
+use crate::runtime::tool_call_runtime::{ApprovalUpdate, ToolEffect, ToolExecutionOutcome};
+use crate::session::{ApprovalStatus, SessionSnapshot};
 use crate::state::rollout::RolloutItem;
 use crate::types::{AssistantTurn, ConversationMessage, TurnId};
 
@@ -263,39 +259,10 @@ fn apply_tool_effect(
     effect: ToolEffect,
 ) -> Result<()> {
     match effect {
-        ToolEffect::ExecSessionUpdate(update) => {
-            apply_exec_session_update(snapshot, update);
-            Ok(())
-        }
+        ToolEffect::ExecSessionUpdate(update) => recorder.apply_exec_session_update(update),
         ToolEffect::ApprovalUpdate(update) => {
             apply_approval_update(recorder, snapshot, turn_id, update)
         }
-    }
-}
-
-fn apply_exec_session_update(snapshot: &mut SessionSnapshot, update: ExecSessionUpdate) {
-    let exec_session_id = match &update {
-        ExecSessionUpdate::Running {
-            exec_session_id, ..
-        }
-        | ExecSessionUpdate::NotRunning { exec_session_id } => exec_session_id.clone(),
-    };
-    snapshot
-        .open_exec_sessions
-        .retain(|entry| entry.exec_session_id != exec_session_id);
-
-    if let ExecSessionUpdate::Running {
-        exec_session_id,
-        command,
-        cwd,
-    } = update
-    {
-        snapshot.open_exec_sessions.push(ExecSessionRef {
-            exec_session_id,
-            command,
-            cwd,
-            status: ExecSessionStatus::Running,
-        });
     }
 }
 
@@ -305,15 +272,6 @@ fn apply_approval_update(
     turn_id: &TurnId,
     update: ApprovalUpdate,
 ) -> Result<()> {
-    let approval_id = match &update {
-        ApprovalUpdate::Requested { approval_id, .. }
-        | ApprovalUpdate::Approved { approval_id }
-        | ApprovalUpdate::Denied { approval_id } => approval_id.clone(),
-    };
-    snapshot
-        .pending_approvals
-        .retain(|entry| entry.approval_id != approval_id);
-
     match update {
         ApprovalUpdate::Requested {
             approval_id,
@@ -321,13 +279,12 @@ fn apply_approval_update(
             reason,
         } => {
             let event_id = recorder.reserve_event_id();
-            snapshot.pending_approvals.push(PendingApproval {
-                approval_id: approval_id.clone(),
-                requested_event_id: event_id.clone(),
-                tool_name: tool_name.clone(),
-                reason: reason.clone(),
-                status: ApprovalStatus::Pending,
-            });
+            recorder.apply_approval_requested(
+                approval_id.clone(),
+                event_id.clone(),
+                tool_name.clone(),
+                reason.clone(),
+            )?;
             recorder.record_reserved(
                 snapshot,
                 Some(turn_id),
@@ -340,6 +297,7 @@ fn apply_approval_update(
             )?;
         }
         ApprovalUpdate::Approved { approval_id } => {
+            recorder.clear_approval(&approval_id)?;
             recorder.record(
                 snapshot,
                 Some(turn_id),
@@ -351,6 +309,7 @@ fn apply_approval_update(
             )?;
         }
         ApprovalUpdate::Denied { approval_id } => {
+            recorder.clear_approval(&approval_id)?;
             recorder.record(
                 snapshot,
                 Some(turn_id),

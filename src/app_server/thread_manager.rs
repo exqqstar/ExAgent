@@ -28,6 +28,7 @@ use crate::runtime::thread_runtime::{
     AgentFactory, ThreadOpResult, ThreadRuntime, ThreadRuntimeError, ThreadRuntimeOptions,
     ThreadTurnContext,
 };
+use crate::runtime::thread_session::RuntimeOverlay;
 use crate::session::SessionSnapshot;
 use crate::state::rollout::{
     events_from_rollout_items, rollout_paths, session_meta_from_snapshot,
@@ -254,7 +255,7 @@ impl ThreadManager {
             let paths = crate::transcript::session_paths(&loaded.workspace_root, &thread_id);
             return Ok(self.thread_read_from_snapshot_events(
                 thread_id,
-                live_view.snapshot,
+                live_view.overlay,
                 live_view.events,
                 paths.snapshot_path,
                 paths.events_path,
@@ -266,7 +267,7 @@ impl ThreadManager {
         };
         Ok(self.thread_read_from_snapshot_events(
             thread_id,
-            stored.snapshot,
+            RuntimeOverlay::default(),
             stored.events,
             stored.snapshot_path,
             stored.events_path,
@@ -276,20 +277,16 @@ impl ThreadManager {
     fn thread_read_from_snapshot_events(
         &self,
         thread_id: SessionId,
-        snapshot: SessionSnapshot,
+        overlay: RuntimeOverlay,
         events: Vec<RuntimeEvent>,
         snapshot_path: PathBuf,
         events_path: PathBuf,
     ) -> ThreadReadResponse {
         let active_turn = self.active_turn_state(&thread_id);
-        let has_pending_approval = snapshot
-            .pending_approvals
-            .iter()
-            .any(|approval| matches!(approval.status, crate::session::ApprovalStatus::Pending));
         let latest_turn = latest_turn_state(&events);
         let status = if active_turn.is_some() {
             ThreadStatus::Running
-        } else if has_pending_approval {
+        } else if overlay.has_pending_approval() {
             ThreadStatus::WaitingApproval
         } else if latest_turn
             .as_ref()
@@ -401,12 +398,21 @@ impl ThreadManager {
         }
 
         let paths = crate::transcript::session_paths(&config.workspace_root, &params.thread_id);
-        if !paths.snapshot_path.exists() {
-            return Err(AppServerError::ThreadNotFound(params.thread_id).into());
+        if paths.snapshot_path.exists() {
+            return self
+                .interrupt_waiting_approval_turn(params, &config.workspace_root)
+                .await;
         }
 
-        self.interrupt_waiting_approval_turn(params, &config.workspace_root)
-            .await
+        if thread_exists_in_storage(&config.workspace_root, &params.thread_id) {
+            return Err(AppServerError::TurnRejected {
+                thread_id: params.thread_id,
+                reason: "thread has no active turn".to_string(),
+            }
+            .into());
+        }
+
+        Err(AppServerError::ThreadNotFound(params.thread_id).into())
     }
 
     async fn interrupt_waiting_approval_turn(
@@ -603,7 +609,7 @@ impl ThreadManager {
                 filter_replay_events(live_view.events, &params),
                 params
                     .include_snapshot
-                    .then(|| replay_snapshot_view(live_view.snapshot)),
+                    .then(|| replay_snapshot_view(live_view.snapshot, &live_view.overlay)),
             )
         } else {
             let Some(stored) = read_thread_state_from_storage(&workspace_root, &params.thread_id)?
@@ -614,7 +620,7 @@ impl ThreadManager {
                 filter_replay_events(stored.events, &params),
                 params
                     .include_snapshot
-                    .then(|| replay_snapshot_view(stored.snapshot)),
+                    .then(|| replay_snapshot_view(stored.snapshot, &RuntimeOverlay::default())),
             )
         };
 
@@ -826,7 +832,7 @@ fn latest_turn_state(events: &[crate::events::RuntimeEvent]) -> Option<TurnState
             RuntimeEventKind::TurnCompleted => TurnStatus::Completed,
             RuntimeEventKind::TurnInterrupted => TurnStatus::Interrupted,
             RuntimeEventKind::RuntimeError { .. } => TurnStatus::Failed,
-            RuntimeEventKind::ApprovalRequested { .. } => TurnStatus::WaitingApproval,
+            RuntimeEventKind::ApprovalRequested { .. } => TurnStatus::InProgress,
             RuntimeEventKind::AssistantTurn { .. } => TurnStatus::Completed,
             RuntimeEventKind::ToolResult { .. }
             | RuntimeEventKind::ExecOutput { .. }
@@ -908,7 +914,6 @@ fn build_turn_views(events: Vec<RuntimeEvent>) -> Vec<TurnView> {
             RuntimeEventKind::ApprovalRequested { .. } => {
                 if let Some(turn_id) = view_turn_id(&event, current_turn_id.as_ref()) {
                     let index = ensure_turn_view(&mut turns, &turn_id);
-                    turns[index].status = TurnStatus::WaitingApproval;
                     if let Some(item) = thread_item_from_event(&event.kind) {
                         turns[index].items.push(item);
                     }
@@ -1097,14 +1102,14 @@ fn runtime_event_kind_matches(filter: &RuntimeEventKindFilter, kind: &RuntimeEve
     )
 }
 
-fn replay_snapshot_view(snapshot: SessionSnapshot) -> ReplaySnapshotView {
+fn replay_snapshot_view(snapshot: SessionSnapshot, overlay: &RuntimeOverlay) -> ReplaySnapshotView {
     ReplaySnapshotView {
         thread_id: snapshot.session_id,
         cwd: snapshot.cwd,
         latest_compaction: snapshot.latest_compaction,
-        open_exec_session_count: snapshot.open_exec_sessions.len(),
+        open_exec_session_count: overlay.open_exec_sessions.len(),
         conversation_message_count: snapshot.conversation.len(),
-        pending_approval_count: snapshot.pending_approvals.len(),
+        pending_approval_count: overlay.pending_approvals.len(),
     }
 }
 

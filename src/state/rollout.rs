@@ -318,7 +318,7 @@ impl RolloutStore {
 mod tests {
     use super::*;
     use crate::events::{RuntimeEvent, RuntimeEventKind};
-    use crate::session::{AgentRole, TurnContextItem};
+    use crate::session::{AgentRole, ApprovalId, TurnContextItem};
     use crate::types::{ConversationMessage, EventId, SessionId, TurnId};
     use std::path::PathBuf;
 
@@ -420,6 +420,36 @@ mod tests {
         assert!(!should_persist_rollout_item(&RolloutItem::EventMsg(
             exec_output
         )));
+    }
+
+    #[test]
+    fn rollout_snapshot_does_not_restore_live_only_runtime_state() {
+        let thread_id = SessionId::new("session_overlay_cold");
+        let workspace_root = PathBuf::from("/tmp/exagent-overlay");
+        let snapshot = crate::session::SessionSnapshot::new_thread(
+            thread_id.clone(),
+            workspace_root.clone(),
+            workspace_root.clone(),
+        );
+
+        let items = vec![
+            RolloutItem::SessionMeta(session_meta_from_snapshot(&snapshot)),
+            RolloutItem::EventMsg(RuntimeEvent {
+                event_id: EventId::new("evt_1"),
+                session_id: thread_id.clone(),
+                turn_id: Some(TurnId::new("turn_1")),
+                kind: RuntimeEventKind::ApprovalRequested {
+                    approval_id: ApprovalId::new("approval_1"),
+                    tool_name: "run_command".to_string(),
+                    reason: "approval required".to_string(),
+                },
+            }),
+        ];
+
+        let rebuilt = snapshot_from_rollout_items(&thread_id, &items).expect("rebuild snapshot");
+
+        assert!(rebuilt.pending_approvals.is_empty());
+        assert!(rebuilt.open_exec_sessions.is_empty());
     }
 
     #[test]

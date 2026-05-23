@@ -12,7 +12,7 @@ use exagent::events::{RuntimeEvent, RuntimeEventKind};
 use exagent::llm::{LlmClient, MockLlm};
 use exagent::policy::PolicyMode;
 use exagent::registry::{ToolContext, ToolRegistry};
-use exagent::session::SessionSnapshot;
+use exagent::session::{AgentRole, ApprovalId, SessionSnapshot};
 use exagent::tools::run_command::RunCommandTool;
 use exagent::tools::Tool;
 use exagent::types::{
@@ -926,6 +926,100 @@ fn events_replay_can_include_latest_snapshot_for_ui_reconstruction() {
     assert_eq!(snapshot.pending_approval_count, 0);
 }
 
+#[tokio::test]
+async fn events_replay_snapshot_counts_live_open_exec_sessions_from_overlay_only() {
+    let dir = tempdir().unwrap();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![
+            AssistantTurn {
+                text: Some("start persistent command".into()),
+                tool_calls: vec![ToolCall {
+                    id: "call_start_persistent".into(),
+                    name: "run_command".into(),
+                    arguments: serde_json::json!({
+                        "command": "printf 'ready\\n'; sleep 30",
+                        "persistent": true
+                    }),
+                }],
+            },
+            AssistantTurn {
+                text: Some("persistent command started".into()),
+                tool_calls: vec![],
+            },
+        ])),
+        run_command_registry,
+    );
+
+    let thread = service
+        .thread_start(ThreadStartParams {
+            workspace_root: None,
+            cwd: None,
+        })
+        .unwrap();
+    let turn = service
+        .turn_start(TurnStartParams {
+            thread_id: thread.thread.id.clone(),
+            prompt: "open persistent command".into(),
+            workspace_root: None,
+            turn_context: None,
+        })
+        .await
+        .unwrap();
+    wait_for_turn_completed(&service, &thread.thread.id, &turn.turn.id).await;
+
+    let live_replay = service
+        .events_replay(EventsReplayParams {
+            thread_id: thread.thread.id.clone(),
+            workspace_root: None,
+            after_event_id: None,
+            limit: None,
+            include_snapshot: true,
+            event_kinds: vec![],
+        })
+        .unwrap();
+    assert_eq!(
+        live_replay
+            .snapshot
+            .as_ref()
+            .expect("live snapshot")
+            .open_exec_session_count,
+        1
+    );
+
+    let cold_service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![])),
+        run_command_registry,
+    );
+    let cold_replay = cold_service
+        .events_replay(EventsReplayParams {
+            thread_id: thread.thread.id,
+            workspace_root: None,
+            after_event_id: None,
+            limit: None,
+            include_snapshot: true,
+            event_kinds: vec![],
+        })
+        .unwrap();
+
+    assert_eq!(
+        cold_replay
+            .snapshot
+            .expect("cold snapshot")
+            .open_exec_session_count,
+        0
+    );
+}
+
 #[test]
 fn thread_read_reports_new_thread_as_idle_without_latest_turn() {
     let dir = tempdir().unwrap();
@@ -1617,7 +1711,7 @@ async fn turn_interrupt_aborts_active_turn_and_records_interrupted_event() {
 }
 
 #[tokio::test]
-async fn thread_read_reports_waiting_approval_when_snapshot_has_pending_approval() {
+async fn thread_read_reports_waiting_approval_when_runtime_overlay_has_pending_approval() {
     let dir = tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("scratch")).unwrap();
     let service = AppServerService::with_llm(
@@ -1683,6 +1777,127 @@ async fn thread_read_reports_waiting_approval_when_snapshot_has_pending_approval
         .events
         .iter()
         .any(|event| matches!(event.kind, RuntimeEventKind::ApprovalRequested { .. })));
+}
+
+#[test]
+fn cold_thread_read_does_not_restore_historical_approval_as_waiting() {
+    let dir = tempdir().unwrap();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![])),
+        ToolRegistry::new,
+    );
+    let thread_id = SessionId::new("thread_cold_historical_approval");
+    let turn_id = TurnId::new("turn_1");
+    let snapshot = SessionSnapshot::new_thread(
+        thread_id.clone(),
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+    );
+    let rollout_paths = exagent::state::rollout::rollout_paths(dir.path(), &thread_id);
+    let store = exagent::state::rollout::RolloutStore::new(rollout_paths.rollout_path);
+    store
+        .append_items_blocking(&[
+            exagent::state::rollout::RolloutItem::SessionMeta(
+                exagent::state::rollout::SessionMeta {
+                    thread_id: thread_id.clone(),
+                    root_thread_id: thread_id.clone(),
+                    parent_thread_id: None,
+                    spawned_by_turn_id: None,
+                    agent_role: AgentRole::Primary,
+                    workspace_root: snapshot.workspace_root.clone(),
+                    initial_cwd: snapshot.cwd.clone(),
+                    created_at: "2026-05-20T00:00:00Z".to_string(),
+                },
+            ),
+            exagent::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
+                event_id: EventId::new("evt_1"),
+                session_id: thread_id.clone(),
+                turn_id: Some(turn_id.clone()),
+                kind: RuntimeEventKind::TurnStarted,
+            }),
+            exagent::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
+                event_id: EventId::new("evt_2"),
+                session_id: thread_id.clone(),
+                turn_id: Some(turn_id.clone()),
+                kind: RuntimeEventKind::ApprovalRequested {
+                    approval_id: ApprovalId::new("approval_1"),
+                    tool_name: "run_command".to_string(),
+                    reason: "approval required".to_string(),
+                },
+            }),
+        ])
+        .expect("write rollout");
+
+    let read = service
+        .thread_read(ThreadReadParams {
+            thread_id,
+            workspace_root: None,
+        })
+        .expect("read cold thread");
+
+    assert_eq!(read.thread.status, ThreadStatus::Idle);
+    assert_eq!(read.thread.active_turn, None);
+    assert_ne!(
+        read.thread.turns.last().map(|turn| &turn.status),
+        Some(&TurnStatus::WaitingApproval),
+        "historical approval requests must not be projected as current live waiting state"
+    );
+}
+
+#[tokio::test]
+async fn cold_rollout_thread_interrupt_rejects_instead_of_not_found() {
+    let dir = tempdir().unwrap();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![])),
+        ToolRegistry::new,
+    );
+    let thread_id = SessionId::new("thread_cold_interrupt_rollout_only");
+    let snapshot = SessionSnapshot::new_thread(
+        thread_id.clone(),
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+    );
+    let rollout_paths = exagent::state::rollout::rollout_paths(dir.path(), &thread_id);
+    let store = exagent::state::rollout::RolloutStore::new(rollout_paths.rollout_path);
+    store
+        .append_items_blocking(&[exagent::state::rollout::RolloutItem::SessionMeta(
+            exagent::state::rollout::SessionMeta {
+                thread_id: thread_id.clone(),
+                root_thread_id: thread_id.clone(),
+                parent_thread_id: None,
+                spawned_by_turn_id: None,
+                agent_role: AgentRole::Primary,
+                workspace_root: snapshot.workspace_root,
+                initial_cwd: snapshot.cwd,
+                created_at: "2026-05-20T00:00:00Z".to_string(),
+            },
+        )])
+        .expect("write rollout");
+
+    let err = service
+        .turn_interrupt(TurnInterruptParams {
+            thread_id: thread_id.clone(),
+            turn_id: None,
+            workspace_root: None,
+        })
+        .await
+        .expect_err("cold rollout thread should not be interruptible");
+
+    assert!(matches!(
+        err.downcast_ref::<AppServerError>(),
+        Some(AppServerError::TurnRejected { thread_id: rejected, reason })
+            if rejected == &thread_id && reason == "thread has no active turn"
+    ));
 }
 
 #[tokio::test]

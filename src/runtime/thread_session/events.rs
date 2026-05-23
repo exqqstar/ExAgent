@@ -6,6 +6,8 @@ use anyhow::Result;
 use tokio::sync::broadcast;
 
 use crate::events::{RuntimeEvent, RuntimeEventKind};
+use crate::runtime::tool_call_runtime::ExecSessionUpdate;
+use crate::session::ApprovalId;
 use crate::session::SessionSnapshot;
 use crate::state::rollout::{RolloutItem, RolloutStore};
 use crate::types::{EventId, SessionId, TurnId};
@@ -96,6 +98,41 @@ impl ThreadEventRecorder {
         let _ = self.event_tx.send(event.clone());
         Ok(event)
     }
+
+    pub(crate) fn apply_exec_session_update(&mut self, update: ExecSessionUpdate) -> Result<()> {
+        let mut state = self
+            .live_state
+            .write()
+            .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?;
+        state.overlay.apply_exec_session_update(update);
+        Ok(())
+    }
+
+    pub(crate) fn apply_approval_requested(
+        &mut self,
+        approval_id: ApprovalId,
+        requested_event_id: EventId,
+        tool_name: String,
+        reason: String,
+    ) -> Result<()> {
+        let mut state = self
+            .live_state
+            .write()
+            .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?;
+        state
+            .overlay
+            .apply_approval_requested(approval_id, requested_event_id, tool_name, reason);
+        Ok(())
+    }
+
+    pub(crate) fn clear_approval(&mut self, approval_id: &ApprovalId) -> Result<()> {
+        let mut state = self
+            .live_state
+            .write()
+            .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?;
+        state.overlay.clear_approval(approval_id);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +163,7 @@ mod tests {
         let (event_tx, _) = broadcast::channel(16);
         let live_state = Arc::new(RwLock::new(ThreadSessionLiveState {
             snapshot: snapshot.clone(),
+            overlay: crate::runtime::thread_session::RuntimeOverlay::default(),
             events: vec![],
             status: crate::runtime::thread_runtime::ThreadRuntimeStatus::Idle,
         }));

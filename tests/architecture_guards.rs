@@ -84,3 +84,30 @@ fn rollout_schema_has_codex_style_top_level_items() {
         assert!(source.contains(expected), "missing {expected}");
     }
 }
+
+#[test]
+fn runtime_overlay_is_explicit_live_only_state() {
+    let source =
+        std::fs::read_to_string("src/runtime/thread_session/overlay.rs").expect("read overlay");
+
+    assert!(source.contains("struct RuntimeOverlay"));
+    assert!(source.contains("open_exec_sessions"));
+    assert!(source.contains("pending_approvals"));
+}
+
+#[test]
+fn rollout_reconstruction_does_not_restore_runtime_overlay_fields() {
+    let source = std::fs::read_to_string("src/state/rollout.rs").expect("read rollout schema");
+
+    assert!(source.contains("open_exec_sessions: vec![]"));
+    assert!(source.contains("pending_approvals: vec![]"));
+}
+
+#[test]
+fn turn_loop_does_not_mutate_snapshot_live_only_fields() {
+    let source =
+        std::fs::read_to_string("src/runtime/thread_session/turn.rs").expect("read turn loop");
+
+    assert!(!source.contains("snapshot.open_exec_sessions"));
+    assert!(!source.contains("snapshot.pending_approvals"));
+}

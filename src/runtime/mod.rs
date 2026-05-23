@@ -1,4 +1,5 @@
 pub mod agent;
+pub(crate) mod context;
 pub mod exec_session;
 pub mod policy;
 pub mod thread_runtime;

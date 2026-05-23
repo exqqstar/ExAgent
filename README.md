@@ -6,8 +6,8 @@ ExAgent is a Rust-based agent runtime that adds durable thread state, replayable
 
 Many agent demos stop at "prompt in, tool call out". ExAgent focuses on the runtime substrate underneath that loop:
 
-- durable `snapshot.json` state for session recovery
-- append-only `events.jsonl` history for replay and auditability
+- durable `rollout.jsonl` thread records for recovery
+- append-only rollout history for replay and auditability
 - persistent exec sessions for long-lived subprocess workflows
 - approval-gated command execution for risky shell actions
 - thread and turn lifecycle operations behind a typed boundary
@@ -18,8 +18,8 @@ This repository is intentionally scoped as runtime infrastructure, not as a full
 ## Current Capabilities
 
 - Start, resume, read, and advance LLM-backed runtime threads
-- Persist session state under `.exagent/sessions/<session_id>/`
-- Replay assistant turns and tool results from the event log
+- Persist thread state under `.exagent/threads/<thread_id>/rollout.jsonl`
+- Replay persisted runtime events from rollout history
 - Subscribe to live runtime events over HTTP SSE
 - Interrupt active turns or pending approval waits
 - Keep interactive subprocesses alive across turns
@@ -37,31 +37,35 @@ flowchart TB
     Manager["ThreadManager"]
     Runtime["ThreadRuntime"]
     Session["ThreadSession"]
+    Context["ContextManager"]
+    Overlay["RuntimeOverlay"]
     Agent["Agent sampling"]
     ToolRuntime["ToolCallRuntime"]
     Registry["ToolRegistry"]
     Tools["read_file / write_file / run_command"]
-    Snapshot["snapshot.json"]
-    Events["events.jsonl"]
+    Rollout["rollout.jsonl"]
 
     CLI --> Boundary
     API --> Boundary
     Boundary --> Manager
     Manager --> Runtime
     Runtime --> Session
+    Session --> Context
+    Session --> Overlay
     Session --> Agent
     Session --> ToolRuntime
     ToolRuntime --> Registry
     Registry --> Tools
-    Session --> Snapshot
-    Session --> Events
+    Session --> Rollout
 ```
 
 Key persistence rule:
 
-- `snapshot.json` stores current recoverable state
-- `events.jsonl` stores replayable runtime facts
-- while a thread is loaded, `ThreadSession` is the live source of truth
+- `rollout.jsonl` is the durable source of truth for new thread records
+- legacy `snapshot.json` and `events.jsonl` files are not runtime inputs; v2 still returns their paths as compatibility-only fields
+- `ContextManager` owns prompt-visible history while a thread is loaded
+- `RuntimeOverlay` owns live-only approvals and open exec session references
+- cold rollout replay never recreates live-only approvals or running exec sessions
 
 ## Quickstart
 
@@ -190,12 +194,13 @@ The default tool registry currently includes:
 
 Implemented today:
 
-- durable session persistence
+- rollout-backed durable thread persistence
 - event-based replay
 - persistent exec sessions
 - policy and approval flow
 - app-server runtime boundary v2
 - thread-scoped runtime actor
+- live-only runtime overlay for approvals and persistent exec refs
 - live event subscription
 
 Explicit non-goals today:
@@ -213,7 +218,7 @@ Rust is a good fit here because the project is runtime infrastructure, not a one
 
 - explicit types for runtime ids, events, and lifecycle state
 - async-safe shared state for subprocess and policy managers
-- Serde-backed persistence for snapshots and events
+- Serde-backed persistence for rollout records and runtime events
 - a clear ownership model around long-lived runtime data
 
 ## Repository Layout
@@ -222,7 +227,7 @@ Rust is a good fit here because the project is runtime infrastructure, not a one
 - [src/app_server](src/app_server): typed app-server boundary, protocol, thread manager
 - [src/runtime](src/runtime): live execution kernel, thread actor, session turn loop, agent sampling, tool runtime, policy, exec sessions
 - [src/tools](src/tools): tool trait, registry, and built-in tools
-- [src/state](src/state): durable snapshot/event/transcript models and persistence helpers
+- [src/state](src/state): durable rollout models plus protocol compatibility path helpers
 - [src/model](src/model): LLM client adapter and conversation/tool-call types
 - [tests](tests): integration coverage for agent loop, replay, policy, exec sessions, API, and thread runtime
 - [docs/plans](docs/plans): design notes, roadmap, and implementation plans

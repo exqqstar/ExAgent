@@ -26,7 +26,6 @@ async fn read_file_limits_to_requested_range() {
         turn_id: None,
         exec_sessions: Arc::new(ExecSessionManager::default()),
         policy: Arc::new(PolicyManager::default()),
-        defer_policy_events: false,
     };
 
     let result = registry
@@ -62,7 +61,6 @@ async fn write_file_creates_parent_directories() {
         turn_id: None,
         exec_sessions: Arc::new(ExecSessionManager::default()),
         policy: Arc::new(PolicyManager::default()),
-        defer_policy_events: false,
     };
 
     let result = registry
@@ -103,7 +101,6 @@ async fn read_file_rejects_escape_outside_workspace() {
         turn_id: None,
         exec_sessions: Arc::new(ExecSessionManager::default()),
         policy: Arc::new(PolicyManager::default()),
-        defer_policy_events: false,
     };
 
     let result = registry

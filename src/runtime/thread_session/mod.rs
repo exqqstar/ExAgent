@@ -1,7 +1,9 @@
 pub mod events;
+pub(crate) mod overlay;
 pub mod turn;
 
 pub(crate) use events::{LiveEventSink, ThreadEventRecorder};
+pub(crate) use overlay::RuntimeOverlay;
 
 use std::sync::{Arc, RwLock};
 
@@ -11,11 +13,16 @@ use crate::agent::Agent;
 use crate::config::AgentConfig;
 use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::policy::PolicyManager;
+use crate::runtime::context::ContextManager;
 use crate::runtime::thread_runtime::{
     AgentFactory, ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus,
 };
-use crate::session::{ApprovalStatus, SessionSnapshot};
-use crate::types::{SessionId, TurnId};
+use crate::session::SessionSnapshot;
+use crate::state::rollout::{
+    events_from_rollout_items, rollout_paths, snapshot_from_rollout_items, RolloutItem,
+    RolloutStore,
+};
+use crate::types::{EventId, SessionId, TurnId};
 
 const DEFAULT_THREAD_EVENT_CHANNEL_CAPACITY: usize = 256;
 const DEFAULT_LIVE_EVENT_BUFFER_CAP: usize = 2048;
@@ -75,6 +82,8 @@ pub struct ThreadSession {
     thread_id: SessionId,
     agent: Agent,
     recorder: ThreadEventRecorder,
+    rollout_store: RolloutStore,
+    context_manager: ContextManager,
     status_tx: watch::Sender<ThreadRuntimeStatus>,
     live_state: Arc<RwLock<ThreadSessionLiveState>>,
     policy: Arc<PolicyManager>,
@@ -84,6 +93,7 @@ pub struct ThreadSession {
 pub struct ThreadSessionLiveView {
     pub thread_id: SessionId,
     pub snapshot: SessionSnapshot,
+    pub(crate) overlay: RuntimeOverlay,
     pub events: Vec<RuntimeEvent>,
     pub status: ThreadRuntimeStatus,
 }
@@ -98,6 +108,7 @@ pub struct ThreadSessionLiveView {
 #[derive(Debug)]
 pub(crate) struct ThreadSessionLiveState {
     pub(crate) snapshot: SessionSnapshot,
+    pub(crate) overlay: RuntimeOverlay,
     pub(crate) events: Vec<RuntimeEvent>,
     pub(crate) status: ThreadRuntimeStatus,
 }
@@ -130,12 +141,13 @@ impl ThreadSession {
             policy,
             live_event_buffer_cap,
         } = options;
-        let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
-        let mut snapshot: SessionSnapshot = crate::transcript::read_json(&paths.snapshot_path)?;
-        snapshot.normalize_lineage();
-        let mut events = crate::transcript::read_json_lines::<RuntimeEvent>(&paths.events_path)?;
+        let rollout_paths = rollout_paths(&config.workspace_root, &thread_id);
+        let rollout_store = RolloutStore::new(rollout_paths.rollout_path);
+        let rollout_items = RolloutStore::read_items_blocking(rollout_store.path())?;
+        let (snapshot, mut events, context_manager) =
+            restore_from_rollout(&thread_id, &rollout_items)?;
         let live_event_buffer_cap = live_event_buffer_cap.max(1);
-        let next_event_index = events.len() + 1;
+        let next_event_index = next_event_index(&events);
         let overflow = events.len().saturating_sub(live_event_buffer_cap);
         if overflow > 0 {
             events.drain(0..overflow);
@@ -143,13 +155,13 @@ impl ThreadSession {
         let agent = agent_factory(config.clone())?;
         let live_state = Arc::new(RwLock::new(ThreadSessionLiveState {
             snapshot: snapshot.clone(),
+            overlay: RuntimeOverlay::default(),
             events,
             status: ThreadRuntimeStatus::Idle,
         }));
         let recorder = ThreadEventRecorder::new(
             thread_id.clone(),
-            paths.snapshot_path,
-            paths.events_path,
+            rollout_store.clone(),
             event_tx,
             live_state.clone(),
             next_event_index,
@@ -160,6 +172,8 @@ impl ThreadSession {
             thread_id,
             agent,
             recorder,
+            rollout_store,
+            context_manager,
             status_tx,
             live_state,
             policy,
@@ -198,6 +212,7 @@ impl ThreadSession {
         ThreadSessionLiveView {
             thread_id,
             snapshot: state.snapshot.clone(),
+            overlay: state.overlay.clone(),
             events: state.events.clone(),
             status: state.status,
         }
@@ -225,12 +240,7 @@ impl ThreadSession {
                 .live_state
                 .write()
                 .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?;
-            let has_pending_approval = state
-                .snapshot
-                .pending_approvals
-                .iter()
-                .any(|approval| matches!(approval.status, ApprovalStatus::Pending));
-            if !has_pending_approval {
+            if !state.overlay.has_pending_approval() {
                 return Err(ThreadRuntimeError::TurnRejected {
                     thread_id: self.thread_id.clone(),
                     reason: "thread has no active turn".to_string(),
@@ -259,10 +269,7 @@ impl ThreadSession {
                 }
             }
 
-            state
-                .snapshot
-                .pending_approvals
-                .retain(|approval| !matches!(approval.status, ApprovalStatus::Pending));
+            state.overlay.clear_pending_approvals();
             (interrupted_turn_id, state.snapshot.clone())
         };
         self.policy
@@ -282,6 +289,31 @@ impl ThreadSession {
     }
 }
 
+fn restore_from_rollout(
+    requested_thread_id: &SessionId,
+    items: &[RolloutItem],
+) -> anyhow::Result<(SessionSnapshot, Vec<RuntimeEvent>, ContextManager)> {
+    let mut snapshot = snapshot_from_rollout_items(requested_thread_id, items)?;
+    let context_manager = ContextManager::from_rollout_items(items);
+    context_manager.sync_snapshot(&mut snapshot);
+    let events = events_from_rollout_items(items);
+
+    Ok((snapshot, events, context_manager))
+}
+
+fn next_event_index(events: &[RuntimeEvent]) -> usize {
+    events
+        .iter()
+        .filter_map(|event| parse_event_index(&event.event_id))
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn parse_event_index(event_id: &EventId) -> Option<usize> {
+    event_id.as_str().strip_prefix("evt_")?.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,10 +322,24 @@ mod tests {
     use crate::policy::PolicyManager;
     use crate::registry::ToolRegistry;
     use crate::runtime::thread_runtime::AgentFactory;
-    use crate::session::{ApprovalId, ApprovalStatus, PendingApproval};
+    use crate::session::ApprovalId;
     use crate::types::EventId;
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    fn write_rollout_meta(config: &AgentConfig, thread_id: &SessionId) {
+        let snapshot = SessionSnapshot::new_thread(
+            thread_id.clone(),
+            config.workspace_root.clone(),
+            config.cwd.clone(),
+        );
+        let rollout_paths = crate::state::rollout::rollout_paths(&config.workspace_root, thread_id);
+        crate::state::rollout::RolloutStore::new(rollout_paths.rollout_path)
+            .append_items_blocking(&[crate::state::rollout::RolloutItem::SessionMeta(
+                crate::state::rollout::session_meta_from_snapshot(&snapshot),
+            )])
+            .expect("write rollout session meta");
+    }
 
     #[tokio::test]
     async fn handle_interrupt_cancels_pending_policy_approvals() {
@@ -305,20 +351,7 @@ mod tests {
             ..AgentConfig::default()
         };
 
-        let mut snapshot = SessionSnapshot::new_thread(
-            thread_id.clone(),
-            config.workspace_root.clone(),
-            config.cwd.clone(),
-        );
-        snapshot.pending_approvals.push(PendingApproval {
-            approval_id: ApprovalId::new("approval_test_1"),
-            requested_event_id: EventId::new("approval_evt_test_1"),
-            tool_name: "run_command".to_string(),
-            reason: "policy requires review".to_string(),
-            status: ApprovalStatus::Pending,
-        });
-        let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
-        crate::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+        write_rollout_meta(&config, &thread_id);
 
         let policy = Arc::new(PolicyManager::default());
         let _registered = policy
@@ -350,6 +383,15 @@ mod tests {
                 .with_policy(policy.clone()),
         )
         .expect("create thread session");
+        {
+            let mut state = session.live_state.write().expect("write live state");
+            state.overlay.apply_approval_requested(
+                ApprovalId::new("approval_test_1"),
+                EventId::new("approval_evt_test_1"),
+                "run_command".to_string(),
+                "policy requires review".to_string(),
+            );
+        }
 
         let turn_id = TurnId::new("turn_approval_1");
         let result = session
@@ -382,20 +424,22 @@ mod tests {
             config.workspace_root.clone(),
             config.cwd.clone(),
         );
-        let paths = crate::transcript::session_paths(&config.workspace_root, &thread_id);
-        crate::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
+        let mut rollout_items = vec![crate::state::rollout::RolloutItem::SessionMeta(
+            crate::state::rollout::session_meta_from_snapshot(&snapshot),
+        )];
         for event_index in 1..=4 {
-            crate::transcript::append_json_line(
-                &paths.events_path,
-                &RuntimeEvent {
-                    event_id: EventId::new(format!("evt_{}", event_index)),
-                    session_id: thread_id.clone(),
-                    turn_id: Some(TurnId::new(format!("turn_{}", event_index))),
-                    kind: RuntimeEventKind::TurnStarted,
-                },
-            )
-            .unwrap();
+            rollout_items.push(crate::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
+                event_id: EventId::new(format!("evt_{}", event_index)),
+                session_id: thread_id.clone(),
+                turn_id: Some(TurnId::new(format!("turn_{}", event_index))),
+                kind: RuntimeEventKind::TurnStarted,
+            }));
         }
+        let rollout_paths =
+            crate::state::rollout::rollout_paths(&config.workspace_root, &thread_id);
+        crate::state::rollout::RolloutStore::new(rollout_paths.rollout_path.clone())
+            .append_items_blocking(&rollout_items)
+            .expect("write rollout items");
 
         let agent_factory: AgentFactory = Arc::new(move |config| {
             Ok(Agent::new(
@@ -431,8 +475,13 @@ mod tests {
         assert_eq!(live_view.events[0].event_id, EventId::new("evt_4"));
         assert_eq!(live_view.events[1].event_id, EventId::new("evt_5"));
 
-        let replay = crate::transcript::read_session_events(&config.workspace_root, &thread_id)
-            .expect("read replay events");
-        assert_eq!(replay.len(), 5);
+        let rollout_items =
+            crate::state::rollout::RolloutStore::read_items_blocking(&rollout_paths.rollout_path)
+                .expect("read rollout items");
+        assert!(rollout_items.iter().any(|item| matches!(
+            item,
+            crate::state::rollout::RolloutItem::EventMsg(event)
+                if event.event_id == EventId::new("evt_5")
+        )));
     }
 }

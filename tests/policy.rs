@@ -1,12 +1,10 @@
 use std::sync::Arc;
 
 use exagent::config::AgentConfig;
-use exagent::events::RuntimeEventKind;
 use exagent::exec_session::ExecSessionManager;
 use exagent::policy::{PolicyManager, PolicyMode};
 use exagent::registry::{ToolContext, ToolRegistry};
 use exagent::tools::run_command::RunCommandTool;
-use exagent::transcript::replay_session;
 use exagent::types::{SessionId, ToolCall};
 use serde_json::json;
 use tempfile::tempdir;
@@ -25,7 +23,6 @@ fn test_context() -> (tempfile::TempDir, SessionId, ToolContext) {
         turn_id: None,
         exec_sessions: Arc::new(ExecSessionManager::default()),
         policy: Arc::new(PolicyManager::default()),
-        defer_policy_events: false,
     };
     (dir, session_id, ctx)
 }
@@ -52,7 +49,7 @@ async fn safe_commands_execute_immediately_under_enforced_policy() {
 }
 
 #[tokio::test]
-async fn risky_commands_return_review_required_and_log_request_events() {
+async fn risky_commands_return_review_required_without_legacy_event_log() {
     let (dir, session_id, ctx) = test_context();
     std::fs::create_dir_all(dir.path().join("scratch")).unwrap();
 
@@ -77,11 +74,8 @@ async fn risky_commands_return_review_required_and_log_request_events() {
     assert!(meta["approval_id"].as_str().is_some());
     assert!(dir.path().join("scratch").exists());
 
-    let events = replay_session(dir.path(), &session_id).unwrap();
-    assert!(events.iter().any(|event| matches!(
-        &event.kind,
-        RuntimeEventKind::ApprovalRequested { tool_name, .. } if tool_name == "run_command"
-    )));
+    let legacy_paths = exagent::transcript::session_paths(dir.path(), &session_id);
+    assert!(!legacy_paths.events_path.exists());
 }
 
 #[tokio::test]
@@ -155,15 +149,6 @@ async fn approved_requests_execute_and_denied_requests_stop_execution() {
     assert_eq!(denied.status.as_str(), "error");
     assert!(dir.path().join("denied").exists());
 
-    let events = replay_session(dir.path(), &session_id).unwrap();
-    assert!(events.iter().any(|event| matches!(
-        &event.kind,
-        RuntimeEventKind::ApprovalDecision { status, .. }
-            if *status == exagent::session::ApprovalStatus::Approved
-    )));
-    assert!(events.iter().any(|event| matches!(
-        &event.kind,
-        RuntimeEventKind::ApprovalDecision { status, .. }
-            if *status == exagent::session::ApprovalStatus::Denied
-    )));
+    let legacy_paths = exagent::transcript::session_paths(dir.path(), &session_id);
+    assert!(!legacy_paths.events_path.exists());
 }

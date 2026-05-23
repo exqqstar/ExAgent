@@ -16,7 +16,6 @@ pub struct ToolContext {
     pub turn_id: Option<TurnId>,
     pub exec_sessions: Arc<ExecSessionManager>,
     pub policy: Arc<PolicyManager>,
-    pub defer_policy_events: bool,
 }
 
 #[derive(Clone)]

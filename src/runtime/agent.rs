@@ -65,6 +65,10 @@ impl Agent {
         self.config.max_turns
     }
 
+    pub(crate) fn config(&self) -> &AgentConfig {
+        &self.config
+    }
+
     pub(crate) async fn sample_assistant_turn(
         &self,
         prompt: &[ConversationMessage],

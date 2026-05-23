@@ -3,6 +3,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::policy::PolicyMode;
 use crate::types::{ConversationMessage, EventId, SessionId, TurnId};
 
 macro_rules! string_id {
@@ -109,6 +110,8 @@ pub struct SessionSnapshot {
     pub agent_role: AgentRole,
     pub workspace_root: PathBuf,
     pub cwd: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_turn_context: Option<TurnContextItem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conversation: Vec<ConversationMessage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -134,6 +137,7 @@ impl SessionSnapshot {
             agent_role: AgentRole::Primary,
             workspace_root,
             cwd,
+            reference_turn_context: None,
             conversation: vec![ConversationMessage::user(user_prompt)],
             open_exec_sessions: vec![],
             latest_compaction: None,
@@ -150,6 +154,7 @@ impl SessionSnapshot {
             agent_role: AgentRole::Primary,
             workspace_root,
             cwd,
+            reference_turn_context: None,
             conversation: vec![],
             open_exec_sessions: vec![],
             latest_compaction: None,
@@ -161,5 +166,41 @@ impl SessionSnapshot {
         if self.root_session_id.as_str().is_empty() {
             self.root_session_id = self.session_id.clone();
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnContextItem {
+    pub workspace_root: PathBuf,
+    pub cwd: PathBuf,
+    pub model: String,
+    pub policy_mode: PolicyMode,
+    pub command_timeout_secs: u64,
+    pub max_output_bytes: usize,
+    #[serde(
+        default,
+        alias = "current_date",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub current_utc_date: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn snapshot_deserializes_without_reference_turn_context() {
+        let snapshot: SessionSnapshot = serde_json::from_value(json!({
+            "session_id": "session_old",
+            "workspace_root": "/tmp/workspace",
+            "cwd": "/tmp/workspace"
+        }))
+        .expect("deserialize legacy snapshot");
+
+        assert_eq!(snapshot.session_id, SessionId::new("session_old"));
+        assert!(snapshot.reference_turn_context.is_none());
+        assert!(snapshot.conversation.is_empty());
     }
 }

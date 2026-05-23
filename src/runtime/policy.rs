@@ -12,11 +12,22 @@ use crate::types::{EventId, SessionId};
 static APPROVAL_COUNTER: AtomicU64 = AtomicU64::new(1);
 static POLICY_EVENT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PolicyMode {
     Off,
     Advisory,
     Enforced,
+}
+
+impl PolicyMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Advisory => "advisory",
+            Self::Enforced => "enforced",
+        }
+    }
 }
 
 impl Default for PolicyMode {

@@ -8,13 +8,11 @@ use serde_json::{json, Value};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
-use crate::events::{RuntimeEvent, RuntimeEventKind};
-use crate::policy::{new_policy_event_id, PolicyDecision};
+use crate::policy::PolicyDecision;
 use crate::registry::ToolContext;
 use crate::session::{ApprovalId, ApprovalStatus};
 use crate::session::{ExecSessionId, ExecSessionStatus};
 use crate::tools::Tool;
-use crate::transcript;
 use crate::types::{ToolCall, ToolResult, ToolStatus};
 use crate::workspace::resolve_workspace_path;
 
@@ -151,15 +149,6 @@ async fn handle_approval_decision(
 
     match decision {
         "approved" => {
-            if !ctx.defer_policy_events {
-                record_approval_decision_event(
-                    ctx,
-                    &pending.session_id,
-                    &approval_id,
-                    ApprovalStatus::Approved,
-                )?;
-            }
-
             if pending.persistent {
                 let snapshot = ctx
                     .exec_sessions
@@ -177,7 +166,6 @@ async fn handle_approval_decision(
                     ApprovalStatus::Approved,
                     "allow",
                     Some(pending.reason.as_str()),
-                    None,
                 );
                 Ok(outcome)
             } else {
@@ -196,31 +184,20 @@ async fn handle_approval_decision(
                     ApprovalStatus::Approved,
                     "allow",
                     Some(pending.reason.as_str()),
-                    None,
                 );
                 Ok(outcome)
             }
         }
-        "denied" => {
-            if !ctx.defer_policy_events {
-                record_approval_decision_event(
-                    ctx,
-                    &pending.session_id,
-                    &approval_id,
-                    ApprovalStatus::Denied,
-                )?;
-            }
-            Ok(CommandOutcome {
-                status: ToolStatus::Error,
-                content: "Approval denied".into(),
-                meta: json!({
-                    "approval_id": approval_id.as_str(),
-                    "approval_status": "denied",
-                    "policy_decision": "deny",
-                    "approval_reason": pending.reason,
-                }),
-            })
-        }
+        "denied" => Ok(CommandOutcome {
+            status: ToolStatus::Error,
+            content: "Approval denied".into(),
+            meta: json!({
+                "approval_id": approval_id.as_str(),
+                "approval_status": "denied",
+                "policy_decision": "deny",
+                "approval_reason": pending.reason,
+            }),
+        }),
         other => Err(format!("unsupported approval decision: {other}")),
     }
 }
@@ -315,13 +292,8 @@ async fn maybe_require_approval(
                     reason.clone(),
                 )
                 .await;
-            let event_id = if ctx.defer_policy_events {
-                None
-            } else {
-                Some(record_approval_request_event(ctx, &approval)?)
-            };
 
-            let mut meta = json!({
+            let meta = json!({
                     "approval_id": approval.approval_id.as_str(),
                     "approval_status": "pending",
                     "approval_reason": reason,
@@ -329,14 +301,6 @@ async fn maybe_require_approval(
                     "command": command,
                     "cwd": cwd,
             });
-            if let Some(event_id) = event_id {
-                if let Some(object) = meta.as_object_mut() {
-                    object.insert(
-                        "approval_event_id".into(),
-                        Value::String(event_id.as_str().into()),
-                    );
-                }
-            }
 
             Ok(Some(CommandOutcome {
                 status: ToolStatus::ReviewRequired,
@@ -423,59 +387,12 @@ fn exec_lifecycle(status: &ExecSessionStatus) -> &'static str {
     }
 }
 
-fn record_approval_request_event(
-    ctx: &ToolContext,
-    approval: &crate::policy::PendingCommandApproval,
-) -> Result<crate::types::EventId, String> {
-    let event_id = new_policy_event_id();
-    let event = RuntimeEvent {
-        event_id: event_id.clone(),
-        session_id: approval.session_id.clone(),
-        turn_id: ctx.turn_id.clone(),
-        kind: RuntimeEventKind::ApprovalRequested {
-            approval_id: approval.approval_id.clone(),
-            tool_name: approval.tool_name.clone(),
-            reason: approval.reason.clone(),
-        },
-    };
-    transcript::append_json_line(
-        &transcript::session_paths(&ctx.config.workspace_root, &approval.session_id).events_path,
-        &event,
-    )
-    .map_err(|err| err.to_string())?;
-    Ok(event_id)
-}
-
-fn record_approval_decision_event(
-    ctx: &ToolContext,
-    session_id: &crate::types::SessionId,
-    approval_id: &ApprovalId,
-    status: ApprovalStatus,
-) -> Result<(), String> {
-    let event = RuntimeEvent {
-        event_id: new_policy_event_id(),
-        session_id: session_id.clone(),
-        turn_id: ctx.turn_id.clone(),
-        kind: RuntimeEventKind::ApprovalDecision {
-            approval_id: approval_id.clone(),
-            status,
-            note: None,
-        },
-    };
-    transcript::append_json_line(
-        &transcript::session_paths(&ctx.config.workspace_root, session_id).events_path,
-        &event,
-    )
-    .map_err(|err| err.to_string())
-}
-
 fn annotate_policy_meta(
     meta: &mut Value,
     approval_id: &ApprovalId,
     approval_status: ApprovalStatus,
     policy_decision: &str,
     reason: Option<&str>,
-    approval_event_id: Option<&crate::types::EventId>,
 ) {
     if let Some(object) = meta.as_object_mut() {
         object.insert(
@@ -499,12 +416,6 @@ fn annotate_policy_meta(
         );
         if let Some(reason) = reason {
             object.insert("approval_reason".into(), Value::String(reason.to_string()));
-        }
-        if let Some(event_id) = approval_event_id {
-            object.insert(
-                "approval_event_id".into(),
-                Value::String(event_id.as_str().to_string()),
-            );
         }
     }
 }

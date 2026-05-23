@@ -51,3 +51,72 @@ fn agent_does_not_parse_tool_meta() {
         );
     }
 }
+
+#[test]
+fn turn_loop_does_not_sample_from_session_snapshot_conversation() {
+    let source =
+        std::fs::read_to_string("src/runtime/thread_session/turn.rs").expect("read turn loop");
+
+    assert!(!source.contains("snapshot.conversation.clone()"));
+    assert!(!source.contains("ContextManager::for_prompt(snapshot)"));
+    assert!(source.contains("context_manager.for_prompt()"));
+}
+
+#[test]
+fn context_manager_is_stateful_history_owner() {
+    let source = std::fs::read_to_string("src/runtime/context.rs").expect("read context manager");
+
+    assert!(source.contains("items: Vec<ConversationMessage>"));
+    assert!(source.contains("reference_turn_context: Option<TurnContextItem>"));
+}
+
+#[test]
+fn rollout_schema_has_codex_style_top_level_items() {
+    let source = std::fs::read_to_string("src/state/rollout.rs").expect("read rollout schema");
+
+    for expected in [
+        "SessionMeta",
+        "ResponseItem",
+        "TurnContext",
+        "Compacted",
+        "EventMsg",
+    ] {
+        assert!(source.contains(expected), "missing {expected}");
+    }
+}
+
+#[test]
+fn runtime_overlay_is_explicit_live_only_state() {
+    let source =
+        std::fs::read_to_string("src/runtime/thread_session/overlay.rs").expect("read overlay");
+
+    assert!(source.contains("struct RuntimeOverlay"));
+    assert!(source.contains("open_exec_sessions"));
+    assert!(source.contains("pending_approvals"));
+}
+
+#[test]
+fn rollout_reconstruction_does_not_restore_runtime_overlay_fields() {
+    let source = std::fs::read_to_string("src/state/rollout.rs").expect("read rollout schema");
+
+    assert!(source.contains("open_exec_sessions: vec![]"));
+    assert!(source.contains("pending_approvals: vec![]"));
+}
+
+#[test]
+fn run_command_tool_does_not_write_legacy_transcript_events() {
+    let source =
+        std::fs::read_to_string("src/tools/run_command.rs").expect("read run command tool");
+
+    assert!(!source.contains("transcript::append_json_line"));
+    assert!(!source.contains("transcript::session_paths"));
+}
+
+#[test]
+fn turn_loop_does_not_mutate_snapshot_live_only_fields() {
+    let source =
+        std::fs::read_to_string("src/runtime/thread_session/turn.rs").expect("read turn loop");
+
+    assert!(!source.contains("snapshot.open_exec_sessions"));
+    assert!(!source.contains("snapshot.pending_approvals"));
+}

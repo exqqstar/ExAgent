@@ -79,8 +79,20 @@ The response contains a `thread` view:
 }
 ```
 
+`snapshot_path` and `events_path` are compatibility fields in the public
+protocol. For rollout-backed new sessions they are not durable state files and
+may not exist on disk. The durable thread record is
+`.exagent/threads/<thread_id>/rollout.jsonl`.
+
 `workspace_root` and `cwd` are durable context for a newly created thread.
 `cwd` must resolve inside `workspace_root`.
+
+`ThreadView` is a projection, not the source of truth. For a loaded runtime it
+is derived from the `ThreadSession` durable materialized state plus its
+in-memory `RuntimeOverlay` and live event buffer. For cold storage reads it is
+derived from `rollout.jsonl` plus an empty `RuntimeOverlay`, so historical
+approval requests or old persistent-command tool results do not become current
+actionable UI state.
 
 `POST /thread/resume` loads existing state:
 
@@ -186,7 +198,8 @@ is emitted as an `assistant_turn` event.
 
 ## Event Replay
 
-`POST /events/replay` reads the durable event log:
+`POST /events/replay` reads persisted `EventMsg` entries from rollout storage
+or the loaded runtime's live event buffer:
 
 ```json
 {
@@ -217,8 +230,11 @@ When `include_snapshot` is true, the response includes a stable snapshot view:
 }
 ```
 
-`events/replay` is the complete persisted timeline source. It does not depend
-on a runtime still being loaded in memory.
+`events/replay` is the durable replay source for persisted runtime events. It
+does not depend on a runtime still being loaded in memory. When a runtime is
+loaded, `open_exec_session_count` and `pending_approval_count` are projected
+from the runtime's `RuntimeOverlay`. When reading from cold storage, those live
+counts are projected from an empty overlay and therefore return `0`.
 
 ## `thread/read` Versus `events/replay`
 
@@ -258,9 +274,9 @@ The response groups events into turns and items:
 ```
 
 When a runtime is loaded, `thread/read` prefers the live `ThreadSession` view.
-That view includes the live snapshot and a bounded recent event window. It is
-the right source for current UI state, active turn status, and pending approval
-state.
+That view includes the durable materialized state, the `RuntimeOverlay`, and a
+bounded recent event window. It is the right source for current UI state, active
+turn status, pending approvals, and open persistent exec sessions.
 
 Use `events/replay` when a client needs the complete historical event log,
 cursor pagination, event-kind filtering, or reconstruction after process
@@ -280,8 +296,8 @@ restart.
 
 `turn_id` is optional. For an active turn, the runtime sends an interrupt to the
 running turn and records `turn_interrupted`. For a waiting approval state, it
-clears pending approvals from the snapshot, cancels policy-side waiters, and
-records `turn_interrupted`.
+clears pending approvals from the runtime overlay, cancels policy-side waiters,
+and records `turn_interrupted`.
 
 Risky command approvals are exposed as events:
 
@@ -319,3 +335,7 @@ runtime model.
 The current boundary intentionally does not include runtime-native child
 threads, transcript forks, list/search/archive operations, multi-client approval
 routing, or token-delta streaming.
+
+Future boundary versions should replace `snapshot_path` and `events_path` with
+explicit storage metadata such as `rollout_path`; in v2 they remain
+compatibility-only fields.

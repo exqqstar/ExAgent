@@ -56,10 +56,7 @@ impl ContextManager {
                 }
                 crate::state::rollout::RolloutItem::Compacted(compacted) => {
                     if let Some(replacement_history) = &compacted.replacement_history {
-                        manager.replace_history(
-                            replacement_history.clone(),
-                            manager.reference_turn_context(),
-                        );
+                        manager.replace_history(replacement_history.clone(), None);
                     }
                 }
                 crate::state::rollout::RolloutItem::EventMsg(event) => {
@@ -125,6 +122,7 @@ impl ContextManager {
         self.reference_turn_context = context;
     }
 
+    #[cfg(test)]
     pub(crate) fn reference_turn_context(&self) -> Option<TurnContextItem> {
         self.reference_turn_context.clone()
     }
@@ -188,14 +186,54 @@ impl ContextManager {
 }
 
 fn estimate_message_tokens(message: &ConversationMessage) -> i64 {
-    serde_json::to_string(message)
-        .map(|serialized| approx_tokens(&serialized))
-        .unwrap_or_default()
+    let mut bytes = string_bytes(role_name(&message.role));
+    bytes = bytes.saturating_add(string_bytes(&message.content));
+    if let Some(tool_call_id) = &message.tool_call_id {
+        bytes = bytes.saturating_add(string_bytes(tool_call_id));
+    }
+    for tool_call in &message.tool_calls {
+        bytes = bytes.saturating_add(string_bytes(&tool_call.id));
+        bytes = bytes.saturating_add(string_bytes(&tool_call.name));
+        bytes = bytes.saturating_add(estimate_json_value_bytes(&tool_call.arguments));
+    }
+    if message.injected {
+        bytes = bytes.saturating_add(string_bytes("injected"));
+    }
+    bytes_to_tokens(bytes)
 }
 
-fn approx_tokens(text: &str) -> i64 {
-    let bytes = i64::try_from(text.len()).unwrap_or(i64::MAX);
+fn bytes_to_tokens(bytes: i64) -> i64 {
     bytes.saturating_add(3) / 4
+}
+
+fn string_bytes(text: &str) -> i64 {
+    i64::try_from(text.len()).unwrap_or(i64::MAX)
+}
+
+fn role_name(role: &MessageRole) -> &'static str {
+    match role {
+        MessageRole::System => "system",
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+        MessageRole::Tool => "tool",
+    }
+}
+
+fn estimate_json_value_bytes(value: &serde_json::Value) -> i64 {
+    match value {
+        serde_json::Value::Null => string_bytes("null"),
+        serde_json::Value::Bool(value) => string_bytes(if *value { "true" } else { "false" }),
+        serde_json::Value::Number(value) => string_bytes(&value.to_string()),
+        serde_json::Value::String(value) => string_bytes(value),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(estimate_json_value_bytes)
+            .fold(0i64, i64::saturating_add),
+        serde_json::Value::Object(values) => values
+            .iter()
+            .map(|(key, value)| string_bytes(key).saturating_add(estimate_json_value_bytes(value)))
+            .fold(0i64, i64::saturating_add),
+    }
 }
 
 fn build_initial_context_messages(context: &TurnContextItem) -> Vec<ConversationMessage> {
@@ -468,20 +506,22 @@ mod tests {
     }
 
     #[test]
-    fn token_estimate_counts_serialized_conversation_messages() {
+    fn token_estimate_counts_message_fields_without_serializing_full_message() {
         let mut manager = ContextManager::new();
         let messages = vec![
             ConversationMessage::user("hello"),
             ConversationMessage::assistant(Some("hi".to_string()), vec![]),
         ];
-        let expected = messages
-            .iter()
-            .map(estimate_message_tokens)
-            .fold(0i64, i64::saturating_add);
 
         manager.record_items(messages);
 
-        assert_eq!(manager.estimate_token_count(), expected);
+        assert_eq!(
+            manager.estimate_token_count(),
+            bytes_to_tokens(string_bytes("user").saturating_add(string_bytes("hello")))
+                .saturating_add(bytes_to_tokens(
+                    string_bytes("assistant").saturating_add(string_bytes("hi"))
+                ))
+        );
         assert!(manager.estimate_token_count() > 0);
     }
 
@@ -680,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn compacted_replacement_history_preserves_reference_context() {
+    fn compacted_replacement_history_clears_reference_context() {
         let workspace_root = PathBuf::from("/workspace");
         let context = TurnContextItem {
             workspace_root: workspace_root.clone(),
@@ -704,6 +744,6 @@ mod tests {
 
         let manager = ContextManager::from_rollout_items(&items);
 
-        assert_eq!(manager.reference_turn_context(), Some(context));
+        assert_eq!(manager.reference_turn_context(), None);
     }
 }

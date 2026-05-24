@@ -17,9 +17,7 @@ pub struct AgentConfig {
 
 impl AgentConfig {
     pub fn resolved_auto_compact_token_limit(&self) -> Option<i64> {
-        let context_limit = self
-            .model_context_window
-            .map(|context_window| (context_window * 9) / 10);
+        let context_limit = self.model_context_window.map(ninety_percent);
 
         match (self.auto_compact_token_limit, context_limit) {
             (Some(configured), Some(context_limit)) => Some(configured.min(context_limit)),
@@ -28,6 +26,10 @@ impl AgentConfig {
             (None, None) => None,
         }
     }
+}
+
+fn ninety_percent(value: i64) -> i64 {
+    ((i128::from(value) * 9) / 10).min(i128::from(i64::MAX)) as i64
 }
 
 impl Default for AgentConfig {
@@ -107,6 +109,20 @@ mod tests {
         };
 
         assert_eq!(config.resolved_auto_compact_token_limit(), None);
+    }
+
+    #[test]
+    fn auto_compact_limit_handles_large_context_window_without_overflow() {
+        let config = AgentConfig {
+            auto_compact_token_limit: None,
+            model_context_window: Some(i64::MAX),
+            ..AgentConfig::default()
+        };
+
+        assert_eq!(
+            config.resolved_auto_compact_token_limit(),
+            Some(((i64::MAX as i128 * 9) / 10) as i64)
+        );
     }
 
     #[test]

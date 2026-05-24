@@ -1788,6 +1788,98 @@ async fn turn_interrupt_aborts_active_turn_and_records_interrupted_event() {
 }
 
 #[tokio::test]
+async fn turn_interrupt_aborts_pre_turn_auto_compaction() {
+    let dir = tempdir().unwrap();
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let service = Arc::new(AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            auto_compact_token_limit: Some(1),
+            ..AgentConfig::default()
+        },
+        Box::new(BlockingLlm {
+            started: started.clone(),
+            release,
+        }),
+        ToolRegistry::new,
+    ));
+    let thread_id = SessionId::new("thread_interrupt_pre_turn_compaction");
+    let snapshot = SessionSnapshot::new_thread(
+        thread_id.clone(),
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+    );
+    let rollout_paths = exagent::state::rollout::rollout_paths(dir.path(), &thread_id);
+    exagent::state::rollout::RolloutStore::new(rollout_paths.rollout_path)
+        .append_items_blocking(&[
+            exagent::state::rollout::RolloutItem::SessionMeta(
+                exagent::state::rollout::SessionMeta {
+                    thread_id: thread_id.clone(),
+                    root_thread_id: thread_id.clone(),
+                    parent_thread_id: None,
+                    spawned_by_turn_id: None,
+                    agent_role: AgentRole::Primary,
+                    workspace_root: snapshot.workspace_root,
+                    initial_cwd: snapshot.cwd,
+                    created_at: "2026-05-20T00:00:00Z".to_string(),
+                },
+            ),
+            exagent::state::rollout::RolloutItem::ResponseItem(ConversationMessage::user(
+                "old user",
+            )),
+            exagent::state::rollout::RolloutItem::ResponseItem(ConversationMessage::assistant(
+                Some("old assistant".to_string()),
+                vec![],
+            )),
+        ])
+        .expect("write rollout");
+
+    let first_service = service.clone();
+    let first_thread_id = thread_id.clone();
+    let first_turn = tokio::spawn(async move {
+        first_service
+            .turn_start(TurnStartParams {
+                thread_id: first_thread_id,
+                prompt: "new user".into(),
+                workspace_root: None,
+                turn_context: None,
+            })
+            .await
+    });
+
+    started.notified().await;
+    let started_turn = first_turn.await.unwrap().unwrap();
+    let interrupted = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        service.turn_interrupt(TurnInterruptParams {
+            thread_id: thread_id.clone(),
+            turn_id: Some(started_turn.turn.id.clone()),
+            workspace_root: None,
+        }),
+    )
+    .await
+    .expect("interrupt should not wait for compaction release")
+    .expect("interrupt pre-turn compaction");
+
+    assert_eq!(
+        interrupted
+            .interrupted_turn
+            .as_ref()
+            .map(|turn| &turn.status),
+        Some(&TurnStatus::Interrupted)
+    );
+    let replay = service
+        .events_replay(events_replay_params(thread_id))
+        .expect("replay events");
+    assert!(matches!(
+        replay.events.last().map(|event| &event.kind),
+        Some(RuntimeEventKind::TurnInterrupted)
+    ));
+}
+
+#[tokio::test]
 async fn thread_read_reports_waiting_approval_when_runtime_overlay_has_pending_approval() {
     let dir = tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("scratch")).unwrap();

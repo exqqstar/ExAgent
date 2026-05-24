@@ -47,44 +47,36 @@ impl ThreadSession {
             .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?
             .snapshot
             .clone();
-        self.compact_before_turn_if_needed(&turn_id, &mut snapshot)
-            .await?;
-        let context_cwd = turn_cwd.clone().unwrap_or_else(|| snapshot.cwd.clone());
-        let prompt_context = PromptContext::for_turn(
-            self.agent.config(),
-            TurnPaths {
-                workspace_root: snapshot.workspace_root.clone(),
-                cwd: context_cwd,
-            },
-        );
-        let turn_context = prompt_context.turn_context.clone();
-        let context_messages = self.context_manager.apply_context_updates(prompt_context);
-        let user_message = ConversationMessage::user(prompt);
-        self.context_manager.record_items([user_message.clone()]);
-        self.context_manager.sync_snapshot(&mut snapshot);
-        let mut rollout_items = Vec::with_capacity(context_messages.len() + 2);
-        rollout_items.push(RolloutItem::TurnContext(turn_context));
-        rollout_items.extend(context_messages.into_iter().map(RolloutItem::ResponseItem));
-        rollout_items.push(RolloutItem::ResponseItem(user_message));
-        self.rollout_store.append_items_blocking(&rollout_items)?;
-        self.append_and_broadcast_snapshot(
-            &snapshot,
-            Some(&turn_id),
-            RuntimeEventKind::TurnStarted,
-        )?;
 
-        let Self {
-            agent,
-            recorder,
-            rollout_store,
-            context_manager,
-            ..
-        } = self;
+        let final_turn = if let Some(mut interrupt) = interrupt {
+            let interrupted_during_compaction = tokio::select! {
+                result = self.compact_before_turn_if_needed(&turn_id, &mut snapshot) => {
+                    result?;
+                    false
+                }
+                _ = &mut interrupt.interrupt_rx => true,
+            };
+            if interrupted_during_compaction {
+                self.record_turn_interrupted(&snapshot, &turn_id, &interrupt.interrupted)?;
+                return Err(ThreadRuntimeError::TurnInterrupted {
+                    thread_id: self.thread_id.clone(),
+                    turn_id,
+                }
+                .into());
+            }
 
-        let final_turn = if let Some(interrupt) = interrupt {
+            let runtime_turn_cwd = turn_cwd.clone();
+            self.record_user_turn_start(&turn_id, prompt, turn_cwd, &mut snapshot)?;
+            let Self {
+                agent,
+                recorder,
+                rollout_store,
+                context_manager,
+                ..
+            } = self;
             let runtime_turn_id = turn_id.clone();
             tokio::select! {
-                result = run_session_turn(agent, recorder, rollout_store, context_manager, &mut snapshot, runtime_turn_id, turn_cwd) => {
+                result = run_session_turn(agent, recorder, rollout_store, context_manager, &mut snapshot, runtime_turn_id, runtime_turn_cwd) => {
                     match result {
                         Ok(turn) => turn,
                         Err(err) => {
@@ -98,13 +90,8 @@ impl ThreadSession {
                         }
                     }
                 }
-                _ = interrupt.interrupt_rx => {
-                    self.append_and_broadcast_snapshot(
-                        &snapshot,
-                        Some(&turn_id),
-                        RuntimeEventKind::TurnInterrupted,
-                    )?;
-                    interrupt.interrupted.notify_one();
+                _ = &mut interrupt.interrupt_rx => {
+                    self.record_turn_interrupted(&snapshot, &turn_id, &interrupt.interrupted)?;
                     return Err(ThreadRuntimeError::TurnInterrupted {
                         thread_id: self.thread_id.clone(),
                         turn_id,
@@ -112,6 +99,17 @@ impl ThreadSession {
                 }
             }
         } else {
+            self.compact_before_turn_if_needed(&turn_id, &mut snapshot)
+                .await?;
+            let runtime_turn_cwd = turn_cwd.clone();
+            self.record_user_turn_start(&turn_id, prompt, turn_cwd, &mut snapshot)?;
+            let Self {
+                agent,
+                recorder,
+                rollout_store,
+                context_manager,
+                ..
+            } = self;
             match run_session_turn(
                 agent,
                 recorder,
@@ -119,7 +117,7 @@ impl ThreadSession {
                 context_manager,
                 &mut snapshot,
                 turn_id.clone(),
-                turn_cwd,
+                runtime_turn_cwd,
             )
             .await
             {
@@ -146,6 +144,52 @@ impl ThreadSession {
             turn_id,
             final_turn,
         })
+    }
+
+    fn record_user_turn_start(
+        &mut self,
+        turn_id: &TurnId,
+        prompt: String,
+        turn_cwd: Option<PathBuf>,
+        snapshot: &mut SessionSnapshot,
+    ) -> Result<()> {
+        // Apply model-visible runtime context before the user message so the
+        // sampling prompt has stable background for this turn.
+        let context_cwd = turn_cwd.unwrap_or_else(|| snapshot.cwd.clone());
+        let prompt_context = PromptContext::for_turn(
+            self.agent.config(),
+            TurnPaths {
+                workspace_root: snapshot.workspace_root.clone(),
+                cwd: context_cwd,
+            },
+        );
+        let turn_context = prompt_context.turn_context.clone();
+        let context_messages = self.context_manager.apply_context_updates(prompt_context);
+        let user_message = ConversationMessage::user(prompt);
+        self.context_manager.record_items([user_message.clone()]);
+        self.context_manager.sync_snapshot(snapshot);
+        let mut rollout_items = Vec::with_capacity(context_messages.len() + 2);
+        rollout_items.push(RolloutItem::TurnContext(turn_context));
+        rollout_items.extend(context_messages.into_iter().map(RolloutItem::ResponseItem));
+        rollout_items.push(RolloutItem::ResponseItem(user_message));
+        self.rollout_store.append_items_blocking(&rollout_items)?;
+        self.append_and_broadcast_snapshot(snapshot, Some(turn_id), RuntimeEventKind::TurnStarted)?;
+        Ok(())
+    }
+
+    fn record_turn_interrupted(
+        &mut self,
+        snapshot: &SessionSnapshot,
+        turn_id: &TurnId,
+        interrupted: &std::sync::Arc<tokio::sync::Notify>,
+    ) -> Result<()> {
+        self.append_and_broadcast_snapshot(
+            snapshot,
+            Some(turn_id),
+            RuntimeEventKind::TurnInterrupted,
+        )?;
+        interrupted.notify_one();
+        Ok(())
     }
 
     async fn compact_before_turn_if_needed(
@@ -187,7 +231,7 @@ async fn run_session_turn(
     turn_cwd: Option<PathBuf>,
 ) -> Result<AssistantTurn> {
     snapshot.normalize_lineage();
-    let cwd = turn_cwd.unwrap_or_else(|| snapshot.cwd.clone());
+    let cwd = turn_cwd.clone().unwrap_or_else(|| snapshot.cwd.clone());
     let tool_runtime = agent.tool_runtime(
         snapshot.session_id.clone(),
         runtime_turn_id.clone(),
@@ -213,6 +257,7 @@ async fn run_session_turn(
                     context_manager,
                     snapshot,
                     &runtime_turn_id,
+                    turn_cwd.as_ref(),
                 )
                 .await?;
                 let prompt = context_manager.for_prompt();
@@ -268,6 +313,7 @@ async fn compact_after_context_window_error(
     context_manager: &mut ContextManager,
     snapshot: &mut SessionSnapshot,
     turn_id: &TurnId,
+    turn_cwd: Option<&PathBuf>,
 ) -> Result<()> {
     let context_window = agent
         .config()
@@ -283,10 +329,6 @@ async fn compact_after_context_window_error(
         .find(|message| message.role == MessageRole::User)
         .cloned();
     let result = crate::runtime::compaction::compact_history(agent, &history).await?;
-    let mut replacement_history = result.replacement_history;
-    if let Some(last_user_message) = last_user_message {
-        replacement_history.push(last_user_message);
-    }
 
     record_compaction_checkpoint(
         recorder,
@@ -295,8 +337,48 @@ async fn compact_after_context_window_error(
         snapshot,
         turn_id,
         result.summary,
-        replacement_history,
+        result.replacement_history,
+    )?;
+    restore_retry_context_after_compaction(
+        agent,
+        rollout_store,
+        context_manager,
+        snapshot,
+        turn_cwd,
+        last_user_message,
     )
+}
+
+fn restore_retry_context_after_compaction(
+    agent: &Agent,
+    rollout_store: &crate::state::rollout::RolloutStore,
+    context_manager: &mut ContextManager,
+    snapshot: &mut SessionSnapshot,
+    turn_cwd: Option<&PathBuf>,
+    last_user_message: Option<ConversationMessage>,
+) -> Result<()> {
+    let context_cwd = turn_cwd.cloned().unwrap_or_else(|| snapshot.cwd.clone());
+    let prompt_context = PromptContext::for_turn(
+        agent.config(),
+        TurnPaths {
+            workspace_root: snapshot.workspace_root.clone(),
+            cwd: context_cwd,
+        },
+    );
+    let turn_context = prompt_context.turn_context.clone();
+    let context_messages = context_manager.apply_context_updates(prompt_context);
+    let mut rollout_items = Vec::with_capacity(context_messages.len() + 2);
+    rollout_items.push(RolloutItem::TurnContext(turn_context));
+    rollout_items.extend(context_messages.into_iter().map(RolloutItem::ResponseItem));
+
+    if let Some(last_user_message) = last_user_message {
+        context_manager.record_items([last_user_message.clone()]);
+        rollout_items.push(RolloutItem::ResponseItem(last_user_message));
+    }
+
+    context_manager.sync_snapshot(snapshot);
+    rollout_store.append_items_blocking(&rollout_items)?;
+    Ok(())
 }
 
 fn record_compaction_checkpoint(
@@ -1337,6 +1419,21 @@ mod tests {
             .join("\n")
             .contains("summary after context error"));
         assert!(prompts[2].join("\n").contains("new user"));
+        assert!(prompts[2]
+            .iter()
+            .any(|message| message.contains("Runtime context:")));
+        assert!(prompts[2]
+            .iter()
+            .any(|message| message.contains("Environment context:")));
+        let runtime_context_index = prompts[2]
+            .iter()
+            .position(|message| message.contains("Runtime context:"))
+            .expect("runtime context in retry prompt");
+        let user_index = prompts[2]
+            .iter()
+            .position(|message| message == "new user")
+            .expect("current user in retry prompt");
+        assert!(runtime_context_index < user_index);
 
         let live_view =
             ThreadSession::live_view_from_state(thread_id.clone(), &session.live_state_handle());

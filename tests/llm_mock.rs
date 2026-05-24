@@ -17,6 +17,8 @@ async fn mock_llm_returns_scripted_turns_in_order() {
     let first = llm.complete(&[], &[]).await.unwrap();
     let second = llm.complete(&[], &[]).await.unwrap();
 
-    assert_eq!(first.text.as_deref(), Some("first"));
-    assert_eq!(second.text.as_deref(), Some("second"));
+    assert_eq!(first.turn.text.as_deref(), Some("first"));
+    assert_eq!(second.turn.text.as_deref(), Some("second"));
+    assert_eq!(first.token_usage, None);
+    assert_eq!(second.token_usage, None);
 }

@@ -191,10 +191,64 @@ Current event kinds are:
 - `approval_requested`
 - `approval_decision`
 - `compaction_written`
+- `token_count`
 - `runtime_error`
 
 The LLM adapter does not currently stream token deltas. A full assistant message
 is emitted as an `assistant_turn` event.
+
+`token_count` carries optional `TokenUsageInfo`:
+
+```json
+{
+  "type": "token_count",
+  "info": {
+    "total_token_usage": {
+      "input_tokens": 40,
+      "cached_input_tokens": 5,
+      "output_tokens": 10,
+      "reasoning_output_tokens": 2,
+      "total_tokens": 52
+    },
+    "last_token_usage": {
+      "input_tokens": 40,
+      "cached_input_tokens": 5,
+      "output_tokens": 10,
+      "reasoning_output_tokens": 2,
+      "total_tokens": 52
+    },
+    "model_context_window": 128000
+  }
+}
+```
+
+`token_count` events are replayable and filterable, but they do not create
+visible `ThreadItem` entries in `thread/read`.
+
+## Token Budget And Compaction
+
+The runtime can compact prompt history before a model context window is filled.
+The relevant environment variables are:
+
+```text
+EXAGENT_MODEL_CONTEXT_WINDOW
+EXAGENT_AUTO_COMPACT_TOKEN_LIMIT
+```
+
+Both values are positive integer token counts. If only
+`EXAGENT_MODEL_CONTEXT_WINDOW` is configured, ExAgent derives the auto-compact
+threshold as 90% of that window. If both are configured, the explicit threshold
+is clamped to the same 90% headroom.
+
+Compaction is local and logical. It does not rewrite `rollout.jsonl`. A
+successful compaction appends a `compacted` rollout checkpoint with
+`replacement_history`; replay uses the latest replacement history to rebuild the
+model-visible conversation. Earlier rollout lines remain available for audit.
+
+When compaction runs in a loaded runtime, clients may see
+`compaction_written`. The durable checkpoint is the `compacted` rollout item;
+`events/replay` snapshots expose the latest compaction through
+`snapshot.latest_compaction`.
 
 ## Event Replay
 
@@ -208,7 +262,7 @@ or the loaded runtime's live event buffer:
   "after_event_id": "evt_3",
   "limit": 50,
   "include_snapshot": true,
-  "event_kinds": ["assistant_turn", "tool_result"]
+  "event_kinds": ["assistant_turn", "tool_result", "token_count"]
 }
 ```
 

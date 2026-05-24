@@ -23,6 +23,7 @@ This repository is intentionally scoped as runtime infrastructure, not as a full
 - Subscribe to live runtime events over HTTP SSE
 - Interrupt active turns or pending approval waits
 - Keep interactive subprocesses alive across turns
+- Track model token usage and compact prompt history before the configured context budget is exhausted
 - Expose CLI and HTTP API entrypoints
 
 ## Architecture
@@ -64,6 +65,8 @@ Key persistence rule:
 - `rollout.jsonl` is the durable source of truth for new thread records
 - legacy `snapshot.json` and `events.jsonl` files are not runtime inputs; v2 still returns their paths as compatibility-only fields
 - `ContextManager` owns prompt-visible history while a thread is loaded
+- token accounting is attached to prompt-visible history, not to assistant message content
+- compaction is logical: old rollout lines stay in place, and replay uses the latest compacted checkpoint as the current model-visible history
 - `RuntimeOverlay` owns live-only approvals and open exec session references
 - cold rollout replay never recreates live-only approvals or running exec sessions
 
@@ -85,9 +88,16 @@ export OPENAI_BASE_URL="https://api.openai.com/v1"
 export OPENAI_API_KEY="your-api-key"
 export OPENAI_MODEL="gpt-4.1"
 export EXAGENT_POLICY_MODE="off"
+# Optional: enable automatic local compaction before the model context fills.
+export EXAGENT_MODEL_CONTEXT_WINDOW="128000"
+export EXAGENT_AUTO_COMPACT_TOKEN_LIMIT="115200"
 ```
 
 Accepted `EXAGENT_POLICY_MODE` values are `off`, `advisory`, and `enforced`.
+Token budget values are positive integer token counts. If
+`EXAGENT_MODEL_CONTEXT_WINDOW` is set and `EXAGENT_AUTO_COMPACT_TOKEN_LIMIT` is
+not, ExAgent derives the auto-compact threshold as 90% of the context window.
+If both are set, the explicit threshold is clamped to that 90% headroom.
 
 ### 2. Run the test suite
 
@@ -200,6 +210,7 @@ Implemented today:
 - policy and approval flow
 - app-server runtime boundary v2
 - thread-scoped runtime actor
+- token budget accounting and rollout-backed logical compaction
 - live-only runtime overlay for approvals and persistent exec refs
 - live event subscription
 

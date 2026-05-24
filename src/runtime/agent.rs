@@ -9,7 +9,7 @@ use crate::llm::LlmClient;
 use crate::policy::PolicyManager;
 use crate::registry::ToolRegistry;
 use crate::runtime::tool_call_runtime::ToolCallRuntime;
-use crate::types::{AssistantTurn, ConversationMessage, SessionId, TurnId};
+use crate::types::{ConversationMessage, LlmCompletion, SessionId, TurnId};
 
 pub struct Agent {
     config: AgentConfig,
@@ -73,7 +73,7 @@ impl Agent {
         &self,
         prompt: &[ConversationMessage],
         tool_schemas: &[serde_json::Value],
-    ) -> Result<AssistantTurn> {
+    ) -> Result<LlmCompletion> {
         self.llm.complete(prompt, tool_schemas).await
     }
 

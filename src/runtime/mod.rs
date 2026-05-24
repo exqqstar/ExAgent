@@ -1,4 +1,5 @@
 pub mod agent;
+pub(crate) mod compaction;
 pub(crate) mod context;
 pub mod exec_session;
 pub mod policy;

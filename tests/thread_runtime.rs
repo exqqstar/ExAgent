@@ -10,7 +10,9 @@ use exagent::runtime::thread_runtime::{
 use exagent::runtime::thread_session::{ThreadSession, ThreadSessionOptions};
 use exagent::session::{AgentRole, SessionSnapshot, TurnContextItem};
 use exagent::state::rollout::{rollout_paths, RolloutItem, RolloutStore, SessionMeta};
-use exagent::types::{AssistantTurn, ConversationMessage, EventId, SessionId, TurnId};
+use exagent::types::{
+    AssistantTurn, ConversationMessage, EventId, LlmCompletion, SessionId, TurnId,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -555,7 +557,7 @@ impl LlmClient for PanicLlm {
         &self,
         _messages: &[ConversationMessage],
         _tools: &[serde_json::Value],
-    ) -> anyhow::Result<AssistantTurn> {
+    ) -> anyhow::Result<LlmCompletion> {
         panic!("simulated llm panic to verify StoppedGuard");
     }
 }

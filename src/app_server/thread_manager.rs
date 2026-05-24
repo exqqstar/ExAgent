@@ -34,7 +34,7 @@ use crate::state::rollout::{
     events_from_rollout_items, rollout_paths, session_meta_from_snapshot,
     snapshot_from_rollout_items, RolloutItem, RolloutStore,
 };
-use crate::types::{AssistantTurn, SessionId, TurnId};
+use crate::types::{AssistantTurn, LlmCompletion, SessionId, TurnId};
 
 type RegistryFactory = Arc<dyn Fn() -> ToolRegistry + Send + Sync>;
 
@@ -72,7 +72,7 @@ impl LlmClient for SharedLlmClient {
         &self,
         messages: &[crate::types::ConversationMessage],
         tools: &[serde_json::Value],
-    ) -> Result<crate::types::AssistantTurn> {
+    ) -> Result<LlmCompletion> {
         self.llm.complete(messages, tools).await
     }
 }
@@ -765,7 +765,8 @@ fn latest_turn_state(events: &[crate::events::RuntimeEvent]) -> Option<TurnState
             RuntimeEventKind::ToolResult { .. }
             | RuntimeEventKind::ExecOutput { .. }
             | RuntimeEventKind::ApprovalDecision { .. }
-            | RuntimeEventKind::CompactionWritten { .. } => TurnStatus::InProgress,
+            | RuntimeEventKind::CompactionWritten { .. }
+            | RuntimeEventKind::TokenCount { .. } => TurnStatus::InProgress,
         };
         Some(TurnState { turn_id, status })
     })
@@ -851,7 +852,8 @@ fn build_turn_views(events: Vec<RuntimeEvent>) -> Vec<TurnView> {
             | RuntimeEventKind::ToolResult { .. }
             | RuntimeEventKind::ExecOutput { .. }
             | RuntimeEventKind::ApprovalDecision { .. }
-            | RuntimeEventKind::CompactionWritten { .. } => {
+            | RuntimeEventKind::CompactionWritten { .. }
+            | RuntimeEventKind::TokenCount { .. } => {
                 if let Some(turn_id) = view_turn_id(&event, current_turn_id.as_ref()) {
                     let index = ensure_turn_view(&mut turns, &turn_id);
                     if let Some(item) = thread_item_from_event(&event.kind) {
@@ -911,7 +913,8 @@ fn thread_item_from_event(kind: &RuntimeEventKind) -> Option<ThreadItem> {
         RuntimeEventKind::CompactionWritten { .. } => Some(ThreadItem::CompactionWritten),
         RuntimeEventKind::TurnStarted
         | RuntimeEventKind::TurnCompleted
-        | RuntimeEventKind::TurnInterrupted => None,
+        | RuntimeEventKind::TurnInterrupted
+        | RuntimeEventKind::TokenCount { .. } => None,
     }
 }
 
@@ -1008,6 +1011,9 @@ fn runtime_event_kind_matches(filter: &RuntimeEventKindFilter, kind: &RuntimeEve
         ) | (
             RuntimeEventKindFilter::CompactionWritten,
             RuntimeEventKind::CompactionWritten { .. },
+        ) | (
+            RuntimeEventKindFilter::TokenCount,
+            RuntimeEventKind::TokenCount { .. },
         ) | (
             RuntimeEventKindFilter::RuntimeError,
             RuntimeEventKind::RuntimeError { .. },

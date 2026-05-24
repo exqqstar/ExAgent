@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::types::{AssistantTurn, ConversationMessage, MessageRole, ToolCall};
+use crate::types::{
+    AssistantTurn, ConversationMessage, LlmCompletion, MessageRole, TokenUsage, ToolCall,
+};
 
 #[async_trait]
 pub trait LlmClient: Send + Sync {
@@ -14,17 +16,38 @@ pub trait LlmClient: Send + Sync {
         &self,
         messages: &[ConversationMessage],
         tools: &[serde_json::Value],
-    ) -> Result<AssistantTurn>;
+    ) -> Result<LlmCompletion>;
+}
+
+pub fn is_context_window_error(err: &anyhow::Error) -> bool {
+    let message = format!("{err:#}").to_lowercase();
+    [
+        "context_length_exceeded",
+        "maximum context length",
+        "context window",
+        "too many tokens",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 pub struct MockLlm {
-    turns: Mutex<VecDeque<AssistantTurn>>,
+    completions: Mutex<VecDeque<LlmCompletion>>,
 }
 
 impl MockLlm {
     pub fn new(turns: Vec<AssistantTurn>) -> Self {
+        Self::new_completions(
+            turns
+                .into_iter()
+                .map(AssistantTurn::into_completion)
+                .collect(),
+        )
+    }
+
+    pub fn new_completions(completions: Vec<LlmCompletion>) -> Self {
         Self {
-            turns: Mutex::new(turns.into()),
+            completions: Mutex::new(completions.into()),
         }
     }
 }
@@ -35,8 +58,8 @@ impl LlmClient for MockLlm {
         &self,
         _messages: &[ConversationMessage],
         _tools: &[serde_json::Value],
-    ) -> Result<AssistantTurn> {
-        self.turns
+    ) -> Result<LlmCompletion> {
+        self.completions
             .lock()
             .await
             .pop_front()
@@ -68,9 +91,10 @@ impl OpenAiCompatibleLlm {
         })
     }
 
-    pub fn parse_response(value: Value) -> Result<AssistantTurn> {
+    pub fn parse_response(value: Value) -> Result<LlmCompletion> {
         let response: ChatCompletionResponse =
             serde_json::from_value(value).context("Failed to parse chat completion response")?;
+        let token_usage = response.usage.map(TokenUsage::from);
         let choice = response
             .choices
             .into_iter()
@@ -95,9 +119,12 @@ impl OpenAiCompatibleLlm {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(AssistantTurn {
-            text: choice.message.content,
-            tool_calls,
+        Ok(LlmCompletion {
+            turn: AssistantTurn {
+                text: choice.message.content,
+                tool_calls,
+            },
+            token_usage,
         })
     }
 }
@@ -108,7 +135,7 @@ impl LlmClient for OpenAiCompatibleLlm {
         &self,
         messages: &[ConversationMessage],
         tools: &[serde_json::Value],
-    ) -> Result<AssistantTurn> {
+    ) -> Result<LlmCompletion> {
         let request = ChatCompletionRequest {
             model: self.model.clone(),
             messages: build_request_messages(messages)?,
@@ -204,6 +231,7 @@ struct ChatRequestToolCallFunction {
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponse {
     choices: Vec<ChatChoice>,
+    usage: Option<ChatUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -228,6 +256,50 @@ struct ChatResponseToolCall {
 struct ChatResponseToolCallFunction {
     name: String,
     arguments: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatUsage {
+    #[serde(default)]
+    prompt_tokens: i64,
+    #[serde(default)]
+    completion_tokens: i64,
+    #[serde(default)]
+    total_tokens: i64,
+    #[serde(default)]
+    prompt_tokens_details: Option<ChatPromptTokensDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<ChatCompletionTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatPromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: i64,
+}
+
+impl From<ChatUsage> for TokenUsage {
+    fn from(usage: ChatUsage) -> Self {
+        Self {
+            input_tokens: usage.prompt_tokens,
+            cached_input_tokens: usage
+                .prompt_tokens_details
+                .map(|details| details.cached_tokens)
+                .unwrap_or_default(),
+            output_tokens: usage.completion_tokens,
+            reasoning_output_tokens: usage
+                .completion_tokens_details
+                .map(|details| details.reasoning_tokens)
+                .unwrap_or_default(),
+            total_tokens: usage.total_tokens,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

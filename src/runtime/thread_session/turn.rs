@@ -10,9 +10,9 @@ use crate::runtime::thread_runtime::{
     ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus, ThreadTurnContext,
 };
 use crate::runtime::tool_call_runtime::{ApprovalUpdate, ToolEffect, ToolExecutionOutcome};
-use crate::session::{ApprovalStatus, SessionSnapshot};
-use crate::state::rollout::RolloutItem;
-use crate::types::{AssistantTurn, ConversationMessage, TurnId};
+use crate::session::{ApprovalStatus, CompactionSummary, SessionSnapshot};
+use crate::state::rollout::{CompactedItem, RolloutItem};
+use crate::types::{AssistantTurn, ConversationMessage, MessageRole, TurnId};
 
 impl ThreadSession {
     pub(crate) async fn handle_user_input(
@@ -47,42 +47,36 @@ impl ThreadSession {
             .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?
             .snapshot
             .clone();
-        let context_cwd = turn_cwd.clone().unwrap_or_else(|| snapshot.cwd.clone());
-        let prompt_context = PromptContext::for_turn(
-            self.agent.config(),
-            TurnPaths {
-                workspace_root: snapshot.workspace_root.clone(),
-                cwd: context_cwd,
-            },
-        );
-        let turn_context = prompt_context.turn_context.clone();
-        let context_messages = self.context_manager.apply_context_updates(prompt_context);
-        let user_message = ConversationMessage::user(prompt);
-        self.context_manager.record_items([user_message.clone()]);
-        self.context_manager.sync_snapshot(&mut snapshot);
-        let mut rollout_items = Vec::with_capacity(context_messages.len() + 2);
-        rollout_items.push(RolloutItem::TurnContext(turn_context));
-        rollout_items.extend(context_messages.into_iter().map(RolloutItem::ResponseItem));
-        rollout_items.push(RolloutItem::ResponseItem(user_message));
-        self.rollout_store.append_items_blocking(&rollout_items)?;
-        self.append_and_broadcast_snapshot(
-            &snapshot,
-            Some(&turn_id),
-            RuntimeEventKind::TurnStarted,
-        )?;
 
-        let Self {
-            agent,
-            recorder,
-            rollout_store,
-            context_manager,
-            ..
-        } = self;
+        let final_turn = if let Some(mut interrupt) = interrupt {
+            let interrupted_during_compaction = tokio::select! {
+                result = self.compact_before_turn_if_needed(&turn_id, &mut snapshot) => {
+                    result?;
+                    false
+                }
+                _ = &mut interrupt.interrupt_rx => true,
+            };
+            if interrupted_during_compaction {
+                self.record_turn_interrupted(&snapshot, &turn_id, &interrupt.interrupted)?;
+                return Err(ThreadRuntimeError::TurnInterrupted {
+                    thread_id: self.thread_id.clone(),
+                    turn_id,
+                }
+                .into());
+            }
 
-        let final_turn = if let Some(interrupt) = interrupt {
+            let runtime_turn_cwd = turn_cwd.clone();
+            self.record_user_turn_start(&turn_id, prompt, turn_cwd, &mut snapshot)?;
+            let Self {
+                agent,
+                recorder,
+                rollout_store,
+                context_manager,
+                ..
+            } = self;
             let runtime_turn_id = turn_id.clone();
             tokio::select! {
-                result = run_session_turn(agent, recorder, rollout_store, context_manager, &mut snapshot, runtime_turn_id, turn_cwd) => {
+                result = run_session_turn(agent, recorder, rollout_store, context_manager, &mut snapshot, runtime_turn_id, runtime_turn_cwd) => {
                     match result {
                         Ok(turn) => turn,
                         Err(err) => {
@@ -96,13 +90,8 @@ impl ThreadSession {
                         }
                     }
                 }
-                _ = interrupt.interrupt_rx => {
-                    self.append_and_broadcast_snapshot(
-                        &snapshot,
-                        Some(&turn_id),
-                        RuntimeEventKind::TurnInterrupted,
-                    )?;
-                    interrupt.interrupted.notify_one();
+                _ = &mut interrupt.interrupt_rx => {
+                    self.record_turn_interrupted(&snapshot, &turn_id, &interrupt.interrupted)?;
                     return Err(ThreadRuntimeError::TurnInterrupted {
                         thread_id: self.thread_id.clone(),
                         turn_id,
@@ -110,6 +99,17 @@ impl ThreadSession {
                 }
             }
         } else {
+            self.compact_before_turn_if_needed(&turn_id, &mut snapshot)
+                .await?;
+            let runtime_turn_cwd = turn_cwd.clone();
+            self.record_user_turn_start(&turn_id, prompt, turn_cwd, &mut snapshot)?;
+            let Self {
+                agent,
+                recorder,
+                rollout_store,
+                context_manager,
+                ..
+            } = self;
             match run_session_turn(
                 agent,
                 recorder,
@@ -117,7 +117,7 @@ impl ThreadSession {
                 context_manager,
                 &mut snapshot,
                 turn_id.clone(),
-                turn_cwd,
+                runtime_turn_cwd,
             )
             .await
             {
@@ -145,6 +145,80 @@ impl ThreadSession {
             final_turn,
         })
     }
+
+    fn record_user_turn_start(
+        &mut self,
+        turn_id: &TurnId,
+        prompt: String,
+        turn_cwd: Option<PathBuf>,
+        snapshot: &mut SessionSnapshot,
+    ) -> Result<()> {
+        // Apply model-visible runtime context before the user message so the
+        // sampling prompt has stable background for this turn.
+        let context_cwd = turn_cwd.unwrap_or_else(|| snapshot.cwd.clone());
+        let prompt_context = PromptContext::for_turn(
+            self.agent.config(),
+            TurnPaths {
+                workspace_root: snapshot.workspace_root.clone(),
+                cwd: context_cwd,
+            },
+        );
+        let turn_context = prompt_context.turn_context.clone();
+        let context_messages = self.context_manager.apply_context_updates(prompt_context);
+        let user_message = ConversationMessage::user(prompt);
+        self.context_manager.record_items([user_message.clone()]);
+        self.context_manager.sync_snapshot(snapshot);
+        let mut rollout_items = Vec::with_capacity(context_messages.len() + 2);
+        rollout_items.push(RolloutItem::TurnContext(turn_context));
+        rollout_items.extend(context_messages.into_iter().map(RolloutItem::ResponseItem));
+        rollout_items.push(RolloutItem::ResponseItem(user_message));
+        self.rollout_store.append_items_blocking(&rollout_items)?;
+        self.append_and_broadcast_snapshot(snapshot, Some(turn_id), RuntimeEventKind::TurnStarted)?;
+        Ok(())
+    }
+
+    fn record_turn_interrupted(
+        &mut self,
+        snapshot: &SessionSnapshot,
+        turn_id: &TurnId,
+        interrupted: &std::sync::Arc<tokio::sync::Notify>,
+    ) -> Result<()> {
+        self.append_and_broadcast_snapshot(
+            snapshot,
+            Some(turn_id),
+            RuntimeEventKind::TurnInterrupted,
+        )?;
+        interrupted.notify_one();
+        Ok(())
+    }
+
+    async fn compact_before_turn_if_needed(
+        &mut self,
+        turn_id: &TurnId,
+        snapshot: &mut SessionSnapshot,
+    ) -> Result<()> {
+        let Some(limit) = self.agent.config().resolved_auto_compact_token_limit() else {
+            return Ok(());
+        };
+        if self.context_manager.active_context_tokens() < limit {
+            return Ok(());
+        }
+        if self.context_manager.for_prompt().is_empty() {
+            return Ok(());
+        }
+
+        let history = self.context_manager.for_prompt();
+        let result = crate::runtime::compaction::compact_history(&self.agent, &history).await?;
+        record_compaction_checkpoint(
+            &mut self.recorder,
+            &self.rollout_store,
+            &mut self.context_manager,
+            snapshot,
+            turn_id,
+            result.summary,
+            result.replacement_history,
+        )
+    }
 }
 
 async fn run_session_turn(
@@ -157,7 +231,7 @@ async fn run_session_turn(
     turn_cwd: Option<PathBuf>,
 ) -> Result<AssistantTurn> {
     snapshot.normalize_lineage();
-    let cwd = turn_cwd.unwrap_or_else(|| snapshot.cwd.clone());
+    let cwd = turn_cwd.clone().unwrap_or_else(|| snapshot.cwd.clone());
     let tool_runtime = agent.tool_runtime(
         snapshot.session_id.clone(),
         runtime_turn_id.clone(),
@@ -167,9 +241,34 @@ async fn run_session_turn(
 
     for _ in 0..agent.max_turns() {
         let prompt = context_manager.for_prompt();
-        let turn = agent
+        let completion = match agent
             .sample_assistant_turn(&prompt, &tool_runtime.schemas())
-            .await?;
+            .await
+        {
+            Ok(completion) => completion,
+            Err(err)
+                if crate::llm::is_context_window_error(&err)
+                    && agent.config().model_context_window.is_some() =>
+            {
+                compact_after_context_window_error(
+                    agent,
+                    recorder,
+                    rollout_store,
+                    context_manager,
+                    snapshot,
+                    &runtime_turn_id,
+                    turn_cwd.as_ref(),
+                )
+                .await?;
+                let prompt = context_manager.for_prompt();
+                agent
+                    .sample_assistant_turn(&prompt, &tool_runtime.schemas())
+                    .await?
+            }
+            Err(err) => return Err(err),
+        };
+        let turn = completion.turn;
+        let token_usage = completion.token_usage;
         record_assistant_turn(
             recorder,
             rollout_store,
@@ -178,6 +277,11 @@ async fn run_session_turn(
             &runtime_turn_id,
             &turn,
         )?;
+        if let Some(usage) = token_usage.as_ref() {
+            context_manager
+                .update_token_info_from_usage(usage, agent.config().model_context_window);
+            record_token_count_event(recorder, context_manager, snapshot, &runtime_turn_id)?;
+        }
 
         if turn.tool_calls.is_empty() {
             return Ok(turn);
@@ -200,6 +304,126 @@ async fn run_session_turn(
         "Agent reached max turns ({}) without a final assistant turn",
         agent.max_turns()
     ))
+}
+
+async fn compact_after_context_window_error(
+    agent: &Agent,
+    recorder: &mut ThreadEventRecorder,
+    rollout_store: &crate::state::rollout::RolloutStore,
+    context_manager: &mut ContextManager,
+    snapshot: &mut SessionSnapshot,
+    turn_id: &TurnId,
+    turn_cwd: Option<&PathBuf>,
+) -> Result<()> {
+    let context_window = agent
+        .config()
+        .model_context_window
+        .ok_or_else(|| anyhow!("model context window is required for context-window retry"))?;
+    context_manager.set_token_usage_full(context_window);
+    record_token_count_event(recorder, context_manager, snapshot, turn_id)?;
+
+    let history = context_manager.for_prompt();
+    let last_user_message = history
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::User)
+        .cloned();
+    let result = crate::runtime::compaction::compact_history(agent, &history).await?;
+
+    record_compaction_checkpoint(
+        recorder,
+        rollout_store,
+        context_manager,
+        snapshot,
+        turn_id,
+        result.summary,
+        result.replacement_history,
+    )?;
+    restore_retry_context_after_compaction(
+        agent,
+        rollout_store,
+        context_manager,
+        snapshot,
+        turn_cwd,
+        last_user_message,
+    )
+}
+
+fn restore_retry_context_after_compaction(
+    agent: &Agent,
+    rollout_store: &crate::state::rollout::RolloutStore,
+    context_manager: &mut ContextManager,
+    snapshot: &mut SessionSnapshot,
+    turn_cwd: Option<&PathBuf>,
+    last_user_message: Option<ConversationMessage>,
+) -> Result<()> {
+    let context_cwd = turn_cwd.cloned().unwrap_or_else(|| snapshot.cwd.clone());
+    let prompt_context = PromptContext::for_turn(
+        agent.config(),
+        TurnPaths {
+            workspace_root: snapshot.workspace_root.clone(),
+            cwd: context_cwd,
+        },
+    );
+    let turn_context = prompt_context.turn_context.clone();
+    let context_messages = context_manager.apply_context_updates(prompt_context);
+    let mut rollout_items = Vec::with_capacity(context_messages.len() + 2);
+    rollout_items.push(RolloutItem::TurnContext(turn_context));
+    rollout_items.extend(context_messages.into_iter().map(RolloutItem::ResponseItem));
+
+    if let Some(last_user_message) = last_user_message {
+        context_manager.record_items([last_user_message.clone()]);
+        rollout_items.push(RolloutItem::ResponseItem(last_user_message));
+    }
+
+    context_manager.sync_snapshot(snapshot);
+    rollout_store.append_items_blocking(&rollout_items)?;
+    Ok(())
+}
+
+fn record_compaction_checkpoint(
+    recorder: &mut ThreadEventRecorder,
+    rollout_store: &crate::state::rollout::RolloutStore,
+    context_manager: &mut ContextManager,
+    snapshot: &mut SessionSnapshot,
+    turn_id: &TurnId,
+    summary_text: String,
+    replacement_history: Vec<ConversationMessage>,
+) -> Result<()> {
+    let summary = CompactionSummary {
+        summary: summary_text.clone(),
+        source_event_ids: vec![],
+    };
+
+    context_manager.replace_history(replacement_history.clone(), None);
+    context_manager.sync_snapshot(snapshot);
+    snapshot.latest_compaction = Some(summary.clone());
+    rollout_store.append_items_blocking(&[RolloutItem::Compacted(CompactedItem {
+        message: summary_text,
+        replacement_history: Some(replacement_history),
+    })])?;
+    recorder.record(
+        snapshot,
+        Some(turn_id),
+        RuntimeEventKind::CompactionWritten { summary },
+    )?;
+    record_token_count_event(recorder, context_manager, snapshot, turn_id)
+}
+
+fn record_token_count_event(
+    recorder: &mut ThreadEventRecorder,
+    context_manager: &ContextManager,
+    snapshot: &SessionSnapshot,
+    turn_id: &TurnId,
+) -> Result<()> {
+    recorder.record(
+        snapshot,
+        Some(turn_id),
+        RuntimeEventKind::TokenCount {
+            info: context_manager.token_info(),
+        },
+    )?;
+    Ok(())
 }
 
 fn record_assistant_turn(
@@ -344,7 +568,10 @@ mod tests {
     use crate::runtime::thread_runtime::{AgentFactory, ThreadOpResult};
     use crate::runtime::thread_session::{ThreadSession, ThreadSessionOptions};
     use crate::session::SessionSnapshot;
-    use crate::types::{AssistantTurn, ConversationMessage, SessionId, ToolCall, TurnId};
+    use crate::state::rollout::{RolloutItem, RolloutStore};
+    use crate::types::{
+        AssistantTurn, ConversationMessage, LlmCompletion, SessionId, TokenUsage, ToolCall, TurnId,
+    };
 
     fn write_rollout_meta(config: &AgentConfig, thread_id: &SessionId) {
         let snapshot = SessionSnapshot::new_thread(
@@ -358,6 +585,18 @@ mod tests {
                 crate::state::rollout::session_meta_from_snapshot(&snapshot),
             )])
             .expect("write rollout session meta");
+    }
+
+    fn append_rollout_items(config: &AgentConfig, thread_id: &SessionId, items: &[RolloutItem]) {
+        let rollout_paths = crate::state::rollout::rollout_paths(&config.workspace_root, thread_id);
+        RolloutStore::new(rollout_paths.rollout_path)
+            .append_items_blocking(items)
+            .expect("append rollout items");
+    }
+
+    fn read_rollout_items(config: &AgentConfig, thread_id: &SessionId) -> Vec<RolloutItem> {
+        let rollout_paths = crate::state::rollout::rollout_paths(&config.workspace_root, thread_id);
+        RolloutStore::read_items_blocking(&rollout_paths.rollout_path).expect("read rollout items")
     }
 
     struct RecordingLlm {
@@ -394,7 +633,7 @@ mod tests {
             &self,
             messages: &[ConversationMessage],
             _tools: &[serde_json::Value],
-        ) -> Result<AssistantTurn> {
+        ) -> Result<LlmCompletion> {
             self.prompt_lens.lock().unwrap().push(messages.len());
             if let Some(prompt_contents) = &self.prompt_contents {
                 prompt_contents.lock().unwrap().push(
@@ -408,8 +647,48 @@ mod tests {
                 .lock()
                 .await
                 .pop_front()
+                .map(AssistantTurn::into_completion)
                 .ok_or_else(|| anyhow::anyhow!("RecordingLlm is out of scripted turns"))
         }
+    }
+
+    enum ScriptedLlmStep {
+        Completion(LlmCompletion),
+        Error(&'static str),
+    }
+
+    struct ScriptedLlm {
+        steps: AsyncMutex<VecDeque<ScriptedLlmStep>>,
+        prompt_contents: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for ScriptedLlm {
+        async fn complete(
+            &self,
+            messages: &[ConversationMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<LlmCompletion> {
+            self.prompt_contents.lock().unwrap().push(
+                messages
+                    .iter()
+                    .map(|message| message.content.clone())
+                    .collect(),
+            );
+            match self.steps.lock().await.pop_front() {
+                Some(ScriptedLlmStep::Completion(completion)) => Ok(completion),
+                Some(ScriptedLlmStep::Error(message)) => Err(anyhow::anyhow!(message)),
+                None => Err(anyhow::anyhow!("ScriptedLlm is out of scripted steps")),
+            }
+        }
+    }
+
+    fn assistant_completion(text: impl Into<String>) -> LlmCompletion {
+        AssistantTurn {
+            text: Some(text.into()),
+            tool_calls: vec![],
+        }
+        .into_completion()
     }
 
     #[tokio::test]
@@ -745,5 +1024,477 @@ mod tests {
             .contains("Environment context:"));
         assert_eq!(snapshot.conversation[2].content, "hi");
         assert_eq!(snapshot.conversation[5].content, "done");
+    }
+
+    #[tokio::test]
+    async fn thread_session_pre_turn_compaction_skips_when_under_budget() {
+        let dir = tempdir().unwrap();
+        let thread_id = SessionId::new("session_pre_turn_compaction_skip");
+        let turn_id = TurnId::new("turn_1");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            auto_compact_token_limit: Some(100_000),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        append_rollout_items(
+            &config,
+            &thread_id,
+            &[
+                RolloutItem::ResponseItem(ConversationMessage::user("old user")),
+                RolloutItem::ResponseItem(ConversationMessage::assistant(
+                    Some("old assistant".to_string()),
+                    vec![],
+                )),
+            ],
+        );
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(MockLlm::new(vec![AssistantTurn {
+                    text: Some("done".into()),
+                    tool_calls: vec![],
+                }])),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config.clone(),
+            agent_factory,
+        ))
+        .expect("create thread session");
+
+        session
+            .handle_user_input(turn_id, "new user".into(), None, None)
+            .await
+            .expect("run turn");
+
+        let live_view =
+            ThreadSession::live_view_from_state(thread_id.clone(), &session.live_state_handle());
+        assert!(!live_view
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, RuntimeEventKind::CompactionWritten { .. })));
+        assert!(!read_rollout_items(&config, &thread_id)
+            .iter()
+            .any(|item| matches!(item, RolloutItem::Compacted(_))));
+    }
+
+    #[tokio::test]
+    async fn thread_session_pre_turn_compaction_runs_before_new_user_message() {
+        let dir = tempdir().unwrap();
+        let thread_id = SessionId::new("session_pre_turn_compaction_before_user");
+        let turn_id = TurnId::new("turn_1");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            auto_compact_token_limit: Some(1),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        append_rollout_items(
+            &config,
+            &thread_id,
+            &[
+                RolloutItem::ResponseItem(ConversationMessage::user("old user")),
+                RolloutItem::ResponseItem(ConversationMessage::assistant(
+                    Some("old assistant".to_string()),
+                    vec![],
+                )),
+            ],
+        );
+        let prompt_lens = Arc::new(Mutex::new(Vec::new()));
+        let prompt_contents = Arc::new(Mutex::new(Vec::new()));
+        let prompt_lens_for_llm = prompt_lens.clone();
+        let prompt_contents_for_llm = prompt_contents.clone();
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(RecordingLlm::with_prompt_contents(
+                    vec![
+                        AssistantTurn {
+                            text: Some("summary from compaction".into()),
+                            tool_calls: vec![],
+                        },
+                        AssistantTurn {
+                            text: Some("done".into()),
+                            tool_calls: vec![],
+                        },
+                    ],
+                    prompt_lens_for_llm.clone(),
+                    prompt_contents_for_llm.clone(),
+                )),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config.clone(),
+            agent_factory,
+        ))
+        .expect("create thread session");
+
+        session
+            .handle_user_input(turn_id.clone(), "new user".into(), None, None)
+            .await
+            .expect("run turn");
+
+        let prompts = prompt_contents.lock().unwrap();
+        assert_eq!(*prompt_lens.lock().unwrap(), vec![2, 4]);
+        assert!(prompts[0].join("\n").contains("old user"));
+        assert!(prompts[0].join("\n").contains("old assistant"));
+        assert!(!prompts[0].join("\n").contains("new user"));
+        assert!(prompts[1].join("\n").contains("summary from compaction"));
+        assert!(prompts[1].join("\n").contains("new user"));
+        assert!(!prompts[1].join("\n").contains("old user"));
+
+        let live_view =
+            ThreadSession::live_view_from_state(thread_id.clone(), &session.live_state_handle());
+        let contents = live_view
+            .snapshot
+            .conversation
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>();
+        assert!(contents[0].contains("summary from compaction"));
+        assert_eq!(contents[3], "new user");
+        assert_eq!(contents[4], "done");
+        assert!(live_view
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, RuntimeEventKind::CompactionWritten { .. })));
+        assert!(live_view
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, RuntimeEventKind::TokenCount { .. })));
+
+        let rollout_items = read_rollout_items(&config, &thread_id);
+        assert!(rollout_items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::Compacted(compacted)
+                if compacted.message == "summary from compaction")));
+    }
+
+    #[tokio::test]
+    async fn thread_session_pre_turn_compaction_replays_replacement_history() {
+        let dir = tempdir().unwrap();
+        let thread_id = SessionId::new("session_pre_turn_compaction_replay");
+        let turn_id = TurnId::new("turn_1");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            auto_compact_token_limit: Some(1),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        append_rollout_items(
+            &config,
+            &thread_id,
+            &[
+                RolloutItem::ResponseItem(ConversationMessage::user("old user")),
+                RolloutItem::ResponseItem(ConversationMessage::assistant(
+                    Some("old assistant".to_string()),
+                    vec![],
+                )),
+            ],
+        );
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(MockLlm::new(vec![
+                    AssistantTurn {
+                        text: Some("summary from compaction".into()),
+                        tool_calls: vec![],
+                    },
+                    AssistantTurn {
+                        text: Some("done".into()),
+                        tool_calls: vec![],
+                    },
+                ])),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config.clone(),
+            agent_factory,
+        ))
+        .expect("create thread session");
+        session
+            .handle_user_input(turn_id, "new user".into(), None, None)
+            .await
+            .expect("run turn");
+        drop(session);
+
+        let resumed = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config,
+            Arc::new(move |config| {
+                Ok(Agent::new(
+                    config,
+                    Box::new(MockLlm::new(vec![])),
+                    ToolRegistry::new(),
+                ))
+            }),
+        ))
+        .expect("resume thread session");
+        let live_view =
+            ThreadSession::live_view_from_state(thread_id.clone(), &resumed.live_state_handle());
+        let contents = live_view
+            .snapshot
+            .conversation
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(contents[0].contains("summary from compaction"));
+        assert!(contents.contains(&"new user"));
+        assert!(contents.contains(&"done"));
+        assert!(!contents.contains(&"old user"));
+        assert!(!contents.contains(&"old assistant"));
+    }
+
+    #[tokio::test]
+    async fn thread_session_records_token_usage_after_assistant_response() {
+        let dir = tempdir().unwrap();
+        let thread_id = SessionId::new("session_records_token_usage");
+        let turn_id = TurnId::new("turn_1");
+        let usage = TokenUsage {
+            input_tokens: 40,
+            cached_input_tokens: 5,
+            output_tokens: 10,
+            reasoning_output_tokens: 2,
+            total_tokens: 52,
+        };
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            model_context_window: Some(1_000),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        let usage_for_llm = usage.clone();
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(MockLlm::new_completions(vec![LlmCompletion {
+                    turn: AssistantTurn {
+                        text: Some("done".into()),
+                        tool_calls: vec![],
+                    },
+                    token_usage: Some(usage_for_llm.clone()),
+                }])),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config.clone(),
+            agent_factory,
+        ))
+        .expect("create thread session");
+
+        session
+            .handle_user_input(turn_id, "count tokens".into(), None, None)
+            .await
+            .expect("run turn");
+
+        let live_view =
+            ThreadSession::live_view_from_state(thread_id.clone(), &session.live_state_handle());
+        let token_info = live_view.events.iter().find_map(|event| match &event.kind {
+            RuntimeEventKind::TokenCount { info } => info.clone(),
+            _ => None,
+        });
+        let token_info = token_info.expect("token count event");
+        assert_eq!(token_info.last_token_usage, usage);
+        assert_eq!(token_info.total_token_usage, usage);
+        assert_eq!(token_info.model_context_window, Some(1_000));
+
+        let rollout_items = read_rollout_items(&config, &thread_id);
+        assert!(rollout_items.iter().any(|item| matches!(
+            item,
+            RolloutItem::EventMsg(event)
+                if matches!(event.kind, RuntimeEventKind::TokenCount { info: Some(_) })
+        )));
+    }
+
+    #[tokio::test]
+    async fn thread_session_does_not_emit_token_count_without_model_usage() {
+        let dir = tempdir().unwrap();
+        let thread_id = SessionId::new("session_no_bogus_token_usage");
+        let turn_id = TurnId::new("turn_1");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            model_context_window: Some(1_000),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(MockLlm::new(vec![AssistantTurn {
+                    text: Some("done".into()),
+                    tool_calls: vec![],
+                }])),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config,
+            agent_factory,
+        ))
+        .expect("create thread session");
+
+        session
+            .handle_user_input(turn_id, "count tokens".into(), None, None)
+            .await
+            .expect("run turn");
+
+        let live_view =
+            ThreadSession::live_view_from_state(thread_id.clone(), &session.live_state_handle());
+        assert!(!live_view
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, RuntimeEventKind::TokenCount { .. })));
+    }
+
+    #[tokio::test]
+    async fn context_window_error_compacts_and_retries_once() {
+        let dir = tempdir().unwrap();
+        let thread_id = SessionId::new("session_context_window_retry");
+        let turn_id = TurnId::new("turn_1");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            model_context_window: Some(1_000),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        let prompt_contents = Arc::new(Mutex::new(Vec::new()));
+        let prompt_contents_for_llm = prompt_contents.clone();
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(ScriptedLlm {
+                    steps: AsyncMutex::new(
+                        vec![
+                            ScriptedLlmStep::Error("context_length_exceeded: too many tokens"),
+                            ScriptedLlmStep::Completion(assistant_completion(
+                                "summary after context error",
+                            )),
+                            ScriptedLlmStep::Completion(assistant_completion("done after retry")),
+                        ]
+                        .into(),
+                    ),
+                    prompt_contents: prompt_contents_for_llm.clone(),
+                }),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config,
+            agent_factory,
+        ))
+        .expect("create thread session");
+
+        let result = session
+            .handle_user_input(turn_id.clone(), "new user".into(), None, None)
+            .await
+            .expect("retry should recover");
+        let ThreadOpResult::UserInput { final_turn, .. } = result else {
+            panic!("expected user input result");
+        };
+
+        assert_eq!(final_turn.text.as_deref(), Some("done after retry"));
+        let prompts = prompt_contents.lock().unwrap();
+        assert_eq!(prompts.len(), 3);
+        assert!(prompts[0].join("\n").contains("new user"));
+        assert!(prompts[1].join("\n").contains("new user"));
+        assert!(prompts[2]
+            .join("\n")
+            .contains("summary after context error"));
+        assert!(prompts[2].join("\n").contains("new user"));
+        assert!(prompts[2]
+            .iter()
+            .any(|message| message.contains("Runtime context:")));
+        assert!(prompts[2]
+            .iter()
+            .any(|message| message.contains("Environment context:")));
+        let runtime_context_index = prompts[2]
+            .iter()
+            .position(|message| message.contains("Runtime context:"))
+            .expect("runtime context in retry prompt");
+        let user_index = prompts[2]
+            .iter()
+            .position(|message| message == "new user")
+            .expect("current user in retry prompt");
+        assert!(runtime_context_index < user_index);
+
+        let live_view =
+            ThreadSession::live_view_from_state(thread_id.clone(), &session.live_state_handle());
+        assert!(live_view.events.iter().any(|event| matches!(
+            &event.kind,
+            RuntimeEventKind::TokenCount {
+                info: Some(info)
+            } if info.last_token_usage.total_tokens == 1_000
+        )));
+        assert!(live_view
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, RuntimeEventKind::CompactionWritten { .. })));
+    }
+
+    #[tokio::test]
+    async fn context_window_error_retry_does_not_loop() {
+        let dir = tempdir().unwrap();
+        let thread_id = SessionId::new("session_context_window_retry_once");
+        let turn_id = TurnId::new("turn_1");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            model_context_window: Some(1_000),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        let prompt_contents = Arc::new(Mutex::new(Vec::new()));
+        let prompt_contents_for_llm = prompt_contents.clone();
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(ScriptedLlm {
+                    steps: AsyncMutex::new(
+                        vec![
+                            ScriptedLlmStep::Error("context_length_exceeded: too many tokens"),
+                            ScriptedLlmStep::Completion(assistant_completion(
+                                "summary after context error",
+                            )),
+                            ScriptedLlmStep::Error("maximum context length is 1000 tokens"),
+                        ]
+                        .into(),
+                    ),
+                    prompt_contents: prompt_contents_for_llm.clone(),
+                }),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session =
+            ThreadSession::new(ThreadSessionOptions::new(thread_id, config, agent_factory))
+                .expect("create thread session");
+
+        let error = match session
+            .handle_user_input(turn_id, "new user".into(), None, None)
+            .await
+        {
+            Ok(_) => panic!("retry should fail once"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("maximum context length"));
+        assert_eq!(prompt_contents.lock().unwrap().len(), 3);
     }
 }

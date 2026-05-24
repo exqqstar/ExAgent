@@ -138,6 +138,7 @@ fn should_persist_event(event: &RuntimeEvent) -> bool {
             | RuntimeEventKind::RuntimeError { .. }
             | RuntimeEventKind::ApprovalRequested { .. }
             | RuntimeEventKind::ApprovalDecision { .. }
+            | RuntimeEventKind::TokenCount { .. }
     )
 }
 
@@ -277,7 +278,9 @@ mod tests {
     use super::*;
     use crate::events::{RuntimeEvent, RuntimeEventKind};
     use crate::session::{AgentRole, ApprovalId, TurnContextItem};
-    use crate::types::{ConversationMessage, EventId, SessionId, TurnId};
+    use crate::types::{
+        ConversationMessage, EventId, SessionId, TokenUsage, TokenUsageInfo, TurnId,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -371,9 +374,28 @@ mod tests {
             },
             ..turn_started.clone()
         };
+        let token_count = RuntimeEvent {
+            kind: RuntimeEventKind::TokenCount {
+                info: Some(TokenUsageInfo {
+                    total_token_usage: TokenUsage {
+                        total_tokens: 100,
+                        ..TokenUsage::default()
+                    },
+                    last_token_usage: TokenUsage {
+                        total_tokens: 25,
+                        ..TokenUsage::default()
+                    },
+                    model_context_window: Some(1_000),
+                }),
+            },
+            ..turn_started.clone()
+        };
 
         assert!(should_persist_rollout_item(&RolloutItem::EventMsg(
             turn_started
+        )));
+        assert!(should_persist_rollout_item(&RolloutItem::EventMsg(
+            token_count
         )));
         assert!(!should_persist_rollout_item(&RolloutItem::EventMsg(
             exec_output

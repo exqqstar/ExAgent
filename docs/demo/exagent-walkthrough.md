@@ -24,7 +24,14 @@ export OPENAI_BASE_URL="https://api.openai.com/v1"
 export OPENAI_API_KEY="your-api-key"
 export OPENAI_MODEL="gpt-4.1"
 export EXAGENT_POLICY_MODE="off"
+# Optional: enable automatic local compaction.
+export EXAGENT_MODEL_CONTEXT_WINDOW="128000"
+export EXAGENT_AUTO_COMPACT_TOKEN_LIMIT="115200"
 ```
+
+If `EXAGENT_MODEL_CONTEXT_WINDOW` is set without an explicit compact limit,
+ExAgent derives the compact threshold as 90% of that window. If both values are
+set, the explicit limit is clamped to that 90% headroom.
 
 ## 1. Start The Server
 
@@ -145,6 +152,8 @@ assistant output. Watch the `events/subscribe` terminal for:
 
 - `turn_started`
 - one or more `assistant_turn` or `tool_result` events
+- `token_count` when the model response includes token usage metadata
+- `compaction_written` if the runtime compacts prompt history before sampling
 - `turn_completed`, `runtime_error`, or `turn_interrupted`
 
 ## 6. Read The Thread View
@@ -233,6 +242,8 @@ Expected response shape:
 
 `events/replay` supports `after_event_id`, `limit`, and `event_kinds` filters.
 It reads rollout history from disk and remains available after process restart.
+For example, use `"event_kinds": ["token_count"]` to inspect persisted token
+usage events without rendering them into `thread/read` items.
 
 ## Optional: Interrupt A Turn
 
@@ -262,6 +273,12 @@ Each thread persists under:
 `rollout.jsonl` is the durable source of truth for new threads. It stores
 session metadata, prompt-visible conversation items, turn context records,
 compaction checkpoints, and selected runtime events.
+
+Compaction does not rewrite `rollout.jsonl`. It appends a `compacted`
+checkpoint containing `replacement_history`; cold replay uses the latest
+replacement history as the model-visible conversation and leaves older lines in
+place for auditability. `token_count` events are persisted as selected runtime
+events so clients can replay token usage metadata.
 
 Legacy `.exagent/sessions/<thread_id>/snapshot.json` and `events.jsonl` files
 are not runtime inputs. The v2 protocol still returns `snapshot_path` and

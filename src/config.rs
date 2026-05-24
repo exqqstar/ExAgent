@@ -11,6 +11,23 @@ pub struct AgentConfig {
     pub command_timeout_secs: u64,
     pub max_output_bytes: usize,
     pub policy_mode: PolicyMode,
+    pub model_context_window: Option<i64>,
+    pub auto_compact_token_limit: Option<i64>,
+}
+
+impl AgentConfig {
+    pub fn resolved_auto_compact_token_limit(&self) -> Option<i64> {
+        let context_limit = self
+            .model_context_window
+            .map(|context_window| (context_window * 9) / 10);
+
+        match (self.auto_compact_token_limit, context_limit) {
+            (Some(configured), Some(context_limit)) => Some(configured.min(context_limit)),
+            (Some(configured), None) => Some(configured),
+            (None, Some(context_limit)) => Some(context_limit),
+            (None, None) => None,
+        }
+    }
 }
 
 impl Default for AgentConfig {
@@ -27,6 +44,82 @@ impl Default for AgentConfig {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or_default(),
+            model_context_window: parse_optional_i64_env("EXAGENT_MODEL_CONTEXT_WINDOW"),
+            auto_compact_token_limit: parse_optional_i64_env("EXAGENT_AUTO_COMPACT_TOKEN_LIMIT"),
         }
+    }
+}
+
+fn parse_optional_i64_env(key: &str) -> Option<i64> {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| parse_positive_i64(value.trim()))
+}
+
+fn parse_positive_i64(value: &str) -> Option<i64> {
+    let parsed = value.trim().parse::<i64>().ok()?;
+    (parsed > 0).then_some(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_compact_limit_uses_explicit_limit_without_context_window() {
+        let config = AgentConfig {
+            auto_compact_token_limit: Some(32_000),
+            model_context_window: None,
+            ..AgentConfig::default()
+        };
+
+        assert_eq!(config.resolved_auto_compact_token_limit(), Some(32_000));
+    }
+
+    #[test]
+    fn auto_compact_limit_derives_ninety_percent_of_context_window() {
+        let config = AgentConfig {
+            auto_compact_token_limit: None,
+            model_context_window: Some(100_000),
+            ..AgentConfig::default()
+        };
+
+        assert_eq!(config.resolved_auto_compact_token_limit(), Some(90_000));
+    }
+
+    #[test]
+    fn auto_compact_limit_clamps_explicit_limit_to_context_window_headroom() {
+        let config = AgentConfig {
+            auto_compact_token_limit: Some(95_000),
+            model_context_window: Some(100_000),
+            ..AgentConfig::default()
+        };
+
+        assert_eq!(config.resolved_auto_compact_token_limit(), Some(90_000));
+    }
+
+    #[test]
+    fn auto_compact_limit_is_none_without_limit_or_context_window() {
+        let config = AgentConfig {
+            auto_compact_token_limit: None,
+            model_context_window: None,
+            ..AgentConfig::default()
+        };
+
+        assert_eq!(config.resolved_auto_compact_token_limit(), None);
+    }
+
+    #[test]
+    fn token_budget_env_values_accept_positive_integers() {
+        assert_eq!(parse_positive_i64("128000"), Some(128_000));
+        assert_eq!(parse_positive_i64(" 64000 "), Some(64_000));
+    }
+
+    #[test]
+    fn token_budget_env_values_ignore_invalid_or_non_positive_values() {
+        assert_eq!(parse_positive_i64(""), None);
+        assert_eq!(parse_positive_i64("abc"), None);
+        assert_eq!(parse_positive_i64("0"), None);
+        assert_eq!(parse_positive_i64("-1"), None);
     }
 }

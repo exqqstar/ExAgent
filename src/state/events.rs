@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::session::{ApprovalId, ApprovalStatus, CompactionSummary, ExecSessionId};
-use crate::types::{AssistantTurn, EventId, SessionId, ToolResult, TurnId};
+use crate::types::{AssistantTurn, EventId, SessionId, TokenUsageInfo, ToolResult, TurnId};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -49,7 +49,39 @@ pub enum RuntimeEventKind {
     CompactionWritten {
         summary: CompactionSummary,
     },
+    TokenCount {
+        info: Option<TokenUsageInfo>,
+    },
     RuntimeError {
         message: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::TokenUsage;
+
+    #[test]
+    fn token_count_event_serializes_as_snake_case_variant() {
+        let value = serde_json::to_value(RuntimeEventKind::TokenCount {
+            info: Some(TokenUsageInfo {
+                total_token_usage: TokenUsage {
+                    total_tokens: 100,
+                    ..TokenUsage::default()
+                },
+                last_token_usage: TokenUsage {
+                    total_tokens: 25,
+                    ..TokenUsage::default()
+                },
+                model_context_window: Some(1_000),
+            }),
+        })
+        .expect("serialize token count event");
+
+        assert_eq!(value["type"], "token_count");
+        assert_eq!(value["info"]["total_token_usage"]["total_tokens"], 100);
+        assert_eq!(value["info"]["last_token_usage"]["total_tokens"], 25);
+        assert_eq!(value["info"]["model_context_window"], 1_000);
+    }
 }

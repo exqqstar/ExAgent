@@ -2,9 +2,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use exagent::app_server::protocol::{
     BoundaryCapability, BoundaryOp, BoundaryOpResponse, EventsReplayParams, IgnoredOverrideField,
-    InitializeParams, RunParams, ThreadItem, ThreadReadParams, ThreadResumeParams,
-    ThreadStartParams, ThreadStatus, ThreadView, TurnContextOverrides, TurnInterruptParams,
-    TurnStartParams, TurnStatus,
+    InitializeParams, RunParams, RuntimeEventKindFilter, ThreadItem, ThreadReadParams,
+    ThreadResumeParams, ThreadStartParams, ThreadStatus, ThreadView, TurnContextOverrides,
+    TurnInterruptParams, TurnStartParams, TurnStatus,
 };
 use exagent::app_server::{AppServerError, AppServerService};
 use exagent::config::AgentConfig;
@@ -16,8 +16,8 @@ use exagent::session::{AgentRole, ApprovalId, SessionSnapshot};
 use exagent::tools::run_command::RunCommandTool;
 use exagent::tools::Tool;
 use exagent::types::{
-    AssistantTurn, ConversationMessage, EventId, SessionId, ToolCall, ToolResult, ToolStatus,
-    TurnId,
+    AssistantTurn, ConversationMessage, EventId, LlmCompletion, SessionId, TokenUsage,
+    TokenUsageInfo, ToolCall, ToolResult, ToolStatus, TurnId,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -66,13 +66,14 @@ impl LlmClient for BlockingLlm {
         &self,
         _messages: &[ConversationMessage],
         _tools: &[serde_json::Value],
-    ) -> Result<AssistantTurn> {
+    ) -> Result<LlmCompletion> {
         self.started.notify_one();
         self.release.notified().await;
         Ok(AssistantTurn {
             text: Some("released turn".into()),
             tool_calls: vec![],
-        })
+        }
+        .into_completion())
     }
 }
 
@@ -924,6 +925,82 @@ fn events_replay_can_include_latest_snapshot_for_ui_reconstruction() {
     assert_eq!(snapshot.open_exec_session_count, 0);
     assert_eq!(snapshot.conversation_message_count, 0);
     assert_eq!(snapshot.pending_approval_count, 0);
+}
+
+#[tokio::test]
+async fn events_replay_snapshot_includes_latest_compaction_after_auto_compact() {
+    let dir = tempdir().unwrap();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            model_context_window: Some(1_000),
+            auto_compact_token_limit: Some(1),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![
+            AssistantTurn {
+                text: Some("first done".into()),
+                tool_calls: vec![],
+            },
+            AssistantTurn {
+                text: Some("summary after first".into()),
+                tool_calls: vec![],
+            },
+            AssistantTurn {
+                text: Some("second done".into()),
+                tool_calls: vec![],
+            },
+        ])),
+        ToolRegistry::new,
+    );
+
+    let thread = service
+        .thread_start(ThreadStartParams {
+            workspace_root: None,
+            cwd: None,
+        })
+        .unwrap();
+    let first_turn = service
+        .turn_start(TurnStartParams {
+            thread_id: thread.thread.id.clone(),
+            prompt: "first prompt".into(),
+            workspace_root: None,
+            turn_context: None,
+        })
+        .await
+        .unwrap();
+    wait_for_turn_completed(&service, &thread.thread.id, &first_turn.turn.id).await;
+    let second_turn = service
+        .turn_start(TurnStartParams {
+            thread_id: thread.thread.id.clone(),
+            prompt: "second prompt".into(),
+            workspace_root: None,
+            turn_context: None,
+        })
+        .await
+        .unwrap();
+    wait_for_turn_completed(&service, &thread.thread.id, &second_turn.turn.id).await;
+
+    let replay = service
+        .events_replay(EventsReplayParams {
+            thread_id: thread.thread.id,
+            workspace_root: None,
+            after_event_id: None,
+            limit: None,
+            include_snapshot: true,
+            event_kinds: vec![],
+        })
+        .unwrap();
+    let snapshot = replay.snapshot.expect("snapshot should be included");
+
+    assert_eq!(
+        snapshot
+            .latest_compaction
+            .as_ref()
+            .map(|summary| summary.summary.as_str()),
+        Some("summary after first")
+    );
 }
 
 #[tokio::test]
@@ -1847,6 +1924,114 @@ fn cold_thread_read_does_not_restore_historical_approval_as_waiting() {
         Some(&TurnStatus::WaitingApproval),
         "historical approval requests must not be projected as current live waiting state"
     );
+}
+
+#[test]
+fn token_count_events_are_replayable_without_thread_view_items() {
+    let dir = tempdir().unwrap();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![])),
+        ToolRegistry::new,
+    );
+    let thread_id = SessionId::new("thread_token_count_replay");
+    let turn_id = TurnId::new("turn_1");
+    let snapshot = SessionSnapshot::new_thread(
+        thread_id.clone(),
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+    );
+    let token_info = TokenUsageInfo {
+        total_token_usage: TokenUsage {
+            total_tokens: 100,
+            ..TokenUsage::default()
+        },
+        last_token_usage: TokenUsage {
+            total_tokens: 25,
+            ..TokenUsage::default()
+        },
+        model_context_window: Some(1_000),
+    };
+    let rollout_paths = exagent::state::rollout::rollout_paths(dir.path(), &thread_id);
+    let store = exagent::state::rollout::RolloutStore::new(rollout_paths.rollout_path);
+    store
+        .append_items_blocking(&[
+            exagent::state::rollout::RolloutItem::SessionMeta(
+                exagent::state::rollout::SessionMeta {
+                    thread_id: thread_id.clone(),
+                    root_thread_id: thread_id.clone(),
+                    parent_thread_id: None,
+                    spawned_by_turn_id: None,
+                    agent_role: AgentRole::Primary,
+                    workspace_root: snapshot.workspace_root,
+                    initial_cwd: snapshot.cwd,
+                    created_at: "2026-05-20T00:00:00Z".to_string(),
+                },
+            ),
+            exagent::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
+                event_id: EventId::new("evt_1"),
+                session_id: thread_id.clone(),
+                turn_id: Some(turn_id.clone()),
+                kind: RuntimeEventKind::TurnStarted,
+            }),
+            exagent::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
+                event_id: EventId::new("evt_2"),
+                session_id: thread_id.clone(),
+                turn_id: Some(turn_id.clone()),
+                kind: RuntimeEventKind::TokenCount {
+                    info: Some(token_info.clone()),
+                },
+            }),
+            exagent::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
+                event_id: EventId::new("evt_3"),
+                session_id: thread_id.clone(),
+                turn_id: Some(turn_id.clone()),
+                kind: RuntimeEventKind::TurnCompleted,
+            }),
+        ])
+        .expect("write rollout");
+
+    let replay = service
+        .events_replay(EventsReplayParams {
+            thread_id: thread_id.clone(),
+            workspace_root: None,
+            after_event_id: None,
+            limit: None,
+            include_snapshot: false,
+            event_kinds: vec![RuntimeEventKindFilter::TokenCount],
+        })
+        .expect("replay token count events");
+
+    assert_eq!(replay.events.len(), 1);
+    assert_eq!(
+        replay.events[0].kind,
+        RuntimeEventKind::TokenCount {
+            info: Some(token_info)
+        }
+    );
+
+    let read = service
+        .thread_read(ThreadReadParams {
+            thread_id,
+            workspace_root: None,
+        })
+        .expect("read cold thread");
+
+    assert_eq!(
+        read.thread.turns.last().map(|turn| &turn.status),
+        Some(&TurnStatus::Completed)
+    );
+    assert!(read
+        .thread
+        .turns
+        .last()
+        .expect("turn view")
+        .items
+        .is_empty());
 }
 
 #[tokio::test]

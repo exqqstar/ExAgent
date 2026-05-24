@@ -2,13 +2,14 @@ use std::path::{Path, PathBuf};
 
 use crate::config::AgentConfig;
 use crate::session::{SessionSnapshot, TurnContextItem};
-use crate::types::ConversationMessage;
+use crate::types::{ConversationMessage, MessageRole, TokenUsage, TokenUsageInfo};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ContextManager {
     items: Vec<ConversationMessage>,
     history_version: u64,
     reference_turn_context: Option<TurnContextItem>,
+    token_info: Option<TokenUsageInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,8 +62,12 @@ impl ContextManager {
                         );
                     }
                 }
-                crate::state::rollout::RolloutItem::SessionMeta(_)
-                | crate::state::rollout::RolloutItem::EventMsg(_) => {}
+                crate::state::rollout::RolloutItem::EventMsg(event) => {
+                    if let crate::events::RuntimeEventKind::TokenCount { info } = &event.kind {
+                        manager.set_token_info(info.clone());
+                    }
+                }
+                crate::state::rollout::RolloutItem::SessionMeta(_) => {}
             }
         }
         manager
@@ -96,6 +101,7 @@ impl ContextManager {
     ) {
         self.items = items;
         self.reference_turn_context = reference_turn_context;
+        self.token_info = None;
         self.history_version = self.history_version.saturating_add(1);
     }
 
@@ -126,6 +132,70 @@ impl ContextManager {
     pub(crate) fn for_prompt(&self) -> Vec<ConversationMessage> {
         self.items.clone()
     }
+
+    pub(crate) fn token_info(&self) -> Option<TokenUsageInfo> {
+        self.token_info.clone()
+    }
+
+    pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {
+        self.token_info = info;
+    }
+
+    pub(crate) fn update_token_info_from_usage(
+        &mut self,
+        usage: &TokenUsage,
+        model_context_window: Option<i64>,
+    ) {
+        self.token_info =
+            TokenUsageInfo::new_or_append(&self.token_info, Some(usage), model_context_window);
+    }
+
+    pub(crate) fn set_token_usage_full(&mut self, context_window: i64) {
+        self.token_info = Some(TokenUsageInfo::full_context_window(context_window));
+    }
+
+    pub(crate) fn estimate_token_count(&self) -> i64 {
+        self.items
+            .iter()
+            .map(estimate_message_tokens)
+            .fold(0i64, i64::saturating_add)
+    }
+
+    pub(crate) fn active_context_tokens(&self) -> i64 {
+        let Some(info) = &self.token_info else {
+            return self.estimate_token_count();
+        };
+
+        let local_added = self
+            .items_after_last_assistant_message()
+            .iter()
+            .map(estimate_message_tokens)
+            .fold(0i64, i64::saturating_add);
+
+        info.last_token_usage
+            .total_tokens
+            .saturating_add(local_added)
+    }
+
+    fn items_after_last_assistant_message(&self) -> &[ConversationMessage] {
+        let start = self
+            .items
+            .iter()
+            .rposition(|item| item.role == MessageRole::Assistant)
+            .map_or(self.items.len(), |index| index.saturating_add(1));
+        &self.items[start..]
+    }
+}
+
+fn estimate_message_tokens(message: &ConversationMessage) -> i64 {
+    serde_json::to_string(message)
+        .map(|serialized| approx_tokens(&serialized))
+        .unwrap_or_default()
+}
+
+fn approx_tokens(text: &str) -> i64 {
+    let bytes = i64::try_from(text.len()).unwrap_or(i64::MAX);
+    bytes.saturating_add(3) / 4
 }
 
 fn build_initial_context_messages(context: &TurnContextItem) -> Vec<ConversationMessage> {
@@ -263,7 +333,7 @@ fn current_utc_date() -> String {
 mod tests {
     use super::*;
     use crate::policy::PolicyMode;
-    use crate::types::MessageRole;
+    use crate::types::{MessageRole, TokenUsage};
 
     fn test_config(workspace_root: &Path, cwd: &Path) -> AgentConfig {
         AgentConfig {
@@ -395,6 +465,148 @@ mod tests {
         assert!(manager.reference_turn_context().is_some());
         assert_eq!(manager.raw_items().len(), 3);
         assert_eq!(manager.for_prompt()[2].content, "hello");
+    }
+
+    #[test]
+    fn token_estimate_counts_serialized_conversation_messages() {
+        let mut manager = ContextManager::new();
+        let messages = vec![
+            ConversationMessage::user("hello"),
+            ConversationMessage::assistant(Some("hi".to_string()), vec![]),
+        ];
+        let expected = messages
+            .iter()
+            .map(estimate_message_tokens)
+            .fold(0i64, i64::saturating_add);
+
+        manager.record_items(messages);
+
+        assert_eq!(manager.estimate_token_count(), expected);
+        assert!(manager.estimate_token_count() > 0);
+    }
+
+    #[test]
+    fn token_info_updates_from_model_usage() {
+        let mut manager = ContextManager::new();
+        let first = TokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 2,
+            output_tokens: 5,
+            reasoning_output_tokens: 1,
+            total_tokens: 16,
+        };
+        let second = TokenUsage {
+            input_tokens: 20,
+            cached_input_tokens: 3,
+            output_tokens: 8,
+            reasoning_output_tokens: 2,
+            total_tokens: 30,
+        };
+
+        manager.update_token_info_from_usage(&first, Some(100_000));
+        manager.update_token_info_from_usage(&second, None);
+
+        let info = manager.token_info().expect("token info");
+        assert_eq!(info.last_token_usage, second);
+        assert_eq!(info.total_token_usage.total_tokens, 46);
+        assert_eq!(info.model_context_window, Some(100_000));
+    }
+
+    #[test]
+    fn active_context_tokens_adds_local_items_after_last_assistant() {
+        let mut manager = ContextManager::new();
+        manager.record_items([
+            ConversationMessage::user("hello"),
+            ConversationMessage::assistant(Some("hi".to_string()), vec![]),
+        ]);
+        manager.update_token_info_from_usage(
+            &TokenUsage {
+                total_tokens: 100,
+                ..TokenUsage::default()
+            },
+            Some(1_000),
+        );
+        let tool_message = ConversationMessage::tool("call_1", "large output");
+        let tool_tokens = estimate_message_tokens(&tool_message);
+
+        manager.record_items([tool_message]);
+
+        assert_eq!(manager.active_context_tokens(), 100 + tool_tokens);
+    }
+
+    #[test]
+    fn active_context_tokens_falls_back_to_local_estimate_without_api_usage() {
+        let mut manager = ContextManager::new();
+        manager.record_items([
+            ConversationMessage::user("hello"),
+            ConversationMessage::assistant(Some("hi".to_string()), vec![]),
+        ]);
+
+        assert_eq!(
+            manager.active_context_tokens(),
+            manager.estimate_token_count()
+        );
+    }
+
+    #[test]
+    fn token_usage_can_be_marked_full_context_window() {
+        let mut manager = ContextManager::new();
+
+        manager.set_token_usage_full(128_000);
+
+        let info = manager.token_info().expect("token info");
+        assert_eq!(info.total_token_usage.total_tokens, 128_000);
+        assert_eq!(info.last_token_usage.total_tokens, 128_000);
+        assert_eq!(info.model_context_window, Some(128_000));
+    }
+
+    #[test]
+    fn replacing_history_clears_stale_token_info() {
+        let mut manager = ContextManager::new();
+        manager.update_token_info_from_usage(
+            &TokenUsage {
+                total_tokens: 100,
+                ..TokenUsage::default()
+            },
+            Some(1_000),
+        );
+
+        manager.replace_history(vec![ConversationMessage::user("summary")], None);
+
+        assert_eq!(manager.token_info(), None);
+        assert_eq!(
+            manager.active_context_tokens(),
+            manager.estimate_token_count()
+        );
+    }
+
+    #[test]
+    fn from_rollout_items_restores_latest_token_count_info() {
+        let info = TokenUsageInfo {
+            total_token_usage: TokenUsage {
+                total_tokens: 120,
+                ..TokenUsage::default()
+            },
+            last_token_usage: TokenUsage {
+                total_tokens: 80,
+                ..TokenUsage::default()
+            },
+            model_context_window: Some(1_000),
+        };
+
+        let manager = ContextManager::from_rollout_items(&[
+            crate::state::rollout::RolloutItem::ResponseItem(ConversationMessage::user("hello")),
+            crate::state::rollout::RolloutItem::EventMsg(crate::events::RuntimeEvent {
+                event_id: crate::types::EventId::new("evt_1"),
+                session_id: crate::types::SessionId::new("thread_1"),
+                turn_id: Some(crate::types::TurnId::new("turn_1")),
+                kind: crate::events::RuntimeEventKind::TokenCount {
+                    info: Some(info.clone()),
+                },
+            }),
+        ]);
+
+        assert_eq!(manager.token_info(), Some(info));
     }
 
     #[test]

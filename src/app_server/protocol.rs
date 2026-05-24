@@ -247,6 +247,7 @@ pub enum RuntimeEventKindFilter {
     ApprovalRequested,
     ApprovalDecision,
     CompactionWritten,
+    TokenCount,
     RuntimeError,
 }
 

@@ -76,12 +76,20 @@ pub struct OpenAiCompatibleLlm {
 
 impl OpenAiCompatibleLlm {
     pub fn from_env() -> Result<Self> {
+        let model = std::env::var("OPENAI_MODEL")
+            .context("OPENAI_MODEL is required for the OpenAI-compatible adapter")?;
+        Self::from_env_with_model(model)
+    }
+
+    pub fn from_env_with_model(model: impl Into<String>) -> Result<Self> {
         let base_url = std::env::var("OPENAI_BASE_URL")
             .context("OPENAI_BASE_URL is required for the OpenAI-compatible adapter")?;
         let api_key = std::env::var("OPENAI_API_KEY")
             .context("OPENAI_API_KEY is required for the OpenAI-compatible adapter")?;
-        let model = std::env::var("OPENAI_MODEL")
-            .context("OPENAI_MODEL is required for the OpenAI-compatible adapter")?;
+        let model = model.into();
+        if model.trim().is_empty() {
+            bail!("model is required for the OpenAI-compatible adapter");
+        }
 
         Ok(Self {
             client: reqwest::Client::new(),

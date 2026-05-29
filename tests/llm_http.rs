@@ -15,6 +15,18 @@ fn openai_client_requires_model_configuration() {
 }
 
 #[test]
+fn openai_client_accepts_explicit_model_without_openai_model_env() {
+    let _guard = EnvGuard::set([
+        ("OPENAI_BASE_URL", Some("https://api.openai.com/v1")),
+        ("OPENAI_API_KEY", Some("test-key")),
+        ("OPENAI_MODEL", None),
+    ]);
+
+    let build = OpenAiCompatibleLlm::from_env_with_model("configured-model");
+    assert!(build.is_ok());
+}
+
+#[test]
 fn openai_response_parses_assistant_text_and_tool_calls() {
     let completion = OpenAiCompatibleLlm::parse_response(json!({
         "choices": [{

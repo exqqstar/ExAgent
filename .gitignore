@@ -5,3 +5,6 @@
 /.worktrees
 /external-references
 docs/.private-archive/
+/.env
+/.env.local
+/.env.deepseek.local

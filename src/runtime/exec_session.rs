@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 
 use crate::events::ExecOutputStream;
 use crate::session::{ExecSessionId, ExecSessionStatus};
-use crate::types::SessionId;
+use crate::types::ThreadId;
 
 static EXEC_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -30,7 +30,7 @@ pub struct ExecSessionSnapshot {
 }
 
 struct ActiveExecSession {
-    session_id: SessionId,
+    thread_id: ThreadId,
     exec_session_id: ExecSessionId,
     command: String,
     cwd: PathBuf,
@@ -51,7 +51,7 @@ impl ExecSessionManager {
     pub async fn start(
         &self,
         _workspace_root: &Path,
-        session_id: &SessionId,
+        thread_id: &ThreadId,
         command: &str,
         cwd: PathBuf,
     ) -> Result<ExecSessionSnapshot, String> {
@@ -80,7 +80,7 @@ impl ExecSessionManager {
             .ok_or_else(|| "failed to capture stderr".to_string())?;
 
         let handle = Arc::new(ActiveExecSession {
-            session_id: session_id.clone(),
+            thread_id: thread_id.clone(),
             exec_session_id: new_exec_session_id(),
             command: command.to_string(),
             cwd: cwd.clone(),
@@ -101,11 +101,11 @@ impl ExecSessionManager {
 
     pub async fn write_stdin(
         &self,
-        session_id: &SessionId,
+        thread_id: &ThreadId,
         exec_session_id: &ExecSessionId,
         input: &str,
     ) -> Result<ExecSessionSnapshot, String> {
-        let handle = self.get_handle(session_id, exec_session_id).await?;
+        let handle = self.get_handle(thread_id, exec_session_id).await?;
         self.refresh_status(&handle).await?;
 
         {
@@ -132,19 +132,19 @@ impl ExecSessionManager {
 
     pub async fn poll(
         &self,
-        session_id: &SessionId,
+        thread_id: &ThreadId,
         exec_session_id: &ExecSessionId,
     ) -> Result<ExecSessionSnapshot, String> {
-        let handle = self.get_handle(session_id, exec_session_id).await?;
+        let handle = self.get_handle(thread_id, exec_session_id).await?;
         self.snapshot(handle).await
     }
 
     pub async fn terminate(
         &self,
-        session_id: &SessionId,
+        thread_id: &ThreadId,
         exec_session_id: &ExecSessionId,
     ) -> Result<ExecSessionSnapshot, String> {
-        let handle = self.get_handle(session_id, exec_session_id).await?;
+        let handle = self.get_handle(thread_id, exec_session_id).await?;
         {
             let mut child = handle.child.lock().await;
             if child.try_wait().map_err(|err| err.to_string())?.is_none() {
@@ -169,19 +169,19 @@ impl ExecSessionManager {
     async fn insert_handle(&self, handle: Arc<ActiveExecSession>) {
         let mut sessions = self.sessions.lock().await;
         sessions
-            .entry(handle.session_id.as_str().to_string())
+            .entry(handle.thread_id.as_str().to_string())
             .or_default()
             .insert(handle.exec_session_id.as_str().to_string(), handle);
     }
 
     async fn get_handle(
         &self,
-        session_id: &SessionId,
+        thread_id: &ThreadId,
         exec_session_id: &ExecSessionId,
     ) -> Result<Arc<ActiveExecSession>, String> {
         let sessions = self.sessions.lock().await;
         sessions
-            .get(session_id.as_str())
+            .get(thread_id.as_str())
             .and_then(|entries| entries.get(exec_session_id.as_str()))
             .cloned()
             .ok_or_else(|| format!("unknown exec session: {}", exec_session_id.as_str()))

@@ -121,16 +121,16 @@ async fn start_persistent_command(
         .as_deref()
         .ok_or_else(|| "command is required".to_string())?;
     let cwd = resolve_cwd(args, ctx)?;
-    let session_id = ctx
-        .session_id
+    let thread_id = ctx
+        .thread_id
         .as_ref()
-        .ok_or_else(|| "persistent exec sessions require a runtime session_id".to_string())?;
+        .ok_or_else(|| "persistent exec sessions require a runtime thread_id".to_string())?;
     if let Some(outcome) = maybe_require_approval(ctx, command, &cwd, None, true).await? {
         return Ok(outcome);
     }
     let snapshot = ctx
         .exec_sessions
-        .start(&ctx.config.workspace_root, session_id, command, cwd)
+        .start(&ctx.config.workspace_root, thread_id, command, cwd)
         .await?;
 
     Ok(persistent_outcome(snapshot))
@@ -154,7 +154,7 @@ async fn handle_approval_decision(
                     .exec_sessions
                     .start(
                         &ctx.config.workspace_root,
-                        &pending.session_id,
+                        &pending.thread_id,
                         &pending.command,
                         pending.cwd.clone(),
                     )
@@ -207,21 +207,21 @@ async fn run_persistent_command(
     ctx: &ToolContext,
     exec_session_id: ExecSessionId,
 ) -> Result<CommandOutcome, String> {
-    let session_id = ctx
-        .session_id
+    let thread_id = ctx
+        .thread_id
         .as_ref()
-        .ok_or_else(|| "persistent exec sessions require a runtime session_id".to_string())?;
+        .ok_or_else(|| "persistent exec sessions require a runtime thread_id".to_string())?;
 
     let snapshot = if args.terminate.unwrap_or(false) {
         ctx.exec_sessions
-            .terminate(session_id, &exec_session_id)
+            .terminate(thread_id, &exec_session_id)
             .await?
     } else if let Some(stdin) = &args.stdin {
         ctx.exec_sessions
-            .write_stdin(session_id, &exec_session_id, stdin)
+            .write_stdin(thread_id, &exec_session_id, stdin)
             .await?
     } else {
-        ctx.exec_sessions.poll(session_id, &exec_session_id).await?
+        ctx.exec_sessions.poll(thread_id, &exec_session_id).await?
     };
 
     Ok(persistent_outcome(snapshot))
@@ -275,15 +275,15 @@ async fn maybe_require_approval(
             }),
         })),
         PolicyDecision::ReviewRequired => {
-            let session_id = ctx
-                .session_id
+            let thread_id = ctx
+                .thread_id
                 .clone()
-                .ok_or_else(|| "approval flow requires a runtime session_id".to_string())?;
+                .ok_or_else(|| "approval flow requires a runtime thread_id".to_string())?;
             let reason = reason.unwrap_or_else(|| "approval required".to_string());
             let approval = ctx
                 .policy
                 .create_command_approval(
-                    session_id.clone(),
+                    thread_id.clone(),
                     "run_command",
                     command,
                     cwd.clone(),

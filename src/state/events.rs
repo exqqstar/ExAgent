@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::session::{ApprovalId, ApprovalStatus, CompactionSummary, ExecSessionId};
-use crate::types::{AssistantTurn, EventId, SessionId, TokenUsageInfo, ToolResult, TurnId};
+use crate::types::{AssistantTurn, EventId, ThreadId, TokenUsageInfo, ToolResult, TurnId};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -13,7 +13,7 @@ pub enum ExecOutputStream {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeEvent {
     pub event_id: EventId,
-    pub session_id: SessionId,
+    pub thread_id: ThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<TurnId>,
     pub kind: RuntimeEventKind,

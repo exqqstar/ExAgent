@@ -12,11 +12,11 @@ use exagent::events::{RuntimeEvent, RuntimeEventKind};
 use exagent::llm::{LlmClient, MockLlm};
 use exagent::policy::PolicyMode;
 use exagent::registry::{ToolContext, ToolRegistry};
-use exagent::session::{AgentRole, ApprovalId, SessionSnapshot};
+use exagent::session::{ApprovalId, ThreadSnapshot};
 use exagent::tools::run_command::RunCommandTool;
 use exagent::tools::Tool;
 use exagent::types::{
-    AssistantTurn, ConversationMessage, EventId, LlmCompletion, SessionId, TokenUsage,
+    AssistantTurn, ConversationMessage, EventId, LlmCompletion, ThreadId, TokenUsage,
     TokenUsageInfo, ToolCall, ToolResult, ToolStatus, TurnId,
 };
 use std::path::PathBuf;
@@ -77,7 +77,7 @@ impl LlmClient for BlockingLlm {
     }
 }
 
-fn events_replay_params(thread_id: SessionId) -> EventsReplayParams {
+fn events_replay_params(thread_id: ThreadId) -> EventsReplayParams {
     EventsReplayParams {
         thread_id,
         workspace_root: None,
@@ -94,12 +94,9 @@ fn run_command_registry() -> ToolRegistry {
     registry
 }
 
-fn read_thread_snapshot(thread: &ThreadView) -> SessionSnapshot {
-    if thread.snapshot_path.exists() {
-        return exagent::transcript::read_json(thread.snapshot_path.as_ref()).unwrap();
-    }
-
-    let workspace_root = workspace_root_from_legacy_snapshot_path(&thread.snapshot_path);
+fn read_thread_snapshot(workspace_root: &std::path::Path, thread: &ThreadView) -> ThreadSnapshot {
+    let workspace_root = std::fs::canonicalize(workspace_root)
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
     let rollout_paths = exagent::state::rollout::rollout_paths(&workspace_root, &thread.id);
     let items =
         exagent::state::rollout::RolloutStore::read_items_blocking(&rollout_paths.rollout_path)
@@ -107,8 +104,9 @@ fn read_thread_snapshot(thread: &ThreadView) -> SessionSnapshot {
     exagent::state::rollout::snapshot_from_rollout_items(&thread.id, &items).unwrap()
 }
 
-fn assert_rollout_jsonl_is_valid(thread: &ThreadView) {
-    let workspace_root = workspace_root_from_legacy_snapshot_path(&thread.snapshot_path);
+fn assert_rollout_jsonl_is_valid(workspace_root: &std::path::Path, thread: &ThreadView) {
+    let workspace_root = std::fs::canonicalize(workspace_root)
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
     let rollout_paths = exagent::state::rollout::rollout_paths(&workspace_root, &thread.id);
     let contents = std::fs::read_to_string(rollout_paths.rollout_path).unwrap();
     for line in contents.lines() {
@@ -116,19 +114,9 @@ fn assert_rollout_jsonl_is_valid(thread: &ThreadView) {
     }
 }
 
-fn workspace_root_from_legacy_snapshot_path(snapshot_path: &std::path::Path) -> PathBuf {
-    snapshot_path
-        .parent()
-        .and_then(|session_dir| session_dir.parent())
-        .and_then(|sessions_dir| sessions_dir.parent())
-        .and_then(|exagent_dir| exagent_dir.parent())
-        .expect("legacy snapshot path should be under <workspace>/.exagent/sessions/<thread>")
-        .to_path_buf()
-}
-
 async fn wait_for_turn_event(
     service: &AppServerService,
-    thread_id: &SessionId,
+    thread_id: &ThreadId,
     turn_id: &TurnId,
     predicate: impl Fn(&RuntimeEventKind) -> bool,
 ) {
@@ -152,7 +140,7 @@ async fn wait_for_turn_event(
 
 async fn wait_for_turn_completed(
     service: &AppServerService,
-    thread_id: &SessionId,
+    thread_id: &ThreadId,
     turn_id: &TurnId,
 ) {
     wait_for_turn_event(service, thread_id, turn_id, |kind| {
@@ -163,7 +151,7 @@ async fn wait_for_turn_completed(
 
 async fn wait_for_runtime_error(
     service: &AppServerService,
-    thread_id: &SessionId,
+    thread_id: &ThreadId,
     turn_id: &TurnId,
 ) {
     wait_for_turn_event(service, thread_id, turn_id, |kind| {
@@ -174,7 +162,7 @@ async fn wait_for_runtime_error(
 
 async fn wait_for_thread_event(
     service: &AppServerService,
-    thread_id: &SessionId,
+    thread_id: &ThreadId,
     predicate: impl Fn(&RuntimeEventKind) -> bool,
 ) {
     for _ in 0..200 {
@@ -246,7 +234,7 @@ fn boundary_capabilities_match_boundary_op_type_names() {
         (
             BoundaryCapability::ThreadResume,
             serde_json::to_value(BoundaryOp::ThreadResume(ThreadResumeParams {
-                thread_id: SessionId::new("session_123"),
+                thread_id: ThreadId::new("session_123"),
                 workspace_root: None,
                 cwd: None,
             }))
@@ -255,7 +243,7 @@ fn boundary_capabilities_match_boundary_op_type_names() {
         (
             BoundaryCapability::ThreadRead,
             serde_json::to_value(BoundaryOp::ThreadRead(ThreadReadParams {
-                thread_id: SessionId::new("session_123"),
+                thread_id: ThreadId::new("session_123"),
                 workspace_root: None,
             }))
             .unwrap(),
@@ -263,7 +251,7 @@ fn boundary_capabilities_match_boundary_op_type_names() {
         (
             BoundaryCapability::TurnStart,
             serde_json::to_value(BoundaryOp::TurnStart(TurnStartParams {
-                thread_id: SessionId::new("session_123"),
+                thread_id: ThreadId::new("session_123"),
                 prompt: "continue".into(),
                 workspace_root: None,
                 turn_context: None,
@@ -273,7 +261,7 @@ fn boundary_capabilities_match_boundary_op_type_names() {
         (
             BoundaryCapability::TurnInterrupt,
             serde_json::to_value(BoundaryOp::TurnInterrupt(TurnInterruptParams {
-                thread_id: SessionId::new("session_123"),
+                thread_id: ThreadId::new("session_123"),
                 turn_id: None,
                 workspace_root: None,
             }))
@@ -282,7 +270,7 @@ fn boundary_capabilities_match_boundary_op_type_names() {
         (
             BoundaryCapability::EventsReplay,
             serde_json::to_value(BoundaryOp::EventsReplay(events_replay_params(
-                SessionId::new("session_123"),
+                ThreadId::new("session_123"),
             )))
             .unwrap(),
         ),
@@ -316,10 +304,8 @@ fn thread_start_applies_workspace_and_cwd_overrides() {
         })
         .unwrap();
 
-    let snapshot = read_thread_snapshot(&response.thread);
-    assert_eq!(snapshot.session_id, response.thread.id);
-    assert_eq!(snapshot.parent_session_id, None);
-    assert_eq!(snapshot.root_session_id, response.thread.id);
+    let snapshot = read_thread_snapshot(dir.path(), &response.thread);
+    assert_eq!(snapshot.thread_id, response.thread.id);
     assert_eq!(
         snapshot.workspace_root,
         std::fs::canonicalize(dir.path()).unwrap()
@@ -649,7 +635,7 @@ fn events_subscribe_rejects_missing_thread() {
 
     let err = service
         .events_subscribe(exagent::app_server::protocol::EventsSubscribeParams {
-            thread_id: SessionId::new("missing-thread"),
+            thread_id: ThreadId::new("missing-thread"),
             workspace_root: None,
             after_event_id: None,
         })
@@ -696,7 +682,7 @@ async fn turn_start_applies_validated_context_override_with_user_input() {
         .unwrap();
     wait_for_turn_completed(&service, &thread.thread.id, &turn.turn.id).await;
 
-    let snapshot = read_thread_snapshot(&thread.thread);
+    let snapshot = read_thread_snapshot(dir.path(), &thread.thread);
     assert_eq!(snapshot.cwd, std::fs::canonicalize(original_cwd).unwrap());
     assert!(snapshot
         .conversation
@@ -765,7 +751,7 @@ async fn turn_context_cwd_is_used_for_tools_without_becoming_thread_cwd() {
         *observed_cwd.lock().unwrap(),
         Some(std::fs::canonicalize(turn_cwd).unwrap())
     );
-    let snapshot = read_thread_snapshot(&thread.thread);
+    let snapshot = read_thread_snapshot(dir.path(), &thread.thread);
     assert_eq!(snapshot.cwd, std::fs::canonicalize(original_cwd).unwrap());
 }
 
@@ -807,7 +793,7 @@ async fn turn_start_rejects_invalid_context_override_before_accepting_input() {
         .to_string()
         .contains("cwd must stay within workspace_root"));
 
-    let snapshot = read_thread_snapshot(&thread.thread);
+    let snapshot = read_thread_snapshot(dir.path(), &thread.thread);
     assert!(snapshot.conversation.is_empty());
     let replay = service
         .events_replay(events_replay_params(thread.thread.id))
@@ -836,13 +822,13 @@ async fn legacy_run_compatibility_uses_thread_and_turn_lifecycle() {
             prompt: "run through compatibility wrapper".into(),
             workspace_root: None,
             cwd: None,
-            session_id: None,
+            thread_id: None,
         })
         .await
         .unwrap();
 
     let replay = service
-        .events_replay(events_replay_params(output.session_id))
+        .events_replay(events_replay_params(output.thread_id))
         .unwrap();
 
     assert_eq!(replay.events.len(), 3);
@@ -880,7 +866,7 @@ fn events_replay_returns_empty_list_for_new_thread() {
         })
         .unwrap();
     let replay = service
-        .events_replay(events_replay_params(SessionId::new(
+        .events_replay(events_replay_params(ThreadId::new(
             thread.thread.id.as_str(),
         )))
         .unwrap();
@@ -1127,8 +1113,6 @@ fn thread_read_reports_new_thread_as_idle_without_latest_turn() {
     assert_eq!(read.thread.status, ThreadStatus::Idle);
     assert_eq!(read.thread.active_turn, None);
     assert_eq!(read.thread.turns.last(), None);
-    assert_eq!(read.thread.snapshot_path, thread.thread.snapshot_path);
-    assert_eq!(read.thread.events_path, thread.thread.events_path);
 }
 
 #[test]
@@ -1150,16 +1134,17 @@ fn thread_read_prefers_loaded_runtime_view_over_disk_events() {
             cwd: None,
         })
         .unwrap();
+    let rollout_paths = exagent::state::rollout::rollout_paths(dir.path(), &thread.thread.id);
     exagent::transcript::append_json_line(
-        &thread.thread.events_path,
-        &RuntimeEvent {
+        &rollout_paths.rollout_path,
+        &exagent::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
             event_id: EventId::new("evt_disk_only"),
-            session_id: thread.thread.id.clone(),
+            thread_id: thread.thread.id.clone(),
             turn_id: Some(TurnId::new("turn_disk_only")),
             kind: RuntimeEventKind::RuntimeError {
                 message: "disk-only event after runtime load".into(),
             },
-        },
+        }),
     )
     .unwrap();
 
@@ -1210,7 +1195,7 @@ fn thread_resume_reads_persisted_thread_context_and_reports_ignored_cwd_override
     assert_eq!(resumed.thread.status, ThreadStatus::Idle);
     assert_eq!(resumed.ignored_overrides, vec![IgnoredOverrideField::Cwd]);
 
-    let snapshot = read_thread_snapshot(&thread.thread);
+    let snapshot = read_thread_snapshot(dir.path(), &thread.thread);
     assert_eq!(snapshot.cwd, std::fs::canonicalize(original_cwd).unwrap());
     assert_ne!(snapshot.cwd, ignored_cwd);
 }
@@ -1246,13 +1231,13 @@ async fn legacy_run_resume_ignores_cwd_override_and_keeps_thread_snapshot_cwd() 
             prompt: "resume through legacy run".into(),
             workspace_root: None,
             cwd: Some("ignored-cwd".into()),
-            session_id: Some(thread.thread.id.clone()),
+            thread_id: Some(thread.thread.id.clone()),
         })
         .await
         .unwrap();
 
     assert_eq!(output.text.as_deref(), Some("legacy resume complete"));
-    let snapshot = read_thread_snapshot(&thread.thread);
+    let snapshot = read_thread_snapshot(dir.path(), &thread.thread);
     assert_eq!(snapshot.cwd, std::fs::canonicalize(original_cwd).unwrap());
     assert_ne!(snapshot.cwd, std::fs::canonicalize(ignored_cwd).unwrap());
 }
@@ -1315,9 +1300,7 @@ async fn submit_boundary_op_dispatches_thread_start() {
     let BoundaryOpResponse::ThreadStarted(started) = response else {
         panic!("expected thread start response");
     };
-    assert!(!started.thread.snapshot_path.exists());
-    assert_rollout_jsonl_is_valid(&started.thread);
-    assert!(started.thread.events_path.ends_with("events.jsonl"));
+    assert_rollout_jsonl_is_valid(dir.path(), &started.thread);
 }
 
 #[test]
@@ -1350,7 +1333,7 @@ fn events_replay_rejects_missing_thread() {
     );
 
     let err = service
-        .events_replay(events_replay_params(SessionId::new("missing-thread")))
+        .events_replay(events_replay_params(ThreadId::new("missing-thread")))
         .unwrap_err();
 
     assert!(err.to_string().contains("thread not found: missing-thread"));
@@ -1686,7 +1669,7 @@ async fn rejected_concurrent_turn_context_does_not_mutate_thread_snapshot() {
         Some(AppServerError::ThreadBusy(thread_id)) if thread_id == &thread.thread.id
     ));
 
-    let snapshot = read_thread_snapshot(&thread.thread);
+    let snapshot = read_thread_snapshot(dir.path(), &thread.thread);
     assert_eq!(snapshot.cwd, std::fs::canonicalize(original_cwd).unwrap());
     assert_ne!(snapshot.cwd, std::fs::canonicalize(rejected_cwd).unwrap());
 
@@ -1764,7 +1747,7 @@ async fn turn_interrupt_aborts_active_turn_and_records_interrupted_event() {
         replay_after_response.events.last().map(|event| &event.kind),
         Some(RuntimeEventKind::TurnInterrupted)
     ));
-    assert_rollout_jsonl_is_valid(&thread.thread);
+    assert_rollout_jsonl_is_valid(dir.path(), &thread.thread);
 
     let read = service
         .thread_read(ThreadReadParams {
@@ -1805,8 +1788,8 @@ async fn turn_interrupt_aborts_pre_turn_auto_compaction() {
         }),
         ToolRegistry::new,
     ));
-    let thread_id = SessionId::new("thread_interrupt_pre_turn_compaction");
-    let snapshot = SessionSnapshot::new_thread(
+    let thread_id = ThreadId::new("thread_interrupt_pre_turn_compaction");
+    let snapshot = ThreadSnapshot::new_thread(
         thread_id.clone(),
         dir.path().to_path_buf(),
         dir.path().to_path_buf(),
@@ -1814,13 +1797,9 @@ async fn turn_interrupt_aborts_pre_turn_auto_compaction() {
     let rollout_paths = exagent::state::rollout::rollout_paths(dir.path(), &thread_id);
     exagent::state::rollout::RolloutStore::new(rollout_paths.rollout_path)
         .append_items_blocking(&[
-            exagent::state::rollout::RolloutItem::SessionMeta(
-                exagent::state::rollout::SessionMeta {
+            exagent::state::rollout::RolloutItem::ThreadMeta(
+                exagent::state::rollout::ThreadMeta {
                     thread_id: thread_id.clone(),
-                    root_thread_id: thread_id.clone(),
-                    parent_thread_id: None,
-                    spawned_by_turn_id: None,
-                    agent_role: AgentRole::Primary,
                     workspace_root: snapshot.workspace_root,
                     initial_cwd: snapshot.cwd,
                     created_at: "2026-05-20T00:00:00Z".to_string(),
@@ -1960,9 +1939,9 @@ fn cold_thread_read_does_not_restore_historical_approval_as_waiting() {
         Box::new(MockLlm::new(vec![])),
         ToolRegistry::new,
     );
-    let thread_id = SessionId::new("thread_cold_historical_approval");
+    let thread_id = ThreadId::new("thread_cold_historical_approval");
     let turn_id = TurnId::new("turn_1");
-    let snapshot = SessionSnapshot::new_thread(
+    let snapshot = ThreadSnapshot::new_thread(
         thread_id.clone(),
         dir.path().to_path_buf(),
         dir.path().to_path_buf(),
@@ -1971,13 +1950,9 @@ fn cold_thread_read_does_not_restore_historical_approval_as_waiting() {
     let store = exagent::state::rollout::RolloutStore::new(rollout_paths.rollout_path);
     store
         .append_items_blocking(&[
-            exagent::state::rollout::RolloutItem::SessionMeta(
-                exagent::state::rollout::SessionMeta {
+            exagent::state::rollout::RolloutItem::ThreadMeta(
+                exagent::state::rollout::ThreadMeta {
                     thread_id: thread_id.clone(),
-                    root_thread_id: thread_id.clone(),
-                    parent_thread_id: None,
-                    spawned_by_turn_id: None,
-                    agent_role: AgentRole::Primary,
                     workspace_root: snapshot.workspace_root.clone(),
                     initial_cwd: snapshot.cwd.clone(),
                     created_at: "2026-05-20T00:00:00Z".to_string(),
@@ -1985,13 +1960,13 @@ fn cold_thread_read_does_not_restore_historical_approval_as_waiting() {
             ),
             exagent::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
                 event_id: EventId::new("evt_1"),
-                session_id: thread_id.clone(),
+                thread_id: thread_id.clone(),
                 turn_id: Some(turn_id.clone()),
                 kind: RuntimeEventKind::TurnStarted,
             }),
             exagent::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
                 event_id: EventId::new("evt_2"),
-                session_id: thread_id.clone(),
+                thread_id: thread_id.clone(),
                 turn_id: Some(turn_id.clone()),
                 kind: RuntimeEventKind::ApprovalRequested {
                     approval_id: ApprovalId::new("approval_1"),
@@ -2030,9 +2005,9 @@ fn token_count_events_are_replayable_without_thread_view_items() {
         Box::new(MockLlm::new(vec![])),
         ToolRegistry::new,
     );
-    let thread_id = SessionId::new("thread_token_count_replay");
+    let thread_id = ThreadId::new("thread_token_count_replay");
     let turn_id = TurnId::new("turn_1");
-    let snapshot = SessionSnapshot::new_thread(
+    let snapshot = ThreadSnapshot::new_thread(
         thread_id.clone(),
         dir.path().to_path_buf(),
         dir.path().to_path_buf(),
@@ -2052,13 +2027,9 @@ fn token_count_events_are_replayable_without_thread_view_items() {
     let store = exagent::state::rollout::RolloutStore::new(rollout_paths.rollout_path);
     store
         .append_items_blocking(&[
-            exagent::state::rollout::RolloutItem::SessionMeta(
-                exagent::state::rollout::SessionMeta {
+            exagent::state::rollout::RolloutItem::ThreadMeta(
+                exagent::state::rollout::ThreadMeta {
                     thread_id: thread_id.clone(),
-                    root_thread_id: thread_id.clone(),
-                    parent_thread_id: None,
-                    spawned_by_turn_id: None,
-                    agent_role: AgentRole::Primary,
                     workspace_root: snapshot.workspace_root,
                     initial_cwd: snapshot.cwd,
                     created_at: "2026-05-20T00:00:00Z".to_string(),
@@ -2066,13 +2037,13 @@ fn token_count_events_are_replayable_without_thread_view_items() {
             ),
             exagent::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
                 event_id: EventId::new("evt_1"),
-                session_id: thread_id.clone(),
+                thread_id: thread_id.clone(),
                 turn_id: Some(turn_id.clone()),
                 kind: RuntimeEventKind::TurnStarted,
             }),
             exagent::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
                 event_id: EventId::new("evt_2"),
-                session_id: thread_id.clone(),
+                thread_id: thread_id.clone(),
                 turn_id: Some(turn_id.clone()),
                 kind: RuntimeEventKind::TokenCount {
                     info: Some(token_info.clone()),
@@ -2080,7 +2051,7 @@ fn token_count_events_are_replayable_without_thread_view_items() {
             }),
             exagent::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
                 event_id: EventId::new("evt_3"),
-                session_id: thread_id.clone(),
+                thread_id: thread_id.clone(),
                 turn_id: Some(turn_id.clone()),
                 kind: RuntimeEventKind::TurnCompleted,
             }),
@@ -2138,8 +2109,8 @@ async fn cold_rollout_thread_interrupt_rejects_instead_of_not_found() {
         Box::new(MockLlm::new(vec![])),
         ToolRegistry::new,
     );
-    let thread_id = SessionId::new("thread_cold_interrupt_rollout_only");
-    let snapshot = SessionSnapshot::new_thread(
+    let thread_id = ThreadId::new("thread_cold_interrupt_rollout_only");
+    let snapshot = ThreadSnapshot::new_thread(
         thread_id.clone(),
         dir.path().to_path_buf(),
         dir.path().to_path_buf(),
@@ -2147,13 +2118,9 @@ async fn cold_rollout_thread_interrupt_rejects_instead_of_not_found() {
     let rollout_paths = exagent::state::rollout::rollout_paths(dir.path(), &thread_id);
     let store = exagent::state::rollout::RolloutStore::new(rollout_paths.rollout_path);
     store
-        .append_items_blocking(&[exagent::state::rollout::RolloutItem::SessionMeta(
-            exagent::state::rollout::SessionMeta {
+        .append_items_blocking(&[exagent::state::rollout::RolloutItem::ThreadMeta(
+            exagent::state::rollout::ThreadMeta {
                 thread_id: thread_id.clone(),
-                root_thread_id: thread_id.clone(),
-                parent_thread_id: None,
-                spawned_by_turn_id: None,
-                agent_role: AgentRole::Primary,
                 workspace_root: snapshot.workspace_root,
                 initial_cwd: snapshot.cwd,
                 created_at: "2026-05-20T00:00:00Z".to_string(),
@@ -2261,7 +2228,7 @@ async fn turn_interrupt_clears_waiting_approval_and_records_interrupted_event() 
         Some(&latest_turn_id)
     );
 
-    let snapshot = read_thread_snapshot(&thread.thread);
+    let snapshot = read_thread_snapshot(dir.path(), &thread.thread);
     assert!(snapshot.pending_approvals.is_empty());
 
     let read = service

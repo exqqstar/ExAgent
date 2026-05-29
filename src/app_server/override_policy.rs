@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use crate::app_server::protocol::TurnContextOverrides;
 use crate::app_server::AppServerError;
 use crate::config::AgentConfig;
-use crate::session::SessionSnapshot;
+use crate::session::ThreadSnapshot;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeOverrides {
@@ -81,9 +81,9 @@ impl OverridePolicy {
     }
 
     pub fn apply_turn_context(
-        snapshot: &SessionSnapshot,
+        snapshot: &ThreadSnapshot,
         overrides: TurnContextOverrides,
-    ) -> Result<SessionSnapshot> {
+    ) -> Result<ThreadSnapshot> {
         let mut snapshot = snapshot.clone();
 
         if let Some(raw_cwd) = overrides.cwd.as_deref() {

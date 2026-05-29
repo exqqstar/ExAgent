@@ -9,7 +9,7 @@ use crate::llm::LlmClient;
 use crate::policy::PolicyManager;
 use crate::registry::ToolRegistry;
 use crate::runtime::tool_call_runtime::ToolCallRuntime;
-use crate::types::{ConversationMessage, LlmCompletion, SessionId, TurnId};
+use crate::types::{ConversationMessage, LlmCompletion, ThreadId, TurnId};
 
 pub struct Agent {
     config: AgentConfig,
@@ -79,20 +79,20 @@ impl Agent {
 
     pub(crate) fn tool_runtime(
         &self,
-        session_id: SessionId,
+        thread_id: ThreadId,
         turn_id: TurnId,
         workspace_root: PathBuf,
         cwd: PathBuf,
     ) -> ToolCallRuntime {
-        let mut session_config = self.config.clone();
-        session_config.workspace_root = workspace_root;
-        session_config.cwd = cwd.clone();
+        let mut turn_config = self.config.clone();
+        turn_config.workspace_root = workspace_root;
+        turn_config.cwd = cwd.clone();
         ToolCallRuntime::new(
-            session_config,
+            turn_config,
             self.registry.clone(),
             self.exec_sessions.clone(),
             self.policy.clone(),
-            session_id,
+            thread_id,
             turn_id,
             cwd,
         )

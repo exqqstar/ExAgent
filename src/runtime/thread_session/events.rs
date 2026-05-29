@@ -8,9 +8,9 @@ use tokio::sync::broadcast;
 use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::runtime::tool_call_runtime::ExecSessionUpdate;
 use crate::session::ApprovalId;
-use crate::session::SessionSnapshot;
+use crate::session::ThreadSnapshot;
 use crate::state::rollout::{RolloutItem, RolloutStore};
-use crate::types::{EventId, SessionId, TurnId};
+use crate::types::{EventId, ThreadId, TurnId};
 
 /// Records a runtime event into the durable event log, updates the in-memory
 /// live mirror, and broadcasts to subscribers. Used both by ThreadSession
@@ -21,7 +21,7 @@ pub(crate) trait LiveEventSink: Send {
 
     fn record_reserved(
         &mut self,
-        snapshot: &SessionSnapshot,
+        snapshot: &ThreadSnapshot,
         turn_id: Option<&TurnId>,
         event_id: EventId,
         kind: RuntimeEventKind,
@@ -29,7 +29,7 @@ pub(crate) trait LiveEventSink: Send {
 
     fn record(
         &mut self,
-        snapshot: &SessionSnapshot,
+        snapshot: &ThreadSnapshot,
         turn_id: Option<&TurnId>,
         kind: RuntimeEventKind,
     ) -> Result<RuntimeEvent> {
@@ -39,7 +39,7 @@ pub(crate) trait LiveEventSink: Send {
 }
 
 pub(crate) struct ThreadEventRecorder {
-    thread_id: SessionId,
+    thread_id: ThreadId,
     rollout_store: RolloutStore,
     next_event_index: usize,
     event_tx: broadcast::Sender<RuntimeEvent>,
@@ -49,7 +49,7 @@ pub(crate) struct ThreadEventRecorder {
 
 impl ThreadEventRecorder {
     pub(crate) fn new(
-        thread_id: SessionId,
+        thread_id: ThreadId,
         rollout_store: RolloutStore,
         event_tx: broadcast::Sender<RuntimeEvent>,
         live_state: Arc<RwLock<ThreadSessionLiveState>>,
@@ -68,14 +68,14 @@ impl ThreadEventRecorder {
 
     fn record_snapshot(
         &mut self,
-        snapshot: &SessionSnapshot,
+        snapshot: &ThreadSnapshot,
         turn_id: Option<&TurnId>,
         event_id: EventId,
         kind: RuntimeEventKind,
     ) -> Result<RuntimeEvent> {
         let event = RuntimeEvent {
             event_id,
-            session_id: self.thread_id.clone(),
+            thread_id: self.thread_id.clone(),
             turn_id: turn_id.cloned(),
             kind,
         };
@@ -141,18 +141,18 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::config::AgentConfig;
-    use crate::session::SessionSnapshot;
+    use crate::session::ThreadSnapshot;
 
     #[test]
     fn recorder_bounds_live_buffer_without_trimming_persisted_events() {
         let dir = tempdir().unwrap();
-        let thread_id = SessionId::new("session_bounded_live_events");
+        let thread_id = ThreadId::new("session_bounded_live_events");
         let config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         };
-        let snapshot = SessionSnapshot::new_thread(
+        let snapshot = ThreadSnapshot::new_thread(
             thread_id.clone(),
             config.workspace_root.clone(),
             config.cwd.clone(),
@@ -215,7 +215,7 @@ impl LiveEventSink for ThreadEventRecorder {
 
     fn record_reserved(
         &mut self,
-        snapshot: &SessionSnapshot,
+        snapshot: &ThreadSnapshot,
         turn_id: Option<&TurnId>,
         event_id: EventId,
         kind: RuntimeEventKind,
@@ -227,7 +227,7 @@ impl LiveEventSink for ThreadEventRecorder {
 impl ThreadSession {
     pub(crate) fn append_and_broadcast_snapshot(
         &mut self,
-        snapshot: &SessionSnapshot,
+        snapshot: &ThreadSnapshot,
         turn_id: Option<&TurnId>,
         kind: RuntimeEventKind,
     ) -> Result<RuntimeEvent> {

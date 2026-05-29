@@ -6,25 +6,25 @@ use exagent::exec_session::ExecSessionManager;
 use exagent::policy::PolicyManager;
 use exagent::registry::{ToolContext, ToolRegistry};
 use exagent::tools::run_command::RunCommandTool;
-use exagent::types::{SessionId, ToolCall};
+use exagent::types::{ThreadId, ToolCall};
 use serde_json::json;
 use tempfile::tempdir;
 
-fn test_context() -> (tempfile::TempDir, SessionId, ToolContext) {
+fn test_context() -> (tempfile::TempDir, ThreadId, ToolContext) {
     let dir = tempdir().unwrap();
-    let session_id = SessionId::new("session_exec_1");
+    let thread_id = ThreadId::new("session_exec_1");
     let ctx = ToolContext {
         config: AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         },
-        session_id: Some(session_id.clone()),
+        thread_id: Some(thread_id.clone()),
         turn_id: None,
         exec_sessions: Arc::new(ExecSessionManager::default()),
         policy: Arc::new(PolicyManager::default()),
     };
-    (dir, session_id, ctx)
+    (dir, thread_id, ctx)
 }
 
 #[tokio::test]
@@ -99,7 +99,7 @@ async fn persistent_exec_session_accepts_stdin_across_multiple_calls() {
 
 #[tokio::test]
 async fn persistent_exec_session_streams_output_without_legacy_event_log() {
-    let (dir, session_id, ctx) = test_context();
+    let (_dir, _thread_id, ctx) = test_context();
     let mut registry = ToolRegistry::new();
     registry.register(RunCommandTool);
 
@@ -149,8 +149,6 @@ async fn persistent_exec_session_streams_output_without_legacy_event_log() {
 
     assert!(meta["stdout"].as_str().unwrap().contains("stdout-line"));
     assert!(meta["stderr"].as_str().unwrap().contains("stderr-line"));
-    let legacy_paths = exagent::transcript::session_paths(dir.path(), &session_id);
-    assert!(!legacy_paths.events_path.exists());
 }
 
 #[tokio::test]

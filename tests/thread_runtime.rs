@@ -8,24 +8,20 @@ use exagent::runtime::thread_runtime::{
     AgentFactory, ThreadOpResult, ThreadRuntime, ThreadRuntimeOptions, ThreadRuntimeStatus,
 };
 use exagent::runtime::thread_session::{ThreadSession, ThreadSessionOptions};
-use exagent::session::{AgentRole, SessionSnapshot, TurnContextItem};
-use exagent::state::rollout::{rollout_paths, RolloutItem, RolloutStore, SessionMeta};
+use exagent::session::TurnContextItem;
+use exagent::state::rollout::{rollout_paths, RolloutItem, RolloutStore, ThreadMeta};
 use exagent::types::{
-    AssistantTurn, ConversationMessage, EventId, LlmCompletion, SessionId, TurnId,
+    AssistantTurn, ConversationMessage, EventId, LlmCompletion, ThreadId, TurnId,
 };
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 
-fn write_rollout_meta(config: &AgentConfig, thread_id: &SessionId) {
+fn write_rollout_meta(config: &AgentConfig, thread_id: &ThreadId) {
     let rollout_paths = rollout_paths(&config.workspace_root, thread_id);
     RolloutStore::new(rollout_paths.rollout_path)
-        .append_items_blocking(&[RolloutItem::SessionMeta(SessionMeta {
+        .append_items_blocking(&[RolloutItem::ThreadMeta(ThreadMeta {
             thread_id: thread_id.clone(),
-            root_thread_id: thread_id.clone(),
-            parent_thread_id: None,
-            spawned_by_turn_id: None,
-            agent_role: AgentRole::Primary,
             workspace_root: config.workspace_root.clone(),
             initial_cwd: config.cwd.clone(),
             created_at: "2026-05-20T00:00:00Z".to_string(),
@@ -36,7 +32,7 @@ fn write_rollout_meta(config: &AgentConfig, thread_id: &SessionId) {
 #[test]
 fn thread_session_can_be_constructed_as_runtime_state_owner() {
     let dir = tempdir().unwrap();
-    let thread_id = SessionId::new("session_thread_session_construct");
+    let thread_id = ThreadId::new("session_thread_session_construct");
     let config = AgentConfig {
         workspace_root: dir.path().to_path_buf(),
         cwd: dir.path().to_path_buf(),
@@ -54,21 +50,14 @@ fn thread_session_can_be_constructed_as_runtime_state_owner() {
 }
 
 #[test]
-fn legacy_snapshot_only_thread_is_not_loaded_as_runtime_state() {
+fn thread_without_rollout_meta_is_not_loaded_as_runtime_state() {
     let dir = tempdir().unwrap();
-    let thread_id = SessionId::new("session_legacy_snapshot_only");
+    let thread_id = ThreadId::new("session_no_rollout_meta");
     let config = AgentConfig {
         workspace_root: dir.path().to_path_buf(),
         cwd: dir.path().to_path_buf(),
         ..AgentConfig::default()
     };
-    let snapshot = SessionSnapshot::new_thread(
-        thread_id.clone(),
-        config.workspace_root.clone(),
-        config.cwd.clone(),
-    );
-    let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
-    exagent::transcript::write_json(&paths.snapshot_path, &snapshot).unwrap();
 
     let result = ThreadSession::new(ThreadSessionOptions::new(
         thread_id,
@@ -82,7 +71,7 @@ fn legacy_snapshot_only_thread_is_not_loaded_as_runtime_state() {
 #[tokio::test]
 async fn thread_runtime_starts_idle_and_accepts_shutdown_op() {
     let dir = tempdir().unwrap();
-    let thread_id = SessionId::new("session_runtime_test");
+    let thread_id = ThreadId::new("session_runtime_test");
     let config = AgentConfig {
         workspace_root: dir.path().to_path_buf(),
         cwd: dir.path().to_path_buf(),
@@ -107,7 +96,7 @@ async fn thread_runtime_starts_idle_and_accepts_shutdown_op() {
 #[tokio::test]
 async fn thread_session_loads_rollout_session_meta() {
     let dir = tempdir().unwrap();
-    let thread_id = SessionId::new("thread_rollout_start");
+    let thread_id = ThreadId::new("thread_rollout_start");
     let config = AgentConfig {
         workspace_root: dir.path().to_path_buf(),
         cwd: dir.path().to_path_buf(),
@@ -127,13 +116,13 @@ async fn thread_session_loads_rollout_session_meta() {
         .await
         .expect("read rollout");
 
-    assert!(matches!(items.first(), Some(RolloutItem::SessionMeta(_))));
+    assert!(matches!(items.first(), Some(RolloutItem::ThreadMeta(_))));
 }
 
 #[tokio::test]
 async fn thread_resume_reconstructs_context_from_rollout_without_snapshot() {
     let dir = tempdir().unwrap();
-    let thread_id = SessionId::new("thread_rollout_resume");
+    let thread_id = ThreadId::new("thread_rollout_resume");
     let config = AgentConfig {
         workspace_root: dir.path().to_path_buf(),
         cwd: dir.path().to_path_buf(),
@@ -152,12 +141,8 @@ async fn thread_resume_reconstructs_context_from_rollout_without_snapshot() {
     let store = RolloutStore::new(rollout_paths.rollout_path.clone());
     store
         .append_items(&[
-            RolloutItem::SessionMeta(SessionMeta {
+            RolloutItem::ThreadMeta(ThreadMeta {
                 thread_id: thread_id.clone(),
-                root_thread_id: thread_id.clone(),
-                parent_thread_id: None,
-                spawned_by_turn_id: None,
-                agent_role: AgentRole::Primary,
                 workspace_root: config.workspace_root.clone(),
                 initial_cwd: config.cwd.clone(),
                 created_at: "2026-05-20T00:00:00Z".to_string(),
@@ -192,7 +177,7 @@ async fn thread_resume_reconstructs_context_from_rollout_without_snapshot() {
 #[tokio::test]
 async fn runtime_restore_uses_rollout_projection_for_compaction_metadata() {
     let dir = tempdir().unwrap();
-    let thread_id = SessionId::new("thread_rollout_compaction_restore");
+    let thread_id = ThreadId::new("thread_rollout_compaction_restore");
     let config = AgentConfig {
         workspace_root: dir.path().to_path_buf(),
         cwd: dir.path().to_path_buf(),
@@ -202,12 +187,8 @@ async fn runtime_restore_uses_rollout_projection_for_compaction_metadata() {
     let store = RolloutStore::new(rollout_paths.rollout_path.clone());
     store
         .append_items(&[
-            RolloutItem::SessionMeta(SessionMeta {
+            RolloutItem::ThreadMeta(ThreadMeta {
                 thread_id: thread_id.clone(),
-                root_thread_id: thread_id.clone(),
-                parent_thread_id: None,
-                spawned_by_turn_id: None,
-                agent_role: AgentRole::Primary,
                 workspace_root: config.workspace_root.clone(),
                 initial_cwd: config.cwd.clone(),
                 created_at: "2026-05-20T00:00:00Z".to_string(),
@@ -250,14 +231,15 @@ async fn runtime_restore_uses_rollout_projection_for_compaction_metadata() {
 #[tokio::test]
 async fn thread_runtime_live_view_uses_loaded_session_state_not_disk_mutations() {
     let dir = tempdir().unwrap();
-    let thread_id = SessionId::new("session_runtime_live_view");
+    let thread_id = ThreadId::new("session_runtime_live_view");
     let config = AgentConfig {
         workspace_root: dir.path().to_path_buf(),
         cwd: dir.path().to_path_buf(),
         ..AgentConfig::default()
     };
     write_rollout_meta(&config, &thread_id);
-    let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
+    let rollout_paths =
+        exagent::state::rollout::rollout_paths(&config.workspace_root, &thread_id);
     let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
         thread_id.clone(),
         config.clone(),
@@ -266,15 +248,15 @@ async fn thread_runtime_live_view_uses_loaded_session_state_not_disk_mutations()
     .expect("spawn runtime");
 
     exagent::transcript::append_json_line(
-        &paths.events_path,
-        &RuntimeEvent {
+        &rollout_paths.rollout_path,
+        &exagent::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
             event_id: EventId::new("evt_disk_only"),
-            session_id: thread_id.clone(),
+            thread_id: thread_id.clone(),
             turn_id: Some(TurnId::new("turn_disk_only")),
             kind: RuntimeEventKind::RuntimeError {
                 message: "disk mutation after runtime load".into(),
             },
-        },
+        }),
     )
     .expect("append disk-only event");
 
@@ -288,7 +270,7 @@ async fn thread_runtime_live_view_uses_loaded_session_state_not_disk_mutations()
 #[tokio::test]
 async fn thread_runtime_runs_user_input_through_agent_and_records_turn_lifecycle() {
     let dir = tempdir().unwrap();
-    let thread_id = SessionId::new("session_runtime_turn");
+    let thread_id = ThreadId::new("session_runtime_turn");
     let turn_id = TurnId::new("turn_1");
     let config = AgentConfig {
         workspace_root: dir.path().to_path_buf(),
@@ -350,7 +332,7 @@ async fn thread_runtime_runs_user_input_through_agent_and_records_turn_lifecycle
 #[tokio::test]
 async fn thread_turn_records_rollout_items_and_context_history() {
     let dir = tempdir().unwrap();
-    let thread_id = SessionId::new("thread_rollout_turn");
+    let thread_id = ThreadId::new("thread_rollout_turn");
     let turn_id = TurnId::new("turn_1");
     let config = AgentConfig {
         workspace_root: dir.path().to_path_buf(),
@@ -404,7 +386,7 @@ async fn thread_turn_records_rollout_items_and_context_history() {
 #[tokio::test]
 async fn rollout_thread_turn_does_not_write_snapshot_or_events_files() {
     let dir = tempdir().unwrap();
-    let thread_id = SessionId::new("thread_rollout_no_legacy_files");
+    let thread_id = ThreadId::new("thread_rollout_no_legacy_files");
     let turn_id = TurnId::new("turn_1");
     let config = AgentConfig {
         workspace_root: dir.path().to_path_buf(),
@@ -414,19 +396,14 @@ async fn rollout_thread_turn_does_not_write_snapshot_or_events_files() {
     let rollout_paths = rollout_paths(&config.workspace_root, &thread_id);
     let store = RolloutStore::new(rollout_paths.rollout_path.clone());
     store
-        .append_items(&[RolloutItem::SessionMeta(SessionMeta {
+        .append_items(&[RolloutItem::ThreadMeta(ThreadMeta {
             thread_id: thread_id.clone(),
-            root_thread_id: thread_id.clone(),
-            parent_thread_id: None,
-            spawned_by_turn_id: None,
-            agent_role: AgentRole::Primary,
             workspace_root: config.workspace_root.clone(),
             initial_cwd: config.cwd.clone(),
             created_at: "2026-05-20T00:00:00Z".to_string(),
         })])
         .await
         .expect("write rollout meta");
-    let legacy_paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
     let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
         thread_id.clone(),
         config.clone(),
@@ -443,14 +420,14 @@ async fn rollout_thread_turn_does_not_write_snapshot_or_events_files() {
         .expect("run turn");
 
     assert!(rollout_paths.rollout_path.exists());
-    assert!(!legacy_paths.snapshot_path.exists());
-    assert!(!legacy_paths.events_path.exists());
+    let sessions_dir = config.workspace_root.join(".exagent").join("sessions");
+    assert!(!sessions_dir.exists());
 }
 
 #[tokio::test]
 async fn thread_runtime_live_view_tracks_snapshot_after_turn_without_disk_read() {
     let dir = tempdir().unwrap();
-    let thread_id = SessionId::new("session_runtime_live_snapshot");
+    let thread_id = ThreadId::new("session_runtime_live_snapshot");
     let turn_id = TurnId::new("turn_1");
     let config = AgentConfig {
         workspace_root: dir.path().to_path_buf(),
@@ -458,7 +435,6 @@ async fn thread_runtime_live_view_tracks_snapshot_after_turn_without_disk_read()
         ..AgentConfig::default()
     };
     write_rollout_meta(&config, &thread_id);
-    let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
     let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
         thread_id.clone(),
         config,
@@ -473,15 +449,6 @@ async fn thread_runtime_live_view_tracks_snapshot_after_turn_without_disk_read()
         .submit_user_input_and_wait(turn_id, "continue".into(), None)
         .await
         .expect("run turn");
-    exagent::transcript::write_json(
-        &paths.snapshot_path,
-        &SessionSnapshot::new_thread(
-            thread_id.clone(),
-            paths.session_dir.clone(),
-            paths.session_dir.clone(),
-        ),
-    )
-    .unwrap();
 
     let live_view = runtime.live_view();
 
@@ -503,14 +470,13 @@ async fn thread_runtime_live_view_tracks_snapshot_after_turn_without_disk_read()
 #[tokio::test]
 async fn thread_runtime_next_turn_id_uses_live_state_not_disk() {
     let dir = tempdir().unwrap();
-    let thread_id = SessionId::new("session_runtime_next_turn_id");
+    let thread_id = ThreadId::new("session_runtime_next_turn_id");
     let config = AgentConfig {
         workspace_root: dir.path().to_path_buf(),
         cwd: dir.path().to_path_buf(),
         ..AgentConfig::default()
     };
     write_rollout_meta(&config, &thread_id);
-    let paths = exagent::transcript::session_paths(&config.workspace_root, &thread_id);
     let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
         thread_id.clone(),
         config,
@@ -526,15 +492,6 @@ async fn thread_runtime_next_turn_id_uses_live_state_not_disk() {
         .submit_user_input_and_wait(TurnId::new("turn_1"), "continue".into(), None)
         .await
         .expect("run turn");
-    exagent::transcript::write_json(
-        &paths.snapshot_path,
-        &SessionSnapshot::new_thread(
-            thread_id.clone(),
-            paths.session_dir.clone(),
-            paths.session_dir.clone(),
-        ),
-    )
-    .unwrap();
 
     assert_eq!(runtime.next_turn_id(), TurnId::new("turn_2"));
 }
@@ -565,7 +522,7 @@ impl LlmClient for PanicLlm {
 #[tokio::test]
 async fn thread_runtime_marks_stopped_when_loop_handler_panics() {
     let dir = tempdir().unwrap();
-    let thread_id = SessionId::new("session_runtime_panic_guard");
+    let thread_id = ThreadId::new("session_runtime_panic_guard");
     let config = AgentConfig {
         workspace_root: dir.path().to_path_buf(),
         cwd: dir.path().to_path_buf(),

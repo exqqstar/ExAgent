@@ -5,13 +5,13 @@ use std::io::Write as _;
 use tokio::io::AsyncWriteExt;
 
 use crate::events::{RuntimeEvent, RuntimeEventKind};
-use crate::session::{AgentRole, SessionSnapshot, TurnContextItem};
-use crate::types::{ConversationMessage, SessionId, TurnId};
+use crate::session::{ThreadSnapshot, TurnContextItem};
+use crate::types::{ConversationMessage, ThreadId};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RolloutItem {
-    SessionMeta(SessionMeta),
+    ThreadMeta(ThreadMeta),
     ResponseItem(ConversationMessage),
     TurnContext(TurnContextItem),
     Compacted(CompactedItem),
@@ -19,26 +19,16 @@ pub enum RolloutItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SessionMeta {
-    pub thread_id: SessionId,
-    pub root_thread_id: SessionId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_thread_id: Option<SessionId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spawned_by_turn_id: Option<TurnId>,
-    pub agent_role: AgentRole,
+pub struct ThreadMeta {
+    pub thread_id: ThreadId,
     pub workspace_root: PathBuf,
     pub initial_cwd: PathBuf,
     pub created_at: String,
 }
 
-pub(crate) fn session_meta_from_snapshot(snapshot: &SessionSnapshot) -> SessionMeta {
-    SessionMeta {
-        thread_id: snapshot.session_id.clone(),
-        root_thread_id: snapshot.root_session_id.clone(),
-        parent_thread_id: snapshot.parent_session_id.clone(),
-        spawned_by_turn_id: snapshot.spawned_by_turn_id.clone(),
-        agent_role: snapshot.agent_role.clone(),
+pub(crate) fn thread_meta_from_snapshot(snapshot: &ThreadSnapshot) -> ThreadMeta {
+    ThreadMeta {
+        thread_id: snapshot.thread_id.clone(),
         workspace_root: snapshot.workspace_root.clone(),
         initial_cwd: snapshot.cwd.clone(),
         created_at: current_utc_timestamp(),
@@ -46,16 +36,16 @@ pub(crate) fn session_meta_from_snapshot(snapshot: &SessionSnapshot) -> SessionM
 }
 
 pub fn snapshot_from_rollout_items(
-    requested_thread_id: &SessionId,
+    requested_thread_id: &ThreadId,
     items: &[RolloutItem],
-) -> anyhow::Result<SessionSnapshot> {
+) -> anyhow::Result<ThreadSnapshot> {
     let meta = items
         .iter()
         .find_map(|item| match item {
-            RolloutItem::SessionMeta(meta) => Some(meta),
+            RolloutItem::ThreadMeta(meta) => Some(meta),
             _ => None,
         })
-        .ok_or_else(|| anyhow::anyhow!("rollout is missing SessionMeta"))?;
+        .ok_or_else(|| anyhow::anyhow!("rollout is missing ThreadMeta"))?;
     if &meta.thread_id != requested_thread_id {
         return Err(anyhow::anyhow!(
             "rollout thread id {} does not match requested thread id {}",
@@ -80,16 +70,12 @@ pub fn snapshot_from_rollout_items(
                     conversation = replacement_history.clone();
                 }
             }
-            RolloutItem::SessionMeta(_) | RolloutItem::EventMsg(_) => {}
+            RolloutItem::ThreadMeta(_) | RolloutItem::EventMsg(_) => {}
         }
     }
 
-    let mut snapshot = SessionSnapshot {
-        session_id: meta.thread_id.clone(),
-        parent_session_id: meta.parent_thread_id.clone(),
-        root_session_id: meta.root_thread_id.clone(),
-        spawned_by_turn_id: meta.spawned_by_turn_id.clone(),
-        agent_role: meta.agent_role.clone(),
+    let snapshot = ThreadSnapshot {
+        thread_id: meta.thread_id.clone(),
         workspace_root: meta.workspace_root.clone(),
         cwd: meta.initial_cwd.clone(),
         reference_turn_context,
@@ -98,7 +84,6 @@ pub fn snapshot_from_rollout_items(
         latest_compaction,
         pending_approvals: vec![],
     };
-    snapshot.normalize_lineage();
     Ok(snapshot)
 }
 
@@ -121,7 +106,7 @@ pub struct CompactedItem {
 
 pub fn should_persist_rollout_item(item: &RolloutItem) -> bool {
     match item {
-        RolloutItem::SessionMeta(_)
+        RolloutItem::ThreadMeta(_)
         | RolloutItem::ResponseItem(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::Compacted(_) => true,
@@ -153,7 +138,7 @@ pub struct RolloutPaths {
     pub rollout_path: PathBuf,
 }
 
-pub fn rollout_paths(workspace_root: &std::path::Path, thread_id: &SessionId) -> RolloutPaths {
+pub fn rollout_paths(workspace_root: &std::path::Path, thread_id: &ThreadId) -> RolloutPaths {
     let thread_dir = workspace_root
         .join(".exagent")
         .join("threads")
@@ -277,9 +262,9 @@ impl RolloutStore {
 mod tests {
     use super::*;
     use crate::events::{RuntimeEvent, RuntimeEventKind};
-    use crate::session::{AgentRole, ApprovalId, TurnContextItem};
+    use crate::session::{ApprovalId, TurnContextItem};
     use crate::types::{
-        ConversationMessage, EventId, SessionId, TokenUsage, TokenUsageInfo, TurnId,
+        ConversationMessage, EventId, ThreadId, TokenUsage, TokenUsageInfo, TurnId,
     };
     use std::path::PathBuf;
 
@@ -294,12 +279,8 @@ mod tests {
 
     #[test]
     fn rollout_item_can_store_session_meta_turn_context_and_compaction() {
-        let meta = RolloutItem::SessionMeta(SessionMeta {
-            thread_id: SessionId::new("thread_1"),
-            root_thread_id: SessionId::new("thread_1"),
-            parent_thread_id: None,
-            spawned_by_turn_id: None,
-            agent_role: AgentRole::Primary,
+        let meta = RolloutItem::ThreadMeta(ThreadMeta {
+            thread_id: ThreadId::new("thread_1"),
             workspace_root: PathBuf::from("/workspace"),
             initial_cwd: PathBuf::from("/workspace"),
             created_at: "2026-05-20T00:00:00Z".to_string(),
@@ -322,7 +303,7 @@ mod tests {
         });
         let event = RolloutItem::EventMsg(RuntimeEvent {
             event_id: EventId::new("evt_1"),
-            session_id: SessionId::new("thread_1"),
+            thread_id: ThreadId::new("thread_1"),
             turn_id: Some(TurnId::new("turn_1")),
             kind: RuntimeEventKind::TurnStarted,
         });
@@ -362,7 +343,7 @@ mod tests {
     fn event_persistence_policy_filters_runtime_events() {
         let turn_started = RuntimeEvent {
             event_id: EventId::new("event_1"),
-            session_id: SessionId::new("thread_1"),
+            thread_id: ThreadId::new("thread_1"),
             turn_id: Some(TurnId::new("turn_1")),
             kind: RuntimeEventKind::TurnStarted,
         };
@@ -404,19 +385,19 @@ mod tests {
 
     #[test]
     fn rollout_snapshot_does_not_restore_live_only_runtime_state() {
-        let thread_id = SessionId::new("session_overlay_cold");
+        let thread_id = ThreadId::new("session_overlay_cold");
         let workspace_root = PathBuf::from("/tmp/exagent-overlay");
-        let snapshot = crate::session::SessionSnapshot::new_thread(
+        let snapshot = crate::session::ThreadSnapshot::new_thread(
             thread_id.clone(),
             workspace_root.clone(),
             workspace_root.clone(),
         );
 
         let items = vec![
-            RolloutItem::SessionMeta(session_meta_from_snapshot(&snapshot)),
+            RolloutItem::ThreadMeta(thread_meta_from_snapshot(&snapshot)),
             RolloutItem::EventMsg(RuntimeEvent {
                 event_id: EventId::new("evt_1"),
-                session_id: thread_id.clone(),
+                thread_id: thread_id.clone(),
                 turn_id: Some(TurnId::new("turn_1")),
                 kind: RuntimeEventKind::ApprovalRequested {
                     approval_id: ApprovalId::new("approval_1"),
@@ -435,7 +416,7 @@ mod tests {
     #[test]
     fn rollout_path_uses_thread_directory_and_rollout_jsonl() {
         let workspace_root = PathBuf::from("/workspace");
-        let thread_id = SessionId::new("thread_1");
+        let thread_id = ThreadId::new("thread_1");
 
         let paths = rollout_paths(&workspace_root, &thread_id);
 

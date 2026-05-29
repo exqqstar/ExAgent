@@ -1,12 +1,9 @@
-//! JSON helpers plus v2 compatibility path construction.
+//! Generic JSON file helpers plus thread id generation.
 //!
 //! Runtime state is restored from `.exagent/threads/<thread_id>/rollout.jsonl`.
-//! The `.exagent/sessions/<thread_id>/snapshot.json` and `events.jsonl` paths
-//! are retained only because the v2 protocol still returns those fields.
 
 use std::io::Write;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,16 +11,9 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::types::SessionId;
+use crate::types::ThreadId;
 
-static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Debug, Clone)]
-pub struct SessionPaths {
-    pub session_dir: PathBuf,
-    pub snapshot_path: PathBuf,
-    pub events_path: PathBuf,
-}
+static THREAD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub fn append_json_line<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -69,23 +59,11 @@ pub fn read_json_lines<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
         .collect()
 }
 
-pub fn new_session_id() -> SessionId {
+pub fn new_thread_id() -> ThreadId {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_nanos())
         .unwrap_or_default();
-    let counter = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    SessionId::new(format!("session-{ts}-{counter}"))
-}
-
-pub fn session_paths(workspace_root: &Path, session_id: &SessionId) -> SessionPaths {
-    let session_dir = workspace_root
-        .join(".exagent")
-        .join("sessions")
-        .join(session_id.as_str());
-    SessionPaths {
-        snapshot_path: session_dir.join("snapshot.json"),
-        events_path: session_dir.join("events.jsonl"),
-        session_dir,
-    }
+    let counter = THREAD_COUNTER.fetch_add(1, Ordering::Relaxed);
+    ThreadId::new(format!("thread-{ts}-{counter}"))
 }

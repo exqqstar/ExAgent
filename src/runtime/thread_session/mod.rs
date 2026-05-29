@@ -17,12 +17,12 @@ use crate::runtime::context::ContextManager;
 use crate::runtime::thread_runtime::{
     AgentFactory, ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus,
 };
-use crate::session::SessionSnapshot;
+use crate::session::ThreadSnapshot;
 use crate::state::rollout::{
     events_from_rollout_items, rollout_paths, snapshot_from_rollout_items, RolloutItem,
     RolloutStore,
 };
-use crate::types::{EventId, SessionId, TurnId};
+use crate::types::{EventId, ThreadId, TurnId};
 
 const DEFAULT_THREAD_EVENT_CHANNEL_CAPACITY: usize = 256;
 const DEFAULT_LIVE_EVENT_BUFFER_CAP: usize = 2048;
@@ -33,7 +33,7 @@ pub(crate) struct RuntimeInterrupt {
 }
 
 pub struct ThreadSessionOptions {
-    thread_id: SessionId,
+    thread_id: ThreadId,
     config: AgentConfig,
     agent_factory: AgentFactory,
     event_tx: broadcast::Sender<RuntimeEvent>,
@@ -43,7 +43,7 @@ pub struct ThreadSessionOptions {
 }
 
 impl ThreadSessionOptions {
-    pub fn new(thread_id: SessionId, config: AgentConfig, agent_factory: AgentFactory) -> Self {
+    pub fn new(thread_id: ThreadId, config: AgentConfig, agent_factory: AgentFactory) -> Self {
         let (event_tx, _) = broadcast::channel(DEFAULT_THREAD_EVENT_CHANNEL_CAPACITY);
         let (status_tx, _) = watch::channel(ThreadRuntimeStatus::Idle);
         Self {
@@ -79,7 +79,7 @@ impl ThreadSessionOptions {
 }
 
 pub struct ThreadSession {
-    thread_id: SessionId,
+    thread_id: ThreadId,
     agent: Agent,
     recorder: ThreadEventRecorder,
     rollout_store: RolloutStore,
@@ -91,8 +91,8 @@ pub struct ThreadSession {
 
 #[derive(Debug, Clone)]
 pub struct ThreadSessionLiveView {
-    pub thread_id: SessionId,
-    pub snapshot: SessionSnapshot,
+    pub thread_id: ThreadId,
+    pub snapshot: ThreadSnapshot,
     pub(crate) overlay: RuntimeOverlay,
     pub events: Vec<RuntimeEvent>,
     pub status: ThreadRuntimeStatus,
@@ -107,7 +107,7 @@ pub struct ThreadSessionLiveView {
 /// event.
 #[derive(Debug)]
 pub(crate) struct ThreadSessionLiveState {
-    pub(crate) snapshot: SessionSnapshot,
+    pub(crate) snapshot: ThreadSnapshot,
     pub(crate) overlay: RuntimeOverlay,
     pub(crate) events: Vec<RuntimeEvent>,
     pub(crate) status: ThreadRuntimeStatus,
@@ -180,7 +180,7 @@ impl ThreadSession {
         })
     }
 
-    pub fn thread_id(&self) -> &SessionId {
+    pub fn thread_id(&self) -> &ThreadId {
         &self.thread_id
     }
 
@@ -203,7 +203,7 @@ impl ThreadSession {
     }
 
     pub(crate) fn live_view_from_state(
-        thread_id: SessionId,
+        thread_id: ThreadId,
         state: &Arc<RwLock<ThreadSessionLiveState>>,
     ) -> ThreadSessionLiveView {
         let state = state
@@ -273,7 +273,7 @@ impl ThreadSession {
             (interrupted_turn_id, state.snapshot.clone())
         };
         self.policy
-            .cancel_pending_for_session(&self.thread_id)
+            .cancel_pending_for_thread(&self.thread_id)
             .await;
         // append_and_broadcast checkpoints the snapshot atomically with the
         // event, so a separate pre-event checkpoint is no longer needed.
@@ -290,9 +290,9 @@ impl ThreadSession {
 }
 
 fn restore_from_rollout(
-    requested_thread_id: &SessionId,
+    requested_thread_id: &ThreadId,
     items: &[RolloutItem],
-) -> anyhow::Result<(SessionSnapshot, Vec<RuntimeEvent>, ContextManager)> {
+) -> anyhow::Result<(ThreadSnapshot, Vec<RuntimeEvent>, ContextManager)> {
     let mut snapshot = snapshot_from_rollout_items(requested_thread_id, items)?;
     let context_manager = ContextManager::from_rollout_items(items);
     context_manager.sync_snapshot(&mut snapshot);
@@ -327,16 +327,16 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::tempdir;
 
-    fn write_rollout_meta(config: &AgentConfig, thread_id: &SessionId) {
-        let snapshot = SessionSnapshot::new_thread(
+    fn write_rollout_meta(config: &AgentConfig, thread_id: &ThreadId) {
+        let snapshot = ThreadSnapshot::new_thread(
             thread_id.clone(),
             config.workspace_root.clone(),
             config.cwd.clone(),
         );
         let rollout_paths = crate::state::rollout::rollout_paths(&config.workspace_root, thread_id);
         crate::state::rollout::RolloutStore::new(rollout_paths.rollout_path)
-            .append_items_blocking(&[crate::state::rollout::RolloutItem::SessionMeta(
-                crate::state::rollout::session_meta_from_snapshot(&snapshot),
+            .append_items_blocking(&[crate::state::rollout::RolloutItem::ThreadMeta(
+                crate::state::rollout::thread_meta_from_snapshot(&snapshot),
             )])
             .expect("write rollout session meta");
     }
@@ -344,7 +344,7 @@ mod tests {
     #[tokio::test]
     async fn handle_interrupt_cancels_pending_policy_approvals() {
         let dir = tempdir().unwrap();
-        let thread_id = SessionId::new("session_interrupt_policy");
+        let thread_id = ThreadId::new("session_interrupt_policy");
         let config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
@@ -366,7 +366,7 @@ mod tests {
             )
             .await;
         assert_eq!(
-            policy.pending_count_for_session(&thread_id).await,
+            policy.pending_count_for_thread(&thread_id).await,
             1,
             "precondition: policy holds one pending approval"
         );
@@ -404,7 +404,7 @@ mod tests {
         ));
 
         assert_eq!(
-            policy.pending_count_for_session(&thread_id).await,
+            policy.pending_count_for_thread(&thread_id).await,
             0,
             "interrupt must drop the policy-side approval waiter, not just the snapshot copy"
         );
@@ -413,24 +413,24 @@ mod tests {
     #[test]
     fn session_load_bounds_live_events_without_reusing_event_ids() {
         let dir = tempdir().unwrap();
-        let thread_id = SessionId::new("session_load_bounded_events");
+        let thread_id = ThreadId::new("session_load_bounded_events");
         let config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         };
-        let snapshot = SessionSnapshot::new_thread(
+        let snapshot = ThreadSnapshot::new_thread(
             thread_id.clone(),
             config.workspace_root.clone(),
             config.cwd.clone(),
         );
-        let mut rollout_items = vec![crate::state::rollout::RolloutItem::SessionMeta(
-            crate::state::rollout::session_meta_from_snapshot(&snapshot),
+        let mut rollout_items = vec![crate::state::rollout::RolloutItem::ThreadMeta(
+            crate::state::rollout::thread_meta_from_snapshot(&snapshot),
         )];
         for event_index in 1..=4 {
             rollout_items.push(crate::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
                 event_id: EventId::new(format!("evt_{}", event_index)),
-                session_id: thread_id.clone(),
+                thread_id: thread_id.clone(),
                 turn_id: Some(TurnId::new(format!("turn_{}", event_index))),
                 kind: RuntimeEventKind::TurnStarted,
             }));

@@ -75,7 +75,7 @@ fn rollout_schema_has_codex_style_top_level_items() {
     let source = std::fs::read_to_string("src/state/rollout.rs").expect("read rollout schema");
 
     for expected in [
-        "SessionMeta",
+        "ThreadMeta",
         "ResponseItem",
         "TurnContext",
         "Compacted",
@@ -104,12 +104,11 @@ fn rollout_reconstruction_does_not_restore_runtime_overlay_fields() {
 }
 
 #[test]
-fn run_command_tool_does_not_write_legacy_transcript_events() {
+fn run_command_tool_does_not_bypass_rollout_with_transcript_writes() {
     let source =
         std::fs::read_to_string("src/tools/run_command.rs").expect("read run command tool");
 
     assert!(!source.contains("transcript::append_json_line"));
-    assert!(!source.contains("transcript::session_paths"));
 }
 
 #[test]

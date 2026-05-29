@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::events::RuntimeEvent;
 use crate::session::CompactionSummary;
-use crate::types::{EventId, SessionId, ToolCall, TurnId};
+use crate::types::{EventId, ThreadId, ToolCall, TurnId};
 
 pub const BOUNDARY_PROTOCOL_VERSION: &str = "appserver-runtime-boundary-v2";
 
@@ -36,9 +36,7 @@ pub struct InitializeResponse {
 pub struct AgentRunResponse {
     pub text: Option<String>,
     pub tool_calls: Vec<ToolCall>,
-    pub session_id: SessionId,
-    pub snapshot_path: PathBuf,
-    pub events_path: PathBuf,
+    pub thread_id: ThreadId,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -46,7 +44,7 @@ pub struct RunParams {
     pub prompt: String,
     pub workspace_root: Option<String>,
     pub cwd: Option<String>,
-    pub session_id: Option<SessionId>,
+    pub thread_id: Option<ThreadId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,12 +88,10 @@ pub struct TurnState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ThreadView {
-    pub id: SessionId,
+    pub id: ThreadId,
     pub status: ThreadStatus,
     pub active_turn: Option<TurnView>,
     pub turns: Vec<TurnView>,
-    pub snapshot_path: PathBuf,
-    pub events_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -136,7 +132,7 @@ pub enum ThreadItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadReadParams {
-    pub thread_id: SessionId,
+    pub thread_id: ThreadId,
     pub workspace_root: Option<String>,
 }
 
@@ -147,7 +143,7 @@ pub struct ThreadReadResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadResumeParams {
-    pub thread_id: SessionId,
+    pub thread_id: ThreadId,
     pub workspace_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
@@ -175,7 +171,7 @@ pub struct TurnContextOverrides {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnStartParams {
-    pub thread_id: SessionId,
+    pub thread_id: ThreadId,
     pub prompt: String,
     pub workspace_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,13 +180,13 @@ pub struct TurnStartParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TurnStartResponse {
-    pub thread_id: SessionId,
+    pub thread_id: ThreadId,
     pub turn: TurnView,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnInterruptParams {
-    pub thread_id: SessionId,
+    pub thread_id: ThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<TurnId>,
     pub workspace_root: Option<String>,
@@ -198,7 +194,7 @@ pub struct TurnInterruptParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnInterruptResponse {
-    pub thread_id: SessionId,
+    pub thread_id: ThreadId,
     pub interrupted_turn: Option<TurnState>,
 }
 
@@ -253,7 +249,7 @@ pub enum RuntimeEventKindFilter {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventsReplayParams {
-    pub thread_id: SessionId,
+    pub thread_id: ThreadId,
     pub workspace_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_event_id: Option<EventId>,
@@ -267,7 +263,7 @@ pub struct EventsReplayParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventsSubscribeParams {
-    pub thread_id: SessionId,
+    pub thread_id: ThreadId,
     pub workspace_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_event_id: Option<EventId>,
@@ -275,7 +271,7 @@ pub struct EventsSubscribeParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReplaySnapshotView {
-    pub thread_id: SessionId,
+    pub thread_id: ThreadId,
     pub cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_compaction: Option<CompactionSummary>,
@@ -286,7 +282,7 @@ pub struct ReplaySnapshotView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EventsReplayResponse {
-    pub thread_id: SessionId,
+    pub thread_id: ThreadId,
     pub events: Vec<RuntimeEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<ReplaySnapshotView>,

@@ -16,7 +16,7 @@ fn test_context() -> (tempfile::TempDir, ToolContext) {
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         },
-        session_id: None,
+        thread_id: None,
         turn_id: None,
         exec_sessions: Arc::new(ExecSessionManager::default()),
         policy: Arc::new(PolicyManager::default()),

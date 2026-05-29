@@ -14,6 +14,8 @@ use exagent::{session as compat_session, transcript as compat_transcript, types 
 
 #[test]
 fn canonical_and_compatibility_module_paths_compile() {
+    let _ = transcript::new_thread_id;
+    let _ = compat_transcript::new_thread_id;
     let names = [
         type_name::<api::ThreadStartRequest>(),
         type_name::<cli::CliCommand>(),
@@ -25,15 +27,13 @@ fn canonical_and_compatibility_module_paths_compile() {
         type_name::<policy::PolicyManager>(),
         type_name::<thread_runtime::ThreadRuntimeStatus>(),
         type_name::<events::RuntimeEventKind>(),
-        type_name::<session::SessionSnapshot>(),
-        type_name::<transcript::SessionPaths>(),
+        type_name::<session::ThreadSnapshot>(),
         type_name::<registry::ToolRegistry>(),
         type_name::<compat_agent::Agent>(),
         type_name::<compat_exec_session::ExecSessionManager>(),
         type_name::<compat_policy::PolicyManager>(),
         type_name::<compat_events::RuntimeEventKind>(),
-        type_name::<compat_session::SessionSnapshot>(),
-        type_name::<compat_transcript::SessionPaths>(),
+        type_name::<compat_session::ThreadSnapshot>(),
         type_name::<compat_llm::OpenAiCompatibleLlm>(),
         type_name::<compat_types::AssistantTurn>(),
         type_name::<compat_registry::ToolRegistry>(),

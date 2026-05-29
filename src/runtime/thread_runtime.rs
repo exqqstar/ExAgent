@@ -13,7 +13,7 @@ use crate::runtime::thread_session::{
     RuntimeInterrupt, ThreadSession, ThreadSessionLiveState, ThreadSessionLiveView,
     ThreadSessionOptions,
 };
-use crate::types::{AssistantTurn, SessionId, TurnId};
+use crate::types::{AssistantTurn, ThreadId, TurnId};
 
 const THREAD_OP_CHANNEL_CAPACITY: usize = 64;
 const THREAD_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -23,17 +23,17 @@ pub type AgentFactory = Arc<dyn Fn(AgentConfig) -> Result<Agent> + Send + Sync>;
 #[derive(Debug, thiserror::Error)]
 pub enum ThreadRuntimeError {
     #[error("thread is busy: {}", .0.as_str())]
-    ThreadBusy(SessionId),
+    ThreadBusy(ThreadId),
 
     #[error("turn rejected for thread {}: {reason}", thread_id.as_str())]
     TurnRejected {
-        thread_id: SessionId,
+        thread_id: ThreadId,
         reason: String,
     },
 
     #[error("turn interrupted for thread {}: {}", thread_id.as_str(), turn_id.as_str())]
     TurnInterrupted {
-        thread_id: SessionId,
+        thread_id: ThreadId,
         turn_id: TurnId,
     },
 }
@@ -82,14 +82,14 @@ pub struct ThreadSubmission {
 }
 
 pub struct ThreadRuntimeOptions {
-    pub thread_id: SessionId,
+    pub thread_id: ThreadId,
     pub config: AgentConfig,
     agent_factory: AgentFactory,
     policy: Arc<PolicyManager>,
 }
 
 impl ThreadRuntimeOptions {
-    pub fn new(thread_id: SessionId, config: AgentConfig, agent_factory: AgentFactory) -> Self {
+    pub fn new(thread_id: ThreadId, config: AgentConfig, agent_factory: AgentFactory) -> Self {
         Self {
             thread_id,
             config,
@@ -105,7 +105,7 @@ impl ThreadRuntimeOptions {
 }
 
 pub struct ThreadRuntime {
-    thread_id: SessionId,
+    thread_id: ThreadId,
     op_tx: mpsc::Sender<ThreadSubmission>,
     event_tx: broadcast::Sender<RuntimeEvent>,
     status_rx: watch::Receiver<ThreadRuntimeStatus>,
@@ -143,7 +143,7 @@ impl ThreadRuntime {
         Ok(runtime)
     }
 
-    pub fn thread_id(&self) -> &SessionId {
+    pub fn thread_id(&self) -> &ThreadId {
         &self.thread_id
     }
 

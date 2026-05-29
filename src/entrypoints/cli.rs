@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 
-use crate::types::SessionId;
+use crate::types::ThreadId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
@@ -8,7 +8,7 @@ pub enum CliCommand {
         prompt: String,
     },
     Resume {
-        session_id: SessionId,
+        thread_id: ThreadId,
         prompt: String,
     },
     Api {
@@ -20,7 +20,7 @@ pub fn parse_cli_command(args: Vec<String>) -> Result<CliCommand> {
     let mut args = args.into_iter();
     let first = args
         .next()
-        .ok_or_else(|| anyhow::anyhow!("usage: cargo run -- '<prompt>' | cargo run -- api [bind_addr] | cargo run -- resume <session_id> '<prompt>'"))?;
+        .ok_or_else(|| anyhow::anyhow!("usage: cargo run -- '<prompt>' | cargo run -- api [bind_addr] | cargo run -- resume <thread_id> '<prompt>'"))?;
 
     if first == "api" {
         return Ok(CliCommand::Api {
@@ -29,19 +29,19 @@ pub fn parse_cli_command(args: Vec<String>) -> Result<CliCommand> {
     }
 
     if first == "resume" {
-        let session_id = args
+        let thread_id = args
             .next()
-            .ok_or_else(|| anyhow::anyhow!("usage: cargo run -- resume <session_id> '<prompt>'"))?;
+            .ok_or_else(|| anyhow::anyhow!("usage: cargo run -- resume <thread_id> '<prompt>'"))?;
         let prompt = args
             .next()
-            .ok_or_else(|| anyhow::anyhow!("usage: cargo run -- resume <session_id> '<prompt>'"))?;
+            .ok_or_else(|| anyhow::anyhow!("usage: cargo run -- resume <thread_id> '<prompt>'"))?;
 
         if args.next().is_some() {
             bail!("resume accepts exactly 2 arguments after the subcommand");
         }
 
         return Ok(CliCommand::Resume {
-            session_id: SessionId::new(session_id),
+            thread_id: ThreadId::new(thread_id),
             prompt,
         });
     }

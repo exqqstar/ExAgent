@@ -5,13 +5,13 @@ use exagent::exec_session::ExecSessionManager;
 use exagent::policy::{PolicyManager, PolicyMode};
 use exagent::registry::{ToolContext, ToolRegistry};
 use exagent::tools::run_command::RunCommandTool;
-use exagent::types::{SessionId, ToolCall};
+use exagent::types::{ThreadId, ToolCall};
 use serde_json::json;
 use tempfile::tempdir;
 
-fn test_context() -> (tempfile::TempDir, SessionId, ToolContext) {
+fn test_context() -> (tempfile::TempDir, ThreadId, ToolContext) {
     let dir = tempdir().unwrap();
-    let session_id = SessionId::new("session_policy_1");
+    let thread_id = ThreadId::new("session_policy_1");
     let ctx = ToolContext {
         config: AgentConfig {
             workspace_root: dir.path().to_path_buf(),
@@ -19,12 +19,12 @@ fn test_context() -> (tempfile::TempDir, SessionId, ToolContext) {
             policy_mode: PolicyMode::Enforced,
             ..AgentConfig::default()
         },
-        session_id: Some(session_id.clone()),
+        thread_id: Some(thread_id.clone()),
         turn_id: None,
         exec_sessions: Arc::new(ExecSessionManager::default()),
         policy: Arc::new(PolicyManager::default()),
     };
-    (dir, session_id, ctx)
+    (dir, thread_id, ctx)
 }
 
 #[tokio::test]
@@ -50,7 +50,7 @@ async fn safe_commands_execute_immediately_under_enforced_policy() {
 
 #[tokio::test]
 async fn risky_commands_return_review_required_without_legacy_event_log() {
-    let (dir, session_id, ctx) = test_context();
+    let (dir, _thread_id, ctx) = test_context();
     std::fs::create_dir_all(dir.path().join("scratch")).unwrap();
 
     let mut registry = ToolRegistry::new();
@@ -73,14 +73,11 @@ async fn risky_commands_return_review_required_without_legacy_event_log() {
     assert_eq!(meta["policy_decision"], "review_required");
     assert!(meta["approval_id"].as_str().is_some());
     assert!(dir.path().join("scratch").exists());
-
-    let legacy_paths = exagent::transcript::session_paths(dir.path(), &session_id);
-    assert!(!legacy_paths.events_path.exists());
 }
 
 #[tokio::test]
 async fn approved_requests_execute_and_denied_requests_stop_execution() {
-    let (dir, session_id, ctx) = test_context();
+    let (dir, _thread_id, ctx) = test_context();
     std::fs::create_dir_all(dir.path().join("approved")).unwrap();
     std::fs::create_dir_all(dir.path().join("denied")).unwrap();
 
@@ -148,7 +145,4 @@ async fn approved_requests_execute_and_denied_requests_stop_execution() {
         .await;
     assert_eq!(denied.status.as_str(), "error");
     assert!(dir.path().join("denied").exists());
-
-    let legacy_paths = exagent::transcript::session_paths(dir.path(), &session_id);
-    assert!(!legacy_paths.events_path.exists());
 }

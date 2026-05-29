@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::AgentConfig;
-use crate::session::{SessionSnapshot, TurnContextItem};
+use crate::session::{ThreadSnapshot, TurnContextItem};
 use crate::types::{ConversationMessage, MessageRole, TokenUsage, TokenUsageInfo};
 
 #[derive(Debug, Clone, Default)]
@@ -64,13 +64,13 @@ impl ContextManager {
                         manager.set_token_info(info.clone());
                     }
                 }
-                crate::state::rollout::RolloutItem::SessionMeta(_) => {}
+                crate::state::rollout::RolloutItem::ThreadMeta(_) => {}
             }
         }
         manager
     }
 
-    pub(crate) fn sync_snapshot(&self, snapshot: &mut SessionSnapshot) {
+    pub(crate) fn sync_snapshot(&self, snapshot: &mut ThreadSnapshot) {
         snapshot.conversation = self.items.clone();
         snapshot.reference_turn_context = self.reference_turn_context.clone();
     }
@@ -638,7 +638,7 @@ mod tests {
             crate::state::rollout::RolloutItem::ResponseItem(ConversationMessage::user("hello")),
             crate::state::rollout::RolloutItem::EventMsg(crate::events::RuntimeEvent {
                 event_id: crate::types::EventId::new("evt_1"),
-                session_id: crate::types::SessionId::new("thread_1"),
+                thread_id: crate::types::ThreadId::new("thread_1"),
                 turn_id: Some(crate::types::TurnId::new("turn_1")),
                 kind: crate::events::RuntimeEventKind::TokenCount {
                     info: Some(info.clone()),

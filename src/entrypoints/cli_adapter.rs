@@ -44,10 +44,10 @@ pub async fn execute_cli_command(
                 wait_for_final_assistant_text(&mut events, turn.turn.id).await?
             )
         }
-        CliCommand::Resume { session_id, prompt } => {
+        CliCommand::Resume { thread_id, prompt } => {
             let resumed = boundary
                 .thread_resume(ThreadResumeParams {
-                    thread_id: session_id,
+                    thread_id: thread_id,
                     workspace_root: None,
                     cwd: None,
                 })

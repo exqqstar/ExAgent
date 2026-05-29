@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::session::ApprovalId;
-use crate::types::{EventId, SessionId};
+use crate::types::{EventId, ThreadId};
 
 static APPROVAL_COUNTER: AtomicU64 = AtomicU64::new(1);
 static POLICY_EVENT_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -59,7 +59,7 @@ pub enum PolicyDecision {
 #[derive(Debug, Clone)]
 pub struct PendingCommandApproval {
     pub approval_id: ApprovalId,
-    pub session_id: SessionId,
+    pub thread_id: ThreadId,
     pub tool_name: String,
     pub command: String,
     pub cwd: PathBuf,
@@ -94,7 +94,7 @@ impl PolicyManager {
 
     pub async fn create_command_approval(
         &self,
-        session_id: SessionId,
+        thread_id: ThreadId,
         tool_name: &str,
         command: &str,
         cwd: PathBuf,
@@ -104,7 +104,7 @@ impl PolicyManager {
     ) -> PendingCommandApproval {
         let approval = PendingCommandApproval {
             approval_id: new_approval_id(),
-            session_id,
+            thread_id,
             tool_name: tool_name.to_string(),
             command: command.to_string(),
             cwd,
@@ -131,19 +131,19 @@ impl PolicyManager {
             .ok_or_else(|| format!("unknown approval id: {}", approval_id.as_str()))
     }
 
-    pub async fn cancel_pending_for_session(&self, session_id: &SessionId) {
+    pub async fn cancel_pending_for_thread(&self, thread_id: &ThreadId) {
         self.pending
             .lock()
             .await
-            .retain(|_, approval| &approval.session_id != session_id);
+            .retain(|_, approval| &approval.thread_id != thread_id);
     }
 
-    pub async fn pending_count_for_session(&self, session_id: &SessionId) -> usize {
+    pub async fn pending_count_for_thread(&self, thread_id: &ThreadId) -> usize {
         self.pending
             .lock()
             .await
             .values()
-            .filter(|approval| &approval.session_id == session_id)
+            .filter(|approval| &approval.thread_id == thread_id)
             .count()
     }
 }

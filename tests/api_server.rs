@@ -14,7 +14,7 @@ use exagent::app_server::protocol::{
 use exagent::app_server::{AppServerBoundary, AppServerError};
 use exagent::cli::{parse_cli_command, CliCommand};
 use exagent::events::{RuntimeEvent, RuntimeEventKind};
-use exagent::types::{AssistantTurn, EventId, SessionId, ToolCall, TurnId};
+use exagent::types::{AssistantTurn, EventId, ThreadId, ToolCall, TurnId};
 use serde_json::{json, Value};
 use tower::util::ServiceExt;
 
@@ -50,7 +50,7 @@ impl AppServerBoundary for StubBoundary {
         assert_eq!(params.workspace_root.as_deref(), Some("."));
         assert_eq!(params.cwd.as_deref(), Some("."));
         assert_eq!(
-            params.session_id.as_ref().map(SessionId::as_str),
+            params.thread_id.as_ref().map(ThreadId::as_str),
             Some("session_123")
         );
         Ok(self.response.clone())
@@ -161,10 +161,10 @@ impl ErrorBoundary {
                 AppServerError::InvalidRequest("cwd must stay within workspace_root".into()).into()
             }
             ErrorKind::ThreadNotFound => {
-                AppServerError::ThreadNotFound(SessionId::new("missing-thread")).into()
+                AppServerError::ThreadNotFound(ThreadId::new("missing-thread")).into()
             }
             ErrorKind::ThreadBusy => {
-                AppServerError::ThreadBusy(SessionId::new("session_123")).into()
+                AppServerError::ThreadBusy(ThreadId::new("session_123")).into()
             }
         }
     }
@@ -295,7 +295,7 @@ async fn run_route_accepts_existing_session_id() {
             "prompt": "continue phase2",
             "workspace_root": ".",
             "cwd": ".",
-            "session_id": "session_123"
+            "thread_id": "session_123"
         }),
     )
     .await;
@@ -310,9 +310,7 @@ async fn run_route_accepts_existing_session_id() {
                 "name": "read_file",
                 "arguments": {"path": "Cargo.toml"}
             }],
-            "session_id": "session_123",
-            "snapshot_path": ".exagent/sessions/session_123/snapshot.json",
-            "events_path": ".exagent/sessions/session_123/events.jsonl"
+            "thread_id": "session_123"
         })
     );
 }
@@ -623,7 +621,7 @@ fn parse_cli_resume_command_reads_session_id_and_prompt() {
     assert_eq!(
         command,
         CliCommand::Resume {
-            session_id: SessionId::new("session_123"),
+            thread_id: ThreadId::new("session_123"),
             prompt: "continue phase2".into(),
         }
     );
@@ -682,9 +680,7 @@ fn sample_run_response(text: &str) -> AgentRunResponse {
             name: "read_file".into(),
             arguments: json!({"path": "Cargo.toml"}),
         }],
-        session_id: SessionId::new("session_123"),
-        snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
-        events_path: ".exagent/sessions/session_123/events.jsonl".into(),
+        thread_id: ThreadId::new("session_123"),
     }
 }
 
@@ -709,7 +705,7 @@ fn sample_thread_resume_response() -> ThreadResumeResponse {
 
 fn sample_turn_start_response() -> TurnStartResponse {
     TurnStartResponse {
-        thread_id: SessionId::new("session_123"),
+        thread_id: ThreadId::new("session_123"),
         turn: TurnView {
             id: TurnId::new("turn_1"),
             status: TurnStatus::InProgress,
@@ -720,21 +716,19 @@ fn sample_turn_start_response() -> TurnStartResponse {
 
 fn sample_thread_view() -> ThreadView {
     ThreadView {
-        id: SessionId::new("session_123"),
+        id: ThreadId::new("session_123"),
         status: ThreadStatus::Idle,
         active_turn: None,
         turns: vec![],
-        snapshot_path: ".exagent/sessions/session_123/snapshot.json".into(),
-        events_path: ".exagent/sessions/session_123/events.jsonl".into(),
     }
 }
 
 fn sample_events_replay_response() -> EventsReplayResponse {
     EventsReplayResponse {
-        thread_id: SessionId::new("session_123"),
+        thread_id: ThreadId::new("session_123"),
         events: vec![RuntimeEvent {
             event_id: EventId::new("evt_1"),
-            session_id: SessionId::new("session_123"),
+            thread_id: ThreadId::new("session_123"),
             turn_id: Some(TurnId::new("turn_1")),
             kind: RuntimeEventKind::AssistantTurn {
                 turn: AssistantTurn {
@@ -752,9 +746,7 @@ fn sample_thread_json() -> Value {
         "id": "session_123",
         "status": "idle",
         "active_turn": null,
-        "turns": [],
-        "snapshot_path": ".exagent/sessions/session_123/snapshot.json",
-        "events_path": ".exagent/sessions/session_123/events.jsonl"
+        "turns": []
     })
 }
 
@@ -763,7 +755,7 @@ fn sample_events_replay_json() -> Value {
         "thread_id": "session_123",
         "events": [{
             "event_id": "evt_1",
-            "session_id": "session_123",
+            "thread_id": "session_123",
             "turn_id": "turn_1",
             "kind": {
                 "type": "assistant_turn",

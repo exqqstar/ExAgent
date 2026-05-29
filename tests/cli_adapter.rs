@@ -10,7 +10,7 @@ use exagent::app_server::protocol::{
 use exagent::app_server::AppServerBoundary;
 use exagent::cli::CliCommand;
 use exagent::events::{RuntimeEvent, RuntimeEventKind};
-use exagent::types::{AssistantTurn, EventId, SessionId, TurnId};
+use exagent::types::{AssistantTurn, EventId, ThreadId, TurnId};
 
 struct CliBoundary {
     calls: Mutex<Vec<String>>,
@@ -42,7 +42,7 @@ impl AppServerBoundary for CliBoundary {
         assert_eq!(params.cwd, None);
 
         Ok(ThreadStartResponse {
-            thread: sample_thread_view(SessionId::new("session_cli")),
+            thread: sample_thread_view(ThreadId::new("session_cli")),
         })
     }
 
@@ -81,7 +81,7 @@ impl AppServerBoundary for CliBoundary {
             .clone();
         let _ = event_tx.send(RuntimeEvent {
             event_id: EventId::new("evt_1"),
-            session_id: params.thread_id.clone(),
+            thread_id: params.thread_id.clone(),
             turn_id: Some(TurnId::new("turn_1")),
             kind: RuntimeEventKind::AssistantTurn {
                 turn: AssistantTurn {
@@ -92,7 +92,7 @@ impl AppServerBoundary for CliBoundary {
         });
         let _ = event_tx.send(RuntimeEvent {
             event_id: EventId::new("evt_2"),
-            session_id: params.thread_id.clone(),
+            thread_id: params.thread_id.clone(),
             turn_id: Some(TurnId::new("turn_1")),
             kind: RuntimeEventKind::TurnCompleted,
         });
@@ -136,14 +136,12 @@ impl AppServerBoundary for CliBoundary {
     }
 }
 
-fn sample_thread_view(id: SessionId) -> ThreadView {
+fn sample_thread_view(id: ThreadId) -> ThreadView {
     ThreadView {
         id,
         status: ThreadStatus::Idle,
         active_turn: None,
         turns: vec![],
-        snapshot_path: ".exagent/sessions/session_cli/snapshot.json".into(),
-        events_path: ".exagent/sessions/session_cli/events.jsonl".into(),
     }
 }
 
@@ -174,7 +172,7 @@ async fn cli_resume_reads_thread_then_starts_turn_without_legacy_run() {
     let output = exagent::cli_adapter::execute_cli_command(
         &boundary,
         CliCommand::Resume {
-            session_id: SessionId::new("session_existing"),
+            thread_id: ThreadId::new("session_existing"),
             prompt: "resume prompt".into(),
         },
     )

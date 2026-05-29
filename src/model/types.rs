@@ -19,7 +19,7 @@ macro_rules! string_id {
     };
 }
 
-string_id!(SessionId);
+string_id!(ThreadId);
 string_id!(TurnId);
 string_id!(EventId);
 

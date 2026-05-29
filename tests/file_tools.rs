@@ -22,7 +22,7 @@ async fn read_file_limits_to_requested_range() {
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         },
-        session_id: None,
+        thread_id: None,
         turn_id: None,
         exec_sessions: Arc::new(ExecSessionManager::default()),
         policy: Arc::new(PolicyManager::default()),
@@ -57,7 +57,7 @@ async fn write_file_creates_parent_directories() {
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         },
-        session_id: None,
+        thread_id: None,
         turn_id: None,
         exec_sessions: Arc::new(ExecSessionManager::default()),
         policy: Arc::new(PolicyManager::default()),
@@ -97,7 +97,7 @@ async fn read_file_rejects_escape_outside_workspace() {
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         },
-        session_id: None,
+        thread_id: None,
         turn_id: None,
         exec_sessions: Arc::new(ExecSessionManager::default()),
         policy: Arc::new(PolicyManager::default()),

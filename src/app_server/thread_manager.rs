@@ -29,12 +29,12 @@ use crate::runtime::thread_runtime::{
     ThreadTurnContext,
 };
 use crate::runtime::thread_session::RuntimeOverlay;
-use crate::session::SessionSnapshot;
+use crate::session::ThreadSnapshot;
 use crate::state::rollout::{
-    events_from_rollout_items, rollout_paths, session_meta_from_snapshot,
+    events_from_rollout_items, rollout_paths, thread_meta_from_snapshot,
     snapshot_from_rollout_items, RolloutItem, RolloutStore,
 };
-use crate::types::{AssistantTurn, LlmCompletion, SessionId, TurnId};
+use crate::types::{AssistantTurn, LlmCompletion, ThreadId, TurnId};
 
 type RegistryFactory = Arc<dyn Fn() -> ToolRegistry + Send + Sync>;
 
@@ -45,8 +45,10 @@ trait LlmFactory: Send + Sync {
 struct EnvLlmFactory;
 
 impl LlmFactory for EnvLlmFactory {
-    fn build(&self, _config: &AgentConfig) -> Result<Box<dyn LlmClient>> {
-        Ok(Box::new(OpenAiCompatibleLlm::from_env()?))
+    fn build(&self, config: &AgentConfig) -> Result<Box<dyn LlmClient>> {
+        Ok(Box::new(OpenAiCompatibleLlm::from_env_with_model(
+            config.model.clone(),
+        )?))
     }
 }
 
@@ -84,19 +86,17 @@ pub struct StartThreadOptions {
 
 pub enum InitialHistory {
     New,
-    Resume { thread_id: SessionId },
+    Resume { thread_id: ThreadId },
 }
 
 pub struct NewThread {
-    pub thread_id: SessionId,
+    pub thread_id: ThreadId,
     #[allow(dead_code)]
     pub runtime: Arc<ThreadRuntime>,
-    pub snapshot_path: PathBuf,
-    pub events_path: PathBuf,
 }
 
 struct TurnStartStarted {
-    thread_id: SessionId,
+    thread_id: ThreadId,
     turn_id: TurnId,
 }
 
@@ -106,10 +106,8 @@ struct LoadedRuntime {
 }
 
 struct StoredThreadState {
-    snapshot: SessionSnapshot,
+    snapshot: ThreadSnapshot,
     events: Vec<RuntimeEvent>,
-    snapshot_path: PathBuf,
-    events_path: PathBuf,
 }
 
 pub struct ThreadManager {
@@ -161,7 +159,7 @@ impl ThreadManager {
 
     pub async fn run(&self, params: RunParams) -> Result<AgentRunResponse> {
         let workspace_root = params.workspace_root.clone();
-        let thread_id = match params.session_id {
+        let thread_id = match params.thread_id {
             Some(thread_id) => {
                 self.thread_resume(ThreadResumeParams {
                     thread_id,
@@ -225,8 +223,6 @@ impl ThreadManager {
                 status: ThreadStatus::Idle,
                 active_turn: None,
                 turns: vec![],
-                snapshot_path: new_thread.snapshot_path,
-                events_path: new_thread.events_path,
             },
         })
     }
@@ -243,7 +239,7 @@ impl ThreadManager {
 
     fn thread_read_resolved(
         &self,
-        thread_id: SessionId,
+        thread_id: ThreadId,
         requested_workspace_root: bool,
         workspace_root: &Path,
     ) -> Result<ThreadReadResponse> {
@@ -252,13 +248,10 @@ impl ThreadManager {
         {
             let runtime = loaded.runtime;
             let live_view = runtime.live_view();
-            let paths = crate::transcript::session_paths(&loaded.workspace_root, &thread_id);
             return Ok(self.thread_read_from_state_view(
                 thread_id,
                 live_view.overlay,
                 live_view.events,
-                paths.snapshot_path,
-                paths.events_path,
             ));
         }
 
@@ -269,18 +262,14 @@ impl ThreadManager {
             thread_id,
             RuntimeOverlay::default(),
             stored.events,
-            stored.snapshot_path,
-            stored.events_path,
         ))
     }
 
     fn thread_read_from_state_view(
         &self,
-        thread_id: SessionId,
+        thread_id: ThreadId,
         overlay: RuntimeOverlay,
         events: Vec<RuntimeEvent>,
-        snapshot_path: PathBuf,
-        events_path: PathBuf,
     ) -> ThreadReadResponse {
         let active_turn = self.active_turn_state(&thread_id);
         let latest_turn = latest_turn_state(&events);
@@ -298,14 +287,7 @@ impl ThreadManager {
         };
 
         ThreadReadResponse {
-            thread: build_thread_view(
-                thread_id,
-                status,
-                active_turn,
-                events,
-                snapshot_path,
-                events_path,
-            ),
+            thread: build_thread_view(thread_id, status, active_turn, events),
         }
     }
 
@@ -353,8 +335,9 @@ impl ThreadManager {
     }
 
     async fn turn_start_and_wait(&self, params: TurnStartParams) -> Result<AgentRunResponse> {
-        let (thread_id, workspace_root, final_turn) = self.run_turn_through_runtime(params).await?;
-        Ok(agent_run_response(thread_id, final_turn, &workspace_root))
+        let (thread_id, _workspace_root, final_turn) =
+            self.run_turn_through_runtime(params).await?;
+        Ok(agent_run_response(thread_id, final_turn))
     }
 
     pub async fn turn_interrupt(
@@ -426,7 +409,7 @@ impl ThreadManager {
     async fn run_turn_through_runtime(
         &self,
         params: TurnStartParams,
-    ) -> Result<(SessionId, PathBuf, AssistantTurn)> {
+    ) -> Result<(ThreadId, PathBuf, AssistantTurn)> {
         let requested_workspace_root = params.workspace_root.clone();
         let requested_workspace_root = requested_workspace_root.is_some();
         let config = OverridePolicy::merge_turn_start(&self.base_config, params.workspace_root)?;
@@ -603,47 +586,34 @@ impl ThreadManager {
     fn start_thread_with_options(&self, options: StartThreadOptions) -> Result<NewThread> {
         match options.initial_history {
             InitialHistory::New => {
-                let thread_id = crate::transcript::new_session_id();
-                let snapshot = SessionSnapshot::new_thread(
+                let thread_id = crate::transcript::new_thread_id();
+                let snapshot = ThreadSnapshot::new_thread(
                     thread_id.clone(),
                     options.config.workspace_root.clone(),
                     options.config.cwd.clone(),
                 );
-                let paths = crate::transcript::session_paths(&snapshot.workspace_root, &thread_id);
                 let rollout_paths = rollout_paths(&snapshot.workspace_root, &thread_id);
                 RolloutStore::new(rollout_paths.rollout_path).append_items_blocking(&[
-                    RolloutItem::SessionMeta(session_meta_from_snapshot(&snapshot)),
+                    RolloutItem::ThreadMeta(thread_meta_from_snapshot(&snapshot)),
                 ])?;
                 let runtime = self.ensure_runtime_loaded(&thread_id, options.config, false)?;
 
-                Ok(NewThread {
-                    thread_id,
-                    runtime,
-                    snapshot_path: paths.snapshot_path,
-                    events_path: paths.events_path,
-                })
+                Ok(NewThread { thread_id, runtime })
             }
             InitialHistory::Resume { thread_id } => {
-                let paths =
-                    crate::transcript::session_paths(&options.config.workspace_root, &thread_id);
                 if !thread_exists_in_storage(&options.config.workspace_root, &thread_id) {
                     return Err(AppServerError::ThreadNotFound(thread_id).into());
                 }
                 let runtime = self.ensure_runtime_loaded(&thread_id, options.config, false)?;
 
-                Ok(NewThread {
-                    thread_id,
-                    runtime,
-                    snapshot_path: paths.snapshot_path,
-                    events_path: paths.events_path,
-                })
+                Ok(NewThread { thread_id, runtime })
             }
         }
     }
 
     fn ensure_runtime_loaded(
         &self,
-        thread_id: &SessionId,
+        thread_id: &ThreadId,
         config: AgentConfig,
         requested_workspace_root: bool,
     ) -> Result<Arc<ThreadRuntime>> {
@@ -666,7 +636,7 @@ impl ThreadManager {
         Ok(runtime)
     }
 
-    fn runtime_for(&self, thread_id: &SessionId) -> Option<Arc<ThreadRuntime>> {
+    fn runtime_for(&self, thread_id: &ThreadId) -> Option<Arc<ThreadRuntime>> {
         self.loaded_threads
             .lock()
             .ok()
@@ -675,7 +645,7 @@ impl ThreadManager {
 
     fn resolve_loaded_runtime(
         &self,
-        thread_id: &SessionId,
+        thread_id: &ThreadId,
         requested_workspace_root: bool,
         workspace_root: &Path,
     ) -> Result<Option<LoadedRuntime>> {
@@ -697,11 +667,11 @@ impl ThreadManager {
     }
 
     #[cfg(test)]
-    fn is_thread_loaded(&self, thread_id: &SessionId) -> bool {
+    fn is_thread_loaded(&self, thread_id: &ThreadId) -> bool {
         self.runtime_for(thread_id).is_some()
     }
 
-    fn active_turn_state(&self, thread_id: &SessionId) -> Option<TurnState> {
+    fn active_turn_state(&self, thread_id: &ThreadId) -> Option<TurnState> {
         self.runtime_for(thread_id)
             .and_then(|runtime| runtime.active_turn_id())
             .map(|turn_id| TurnState {
@@ -727,7 +697,7 @@ fn unexpected_boundary_response(operation: &str, response: &BoundaryOpResponse) 
 }
 
 fn workspace_mismatch_error(
-    thread_id: &SessionId,
+    thread_id: &ThreadId,
     requested_workspace_root: &Path,
     active_workspace_root: &Path,
 ) -> anyhow::Error {
@@ -773,12 +743,10 @@ fn latest_turn_state(events: &[crate::events::RuntimeEvent]) -> Option<TurnState
 }
 
 fn build_thread_view(
-    thread_id: SessionId,
+    thread_id: ThreadId,
     status: ThreadStatus,
     active_turn: Option<TurnState>,
     events: Vec<RuntimeEvent>,
-    snapshot_path: PathBuf,
-    events_path: PathBuf,
 ) -> ThreadView {
     let mut turns = build_turn_views(events);
     let active_turn_view = active_turn.map(|state| {
@@ -792,8 +760,6 @@ fn build_thread_view(
         status,
         active_turn: active_turn_view,
         turns,
-        snapshot_path,
-        events_path,
     }
 }
 
@@ -955,7 +921,7 @@ fn filter_replay_events(
     }
 }
 
-fn thread_exists_in_storage(workspace_root: &Path, thread_id: &SessionId) -> bool {
+fn thread_exists_in_storage(workspace_root: &Path, thread_id: &ThreadId) -> bool {
     let rollout_paths = rollout_paths(workspace_root, thread_id);
     std::fs::metadata(&rollout_paths.rollout_path)
         .map(|metadata| metadata.len() > 0)
@@ -964,11 +930,10 @@ fn thread_exists_in_storage(workspace_root: &Path, thread_id: &SessionId) -> boo
 
 fn read_thread_state_from_storage(
     workspace_root: &Path,
-    thread_id: &SessionId,
+    thread_id: &ThreadId,
 ) -> Result<Option<StoredThreadState>> {
     let rollout_paths = rollout_paths(workspace_root, thread_id);
     let rollout_items = RolloutStore::read_items_blocking(&rollout_paths.rollout_path)?;
-    let compat_paths = crate::transcript::session_paths(workspace_root, thread_id);
     if rollout_items.is_empty() {
         return Ok(None);
     }
@@ -976,8 +941,6 @@ fn read_thread_state_from_storage(
     Ok(Some(StoredThreadState {
         snapshot: snapshot_from_rollout_items(thread_id, &rollout_items)?,
         events: events_from_rollout_items(&rollout_items),
-        snapshot_path: compat_paths.snapshot_path,
-        events_path: compat_paths.events_path,
     }))
 }
 
@@ -1021,9 +984,9 @@ fn runtime_event_kind_matches(filter: &RuntimeEventKindFilter, kind: &RuntimeEve
     )
 }
 
-fn replay_snapshot_view(snapshot: SessionSnapshot, overlay: &RuntimeOverlay) -> ReplaySnapshotView {
+fn replay_snapshot_view(snapshot: ThreadSnapshot, overlay: &RuntimeOverlay) -> ReplaySnapshotView {
     ReplaySnapshotView {
-        thread_id: snapshot.session_id,
+        thread_id: snapshot.thread_id,
         cwd: snapshot.cwd,
         latest_compaction: snapshot.latest_compaction,
         open_exec_session_count: overlay.open_exec_sessions.len(),
@@ -1032,18 +995,11 @@ fn replay_snapshot_view(snapshot: SessionSnapshot, overlay: &RuntimeOverlay) -> 
     }
 }
 
-fn agent_run_response(
-    thread_id: SessionId,
-    final_turn: AssistantTurn,
-    workspace_root: &std::path::Path,
-) -> AgentRunResponse {
-    let paths = crate::transcript::session_paths(workspace_root, &thread_id);
+fn agent_run_response(thread_id: ThreadId, final_turn: AssistantTurn) -> AgentRunResponse {
     AgentRunResponse {
         text: final_turn.text,
         tool_calls: final_turn.tool_calls,
-        session_id: thread_id,
-        snapshot_path: paths.snapshot_path,
-        events_path: paths.events_path,
+        thread_id,
     }
 }
 
@@ -1127,10 +1083,7 @@ mod tests {
             .expect("thread start");
 
         let rollout_paths = crate::state::rollout::rollout_paths(dir.path(), &started.thread.id);
-        let legacy_paths = crate::transcript::session_paths(dir.path(), &started.thread.id);
         assert!(rollout_paths.rollout_path.exists());
-        assert!(!legacy_paths.snapshot_path.exists());
-        assert!(!legacy_paths.events_path.exists());
     }
 
     #[test]
@@ -1164,7 +1117,6 @@ mod tests {
             .expect("thread resume");
 
         assert_eq!(resumed.thread.id, started.thread.id);
-        assert!(resumed.thread.snapshot_path.starts_with(&thread_root));
     }
 
     #[test]
@@ -1230,11 +1182,10 @@ mod tests {
             })
             .await
             .expect("turn");
-        let response = agent_run_response(thread_id, final_turn, &workspace_root);
+        let response = agent_run_response(thread_id, final_turn);
 
         assert_eq!(workspace_root, thread_root);
-        assert!(response.snapshot_path.starts_with(&thread_root));
-        assert!(!response.snapshot_path.starts_with(&base_root));
+        let _ = base_root;
         assert_eq!(response.text.as_deref(), Some("done in loaded workspace"));
     }
 

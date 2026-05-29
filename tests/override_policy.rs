@@ -1,7 +1,7 @@
 use exagent::app_server::override_policy::{OverridePolicy, RuntimeOverrides};
 use exagent::config::AgentConfig;
-use exagent::session::SessionSnapshot;
-use exagent::types::SessionId;
+use exagent::session::ThreadSnapshot;
+use exagent::types::ThreadId;
 use tempfile::tempdir;
 
 #[test]
@@ -49,8 +49,8 @@ fn merge_turn_start_uses_workspace_lookup_without_mutating_cwd() {
 fn apply_turn_context_rejects_cwd_outside_snapshot_workspace() {
     let dir = tempdir().unwrap();
     let outside = tempdir().unwrap();
-    let snapshot = SessionSnapshot::new_thread(
-        SessionId::new("session_policy"),
+    let snapshot = ThreadSnapshot::new_thread(
+        ThreadId::new("session_policy"),
         std::fs::canonicalize(dir.path()).unwrap(),
         std::fs::canonicalize(dir.path()).unwrap(),
     );

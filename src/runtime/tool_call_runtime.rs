@@ -6,14 +6,14 @@ use crate::exec_session::ExecSessionManager;
 use crate::policy::PolicyManager;
 use crate::registry::{ToolContext, ToolRegistry};
 use crate::session::{ApprovalId, ExecSessionId};
-use crate::types::{SessionId, ToolCall, ToolResult, TurnId};
+use crate::types::{ThreadId, ToolCall, ToolResult, TurnId};
 
 pub(crate) struct ToolCallRuntime {
     config: AgentConfig,
     registry: ToolRegistry,
     exec_sessions: Arc<ExecSessionManager>,
     policy: Arc<PolicyManager>,
-    session_id: SessionId,
+    thread_id: ThreadId,
     turn_id: TurnId,
     cwd: PathBuf,
 }
@@ -63,7 +63,7 @@ impl ToolCallRuntime {
         registry: ToolRegistry,
         exec_sessions: Arc<ExecSessionManager>,
         policy: Arc<PolicyManager>,
-        session_id: SessionId,
+        thread_id: ThreadId,
         turn_id: TurnId,
         cwd: PathBuf,
     ) -> Self {
@@ -72,7 +72,7 @@ impl ToolCallRuntime {
             registry,
             exec_sessions,
             policy,
-            session_id,
+            thread_id,
             turn_id,
             cwd,
         }
@@ -85,7 +85,7 @@ impl ToolCallRuntime {
     pub(crate) async fn execute(&self, call: ToolCall) -> ToolExecutionOutcome {
         let ctx = ToolContext {
             config: self.config.clone(),
-            session_id: Some(self.session_id.clone()),
+            thread_id: Some(self.thread_id.clone()),
             turn_id: Some(self.turn_id.clone()),
             exec_sessions: self.exec_sessions.clone(),
             policy: self.policy.clone(),

@@ -10,7 +10,7 @@ use crate::runtime::thread_runtime::{
     ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus, ThreadTurnContext,
 };
 use crate::runtime::tool_call_runtime::{ApprovalUpdate, ToolEffect, ToolExecutionOutcome};
-use crate::session::{ApprovalStatus, CompactionSummary, SessionSnapshot};
+use crate::session::{ApprovalStatus, CompactionSummary, ThreadSnapshot};
 use crate::state::rollout::{CompactedItem, RolloutItem};
 use crate::types::{AssistantTurn, ConversationMessage, MessageRole, TurnId};
 
@@ -151,7 +151,7 @@ impl ThreadSession {
         turn_id: &TurnId,
         prompt: String,
         turn_cwd: Option<PathBuf>,
-        snapshot: &mut SessionSnapshot,
+        snapshot: &mut ThreadSnapshot,
     ) -> Result<()> {
         // Apply model-visible runtime context before the user message so the
         // sampling prompt has stable background for this turn.
@@ -179,7 +179,7 @@ impl ThreadSession {
 
     fn record_turn_interrupted(
         &mut self,
-        snapshot: &SessionSnapshot,
+        snapshot: &ThreadSnapshot,
         turn_id: &TurnId,
         interrupted: &std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
@@ -195,7 +195,7 @@ impl ThreadSession {
     async fn compact_before_turn_if_needed(
         &mut self,
         turn_id: &TurnId,
-        snapshot: &mut SessionSnapshot,
+        snapshot: &mut ThreadSnapshot,
     ) -> Result<()> {
         let Some(limit) = self.agent.config().resolved_auto_compact_token_limit() else {
             return Ok(());
@@ -226,14 +226,13 @@ async fn run_session_turn(
     recorder: &mut ThreadEventRecorder,
     rollout_store: &crate::state::rollout::RolloutStore,
     context_manager: &mut ContextManager,
-    snapshot: &mut SessionSnapshot,
+    snapshot: &mut ThreadSnapshot,
     runtime_turn_id: TurnId,
     turn_cwd: Option<PathBuf>,
 ) -> Result<AssistantTurn> {
-    snapshot.normalize_lineage();
     let cwd = turn_cwd.clone().unwrap_or_else(|| snapshot.cwd.clone());
     let tool_runtime = agent.tool_runtime(
-        snapshot.session_id.clone(),
+        snapshot.thread_id.clone(),
         runtime_turn_id.clone(),
         snapshot.workspace_root.clone(),
         cwd,
@@ -311,7 +310,7 @@ async fn compact_after_context_window_error(
     recorder: &mut ThreadEventRecorder,
     rollout_store: &crate::state::rollout::RolloutStore,
     context_manager: &mut ContextManager,
-    snapshot: &mut SessionSnapshot,
+    snapshot: &mut ThreadSnapshot,
     turn_id: &TurnId,
     turn_cwd: Option<&PathBuf>,
 ) -> Result<()> {
@@ -353,7 +352,7 @@ fn restore_retry_context_after_compaction(
     agent: &Agent,
     rollout_store: &crate::state::rollout::RolloutStore,
     context_manager: &mut ContextManager,
-    snapshot: &mut SessionSnapshot,
+    snapshot: &mut ThreadSnapshot,
     turn_cwd: Option<&PathBuf>,
     last_user_message: Option<ConversationMessage>,
 ) -> Result<()> {
@@ -385,7 +384,7 @@ fn record_compaction_checkpoint(
     recorder: &mut ThreadEventRecorder,
     rollout_store: &crate::state::rollout::RolloutStore,
     context_manager: &mut ContextManager,
-    snapshot: &mut SessionSnapshot,
+    snapshot: &mut ThreadSnapshot,
     turn_id: &TurnId,
     summary_text: String,
     replacement_history: Vec<ConversationMessage>,
@@ -413,7 +412,7 @@ fn record_compaction_checkpoint(
 fn record_token_count_event(
     recorder: &mut ThreadEventRecorder,
     context_manager: &ContextManager,
-    snapshot: &SessionSnapshot,
+    snapshot: &ThreadSnapshot,
     turn_id: &TurnId,
 ) -> Result<()> {
     recorder.record(
@@ -430,7 +429,7 @@ fn record_assistant_turn(
     recorder: &mut ThreadEventRecorder,
     rollout_store: &crate::state::rollout::RolloutStore,
     context_manager: &mut ContextManager,
-    snapshot: &mut SessionSnapshot,
+    snapshot: &mut ThreadSnapshot,
     turn_id: &TurnId,
     turn: &AssistantTurn,
 ) -> Result<()> {
@@ -452,7 +451,7 @@ fn record_tool_outcome(
     recorder: &mut ThreadEventRecorder,
     rollout_store: &crate::state::rollout::RolloutStore,
     context_manager: &mut ContextManager,
-    snapshot: &mut SessionSnapshot,
+    snapshot: &mut ThreadSnapshot,
     turn_id: &TurnId,
     outcome: ToolExecutionOutcome,
 ) -> Result<()> {
@@ -478,7 +477,7 @@ fn record_tool_outcome(
 
 fn apply_tool_effect(
     recorder: &mut ThreadEventRecorder,
-    snapshot: &mut SessionSnapshot,
+    snapshot: &mut ThreadSnapshot,
     turn_id: &TurnId,
     effect: ToolEffect,
 ) -> Result<()> {
@@ -492,7 +491,7 @@ fn apply_tool_effect(
 
 fn apply_approval_update(
     recorder: &mut ThreadEventRecorder,
-    snapshot: &mut SessionSnapshot,
+    snapshot: &mut ThreadSnapshot,
     turn_id: &TurnId,
     update: ApprovalUpdate,
 ) -> Result<()> {
@@ -567,34 +566,34 @@ mod tests {
     use crate::registry::ToolRegistry;
     use crate::runtime::thread_runtime::{AgentFactory, ThreadOpResult};
     use crate::runtime::thread_session::{ThreadSession, ThreadSessionOptions};
-    use crate::session::SessionSnapshot;
+    use crate::session::ThreadSnapshot;
     use crate::state::rollout::{RolloutItem, RolloutStore};
     use crate::types::{
-        AssistantTurn, ConversationMessage, LlmCompletion, SessionId, TokenUsage, ToolCall, TurnId,
+        AssistantTurn, ConversationMessage, LlmCompletion, ThreadId, TokenUsage, ToolCall, TurnId,
     };
 
-    fn write_rollout_meta(config: &AgentConfig, thread_id: &SessionId) {
-        let snapshot = SessionSnapshot::new_thread(
+    fn write_rollout_meta(config: &AgentConfig, thread_id: &ThreadId) {
+        let snapshot = ThreadSnapshot::new_thread(
             thread_id.clone(),
             config.workspace_root.clone(),
             config.cwd.clone(),
         );
         let rollout_paths = crate::state::rollout::rollout_paths(&config.workspace_root, thread_id);
         crate::state::rollout::RolloutStore::new(rollout_paths.rollout_path)
-            .append_items_blocking(&[crate::state::rollout::RolloutItem::SessionMeta(
-                crate::state::rollout::session_meta_from_snapshot(&snapshot),
+            .append_items_blocking(&[crate::state::rollout::RolloutItem::ThreadMeta(
+                crate::state::rollout::thread_meta_from_snapshot(&snapshot),
             )])
             .expect("write rollout session meta");
     }
 
-    fn append_rollout_items(config: &AgentConfig, thread_id: &SessionId, items: &[RolloutItem]) {
+    fn append_rollout_items(config: &AgentConfig, thread_id: &ThreadId, items: &[RolloutItem]) {
         let rollout_paths = crate::state::rollout::rollout_paths(&config.workspace_root, thread_id);
         RolloutStore::new(rollout_paths.rollout_path)
             .append_items_blocking(items)
             .expect("append rollout items");
     }
 
-    fn read_rollout_items(config: &AgentConfig, thread_id: &SessionId) -> Vec<RolloutItem> {
+    fn read_rollout_items(config: &AgentConfig, thread_id: &ThreadId) -> Vec<RolloutItem> {
         let rollout_paths = crate::state::rollout::rollout_paths(&config.workspace_root, thread_id);
         RolloutStore::read_items_blocking(&rollout_paths.rollout_path).expect("read rollout items")
     }
@@ -694,7 +693,7 @@ mod tests {
     #[tokio::test]
     async fn thread_session_handles_user_input_and_records_turn_lifecycle() {
         let dir = tempdir().unwrap();
-        let thread_id = SessionId::new("session_thread_session_turn");
+        let thread_id = ThreadId::new("session_thread_session_turn");
         let turn_id = TurnId::new("turn_1");
         let config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
@@ -755,7 +754,7 @@ mod tests {
     #[tokio::test]
     async fn thread_session_reuses_live_agent_and_snapshot_across_turns() {
         let dir = tempdir().unwrap();
-        let thread_id = SessionId::new("session_thread_session_live_state");
+        let thread_id = ThreadId::new("session_thread_session_live_state");
         let config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
@@ -846,7 +845,7 @@ mod tests {
     #[tokio::test]
     async fn thread_session_next_sampling_uses_committed_history() {
         let dir = tempdir().unwrap();
-        let thread_id = SessionId::new("session_thread_session_committed_history");
+        let thread_id = ThreadId::new("session_thread_session_committed_history");
         let turn_id = TurnId::new("turn_1");
         let config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
@@ -897,7 +896,7 @@ mod tests {
     #[tokio::test]
     async fn thread_session_sampling_prompt_includes_runtime_context() {
         let dir = tempdir().unwrap();
-        let thread_id = SessionId::new("session_thread_session_prompt_context");
+        let thread_id = ThreadId::new("session_thread_session_prompt_context");
         let turn_id = TurnId::new("turn_1");
         let config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
@@ -949,7 +948,7 @@ mod tests {
     #[tokio::test]
     async fn thread_session_streams_events_paired_with_snapshot() {
         let dir = tempdir().unwrap();
-        let thread_id = SessionId::new("session_streaming_capture");
+        let thread_id = ThreadId::new("session_streaming_capture");
         let turn_id = TurnId::new("turn_1");
         let config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
@@ -1029,7 +1028,7 @@ mod tests {
     #[tokio::test]
     async fn thread_session_pre_turn_compaction_skips_when_under_budget() {
         let dir = tempdir().unwrap();
-        let thread_id = SessionId::new("session_pre_turn_compaction_skip");
+        let thread_id = ThreadId::new("session_pre_turn_compaction_skip");
         let turn_id = TurnId::new("turn_1");
         let config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
@@ -1085,7 +1084,7 @@ mod tests {
     #[tokio::test]
     async fn thread_session_pre_turn_compaction_runs_before_new_user_message() {
         let dir = tempdir().unwrap();
-        let thread_id = SessionId::new("session_pre_turn_compaction_before_user");
+        let thread_id = ThreadId::new("session_pre_turn_compaction_before_user");
         let turn_id = TurnId::new("turn_1");
         let config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
@@ -1180,7 +1179,7 @@ mod tests {
     #[tokio::test]
     async fn thread_session_pre_turn_compaction_replays_replacement_history() {
         let dir = tempdir().unwrap();
-        let thread_id = SessionId::new("session_pre_turn_compaction_replay");
+        let thread_id = ThreadId::new("session_pre_turn_compaction_replay");
         let turn_id = TurnId::new("turn_1");
         let config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
@@ -1259,7 +1258,7 @@ mod tests {
     #[tokio::test]
     async fn thread_session_records_token_usage_after_assistant_response() {
         let dir = tempdir().unwrap();
-        let thread_id = SessionId::new("session_records_token_usage");
+        let thread_id = ThreadId::new("session_records_token_usage");
         let turn_id = TurnId::new("turn_1");
         let usage = TokenUsage {
             input_tokens: 40,
@@ -1323,7 +1322,7 @@ mod tests {
     #[tokio::test]
     async fn thread_session_does_not_emit_token_count_without_model_usage() {
         let dir = tempdir().unwrap();
-        let thread_id = SessionId::new("session_no_bogus_token_usage");
+        let thread_id = ThreadId::new("session_no_bogus_token_usage");
         let turn_id = TurnId::new("turn_1");
         let config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
@@ -1365,7 +1364,7 @@ mod tests {
     #[tokio::test]
     async fn context_window_error_compacts_and_retries_once() {
         let dir = tempdir().unwrap();
-        let thread_id = SessionId::new("session_context_window_retry");
+        let thread_id = ThreadId::new("session_context_window_retry");
         let turn_id = TurnId::new("turn_1");
         let config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
@@ -1452,7 +1451,7 @@ mod tests {
     #[tokio::test]
     async fn context_window_error_retry_does_not_loop() {
         let dir = tempdir().unwrap();
-        let thread_id = SessionId::new("session_context_window_retry_once");
+        let thread_id = ThreadId::new("session_context_window_retry_once");
         let turn_id = TurnId::new("turn_1");
         let config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),

@@ -51,7 +51,7 @@ impl AppServerBoundary for StubBoundary {
         assert_eq!(params.cwd.as_deref(), Some("."));
         assert_eq!(
             params.thread_id.as_ref().map(ThreadId::as_str),
-            Some("session_123")
+            Some("thread_123")
         );
         Ok(self.response.clone())
     }
@@ -65,7 +65,7 @@ impl AppServerBoundary for StubBoundary {
 
     async fn thread_read(&self, params: ThreadReadParams) -> anyhow::Result<ThreadReadResponse> {
         self.calls.lock().unwrap().push("thread_read".into());
-        assert_eq!(params.thread_id.as_str(), "session_123");
+        assert_eq!(params.thread_id.as_str(), "thread_123");
         assert_eq!(params.workspace_root.as_deref(), Some("."));
         Ok(self.thread_read_response.clone())
     }
@@ -75,7 +75,7 @@ impl AppServerBoundary for StubBoundary {
         params: ThreadResumeParams,
     ) -> anyhow::Result<ThreadResumeResponse> {
         self.calls.lock().unwrap().push("thread_resume".into());
-        assert_eq!(params.thread_id.as_str(), "session_123");
+        assert_eq!(params.thread_id.as_str(), "thread_123");
         assert_eq!(params.workspace_root.as_deref(), Some("."));
         assert_eq!(params.cwd.as_deref(), Some("ignored"));
         Ok(self.thread_resume_response.clone())
@@ -83,7 +83,7 @@ impl AppServerBoundary for StubBoundary {
 
     async fn turn_start(&self, params: TurnStartParams) -> anyhow::Result<TurnStartResponse> {
         self.calls.lock().unwrap().push("turn_start".into());
-        assert_eq!(params.thread_id.as_str(), "session_123");
+        assert_eq!(params.thread_id.as_str(), "thread_123");
         assert_eq!(params.prompt, "continue phase2");
         assert_eq!(params.workspace_root.as_deref(), Some("."));
         Ok(self.turn_start_response.clone())
@@ -94,7 +94,7 @@ impl AppServerBoundary for StubBoundary {
         params: TurnInterruptParams,
     ) -> anyhow::Result<TurnInterruptResponse> {
         self.calls.lock().unwrap().push("turn_interrupt".into());
-        assert_eq!(params.thread_id.as_str(), "session_123");
+        assert_eq!(params.thread_id.as_str(), "thread_123");
         assert_eq!(params.turn_id.as_ref().map(TurnId::as_str), Some("turn_1"));
         assert_eq!(params.workspace_root.as_deref(), Some("."));
         Ok(TurnInterruptResponse {
@@ -127,7 +127,7 @@ impl AppServerBoundary for StubBoundary {
         params: EventsReplayParams,
     ) -> anyhow::Result<EventsReplayResponse> {
         self.calls.lock().unwrap().push("events_replay".into());
-        assert_eq!(params.thread_id.as_str(), "session_123");
+        assert_eq!(params.thread_id.as_str(), "thread_123");
         assert_eq!(params.workspace_root.as_deref(), Some("."));
         Ok(self.events_replay_response.clone())
     }
@@ -137,7 +137,7 @@ impl AppServerBoundary for StubBoundary {
         params: EventsSubscribeParams,
     ) -> anyhow::Result<tokio::sync::broadcast::Receiver<RuntimeEvent>> {
         self.calls.lock().unwrap().push("events_subscribe".into());
-        assert_eq!(params.thread_id.as_str(), "session_123");
+        assert_eq!(params.thread_id.as_str(), "thread_123");
         assert_eq!(params.workspace_root.as_deref(), Some("."));
         let (_tx, rx) = tokio::sync::broadcast::channel(8);
         Ok(rx)
@@ -163,9 +163,7 @@ impl ErrorBoundary {
             ErrorKind::ThreadNotFound => {
                 AppServerError::ThreadNotFound(ThreadId::new("missing-thread")).into()
             }
-            ErrorKind::ThreadBusy => {
-                AppServerError::ThreadBusy(ThreadId::new("session_123")).into()
-            }
+            ErrorKind::ThreadBusy => AppServerError::ThreadBusy(ThreadId::new("thread_123")).into(),
         }
     }
 }
@@ -285,7 +283,7 @@ async fn removed_legacy_routes_are_not_public_boundary_surface() {
 }
 
 #[tokio::test]
-async fn run_route_accepts_existing_session_id() {
+async fn run_route_accepts_existing_thread_id() {
     let app = build_router(Arc::new(StubBoundary::new()));
 
     let response = json_post(
@@ -295,7 +293,7 @@ async fn run_route_accepts_existing_session_id() {
             "prompt": "continue phase2",
             "workspace_root": ".",
             "cwd": ".",
-            "thread_id": "session_123"
+            "thread_id": "thread_123"
         }),
     )
     .await;
@@ -310,7 +308,7 @@ async fn run_route_accepts_existing_session_id() {
                 "name": "read_file",
                 "arguments": {"path": "Cargo.toml"}
             }],
-            "thread_id": "session_123"
+            "thread_id": "thread_123"
         })
     );
 }
@@ -367,7 +365,7 @@ async fn thread_read_route_accepts_thread_id_and_returns_lifecycle_state() {
         app,
         "/thread/read",
         json!({
-            "thread_id": "session_123",
+            "thread_id": "thread_123",
             "workspace_root": "."
         }),
     )
@@ -388,7 +386,7 @@ async fn thread_resume_route_accepts_thread_id_and_reports_ignored_overrides() {
         app,
         "/thread/resume",
         json!({
-            "thread_id": "session_123",
+            "thread_id": "thread_123",
             "workspace_root": ".",
             "cwd": "ignored"
         }),
@@ -413,7 +411,7 @@ async fn turn_start_route_accepts_thread_id_and_prompt() {
         app,
         "/turn/start",
         json!({
-            "thread_id": "session_123",
+            "thread_id": "thread_123",
             "prompt": "continue phase2",
             "workspace_root": "."
         }),
@@ -424,7 +422,7 @@ async fn turn_start_route_accepts_thread_id_and_prompt() {
     assert_eq!(
         response_json(response).await,
         json!({
-            "thread_id": "session_123",
+            "thread_id": "thread_123",
             "turn": {
                 "id": "turn_1",
                 "status": "in_progress",
@@ -444,7 +442,7 @@ async fn turn_start_route_maps_thread_busy_errors_to_conflict() {
         app,
         "/turn/start",
         json!({
-            "thread_id": "session_123",
+            "thread_id": "thread_123",
             "prompt": "continue phase2",
             "workspace_root": "."
         }),
@@ -454,7 +452,7 @@ async fn turn_start_route_maps_thread_busy_errors_to_conflict() {
     assert_eq!(response.status(), StatusCode::CONFLICT);
     assert_eq!(
         response_json(response).await,
-        json!({"error": "thread is busy: session_123"})
+        json!({"error": "thread is busy: thread_123"})
     );
 }
 
@@ -466,7 +464,7 @@ async fn turn_interrupt_route_accepts_thread_id_and_turn_id() {
         app,
         "/turn/interrupt",
         json!({
-            "thread_id": "session_123",
+            "thread_id": "thread_123",
             "turn_id": "turn_1",
             "workspace_root": "."
         }),
@@ -477,7 +475,7 @@ async fn turn_interrupt_route_accepts_thread_id_and_turn_id() {
     assert_eq!(
         response_json(response).await,
         json!({
-            "thread_id": "session_123",
+            "thread_id": "thread_123",
             "interrupted_turn": {
                 "turn_id": "turn_1",
                 "status": "interrupted"
@@ -494,7 +492,7 @@ async fn events_replay_route_returns_runtime_events() {
         app,
         "/events/replay",
         json!({
-            "thread_id": "session_123",
+            "thread_id": "thread_123",
             "workspace_root": "."
         }),
     )
@@ -536,7 +534,7 @@ async fn events_subscribe_route_streams_replay_events_then_closes() {
         app,
         "/events/subscribe",
         json!({
-            "thread_id": "session_123",
+            "thread_id": "thread_123",
             "workspace_root": "."
         }),
     )
@@ -567,7 +565,7 @@ async fn thread_op_route_accepts_events_replay_as_first_class_op() {
         "/thread/op",
         json!({
             "type": "events_replay",
-            "thread_id": "session_123",
+            "thread_id": "thread_123",
             "workspace_root": "."
         }),
     )
@@ -578,7 +576,7 @@ async fn thread_op_route_accepts_events_replay_as_first_class_op() {
         response_json(response).await,
         json!({
             "type": "events_replayed",
-            "thread_id": "session_123",
+            "thread_id": "thread_123",
             "events": sample_events_replay_json()["events"].clone()
         })
     );
@@ -593,7 +591,7 @@ async fn thread_op_route_accepts_thread_read_as_boundary_op() {
         "/thread/op",
         json!({
             "type": "thread_read",
-            "thread_id": "session_123",
+            "thread_id": "thread_123",
             "workspace_root": "."
         }),
     )
@@ -610,10 +608,10 @@ async fn thread_op_route_accepts_thread_read_as_boundary_op() {
 }
 
 #[test]
-fn parse_cli_resume_command_reads_session_id_and_prompt() {
+fn parse_cli_resume_command_reads_thread_id_and_prompt() {
     let command = parse_cli_command(vec![
         "resume".to_string(),
-        "session_123".to_string(),
+        "thread_123".to_string(),
         "continue phase2".to_string(),
     ])
     .unwrap();
@@ -621,7 +619,7 @@ fn parse_cli_resume_command_reads_session_id_and_prompt() {
     assert_eq!(
         command,
         CliCommand::Resume {
-            thread_id: ThreadId::new("session_123"),
+            thread_id: ThreadId::new("thread_123"),
             prompt: "continue phase2".into(),
         }
     );
@@ -630,9 +628,9 @@ fn parse_cli_resume_command_reads_session_id_and_prompt() {
 #[test]
 fn parse_cli_rejects_removed_legacy_commands() {
     for args in [
-        vec!["fork", "session_parent", "spec", "draft"],
-        vec!["inspect", "session_parent"],
-        vec!["collect", "session_child"],
+        vec!["fork", "thread_parent", "spec", "draft"],
+        vec!["inspect", "thread_parent"],
+        vec!["collect", "thread_child"],
     ] {
         assert!(parse_cli_command(args.into_iter().map(str::to_string).collect()).is_err());
     }
@@ -680,7 +678,7 @@ fn sample_run_response(text: &str) -> AgentRunResponse {
             name: "read_file".into(),
             arguments: json!({"path": "Cargo.toml"}),
         }],
-        thread_id: ThreadId::new("session_123"),
+        thread_id: ThreadId::new("thread_123"),
     }
 }
 
@@ -705,7 +703,7 @@ fn sample_thread_resume_response() -> ThreadResumeResponse {
 
 fn sample_turn_start_response() -> TurnStartResponse {
     TurnStartResponse {
-        thread_id: ThreadId::new("session_123"),
+        thread_id: ThreadId::new("thread_123"),
         turn: TurnView {
             id: TurnId::new("turn_1"),
             status: TurnStatus::InProgress,
@@ -716,7 +714,7 @@ fn sample_turn_start_response() -> TurnStartResponse {
 
 fn sample_thread_view() -> ThreadView {
     ThreadView {
-        id: ThreadId::new("session_123"),
+        id: ThreadId::new("thread_123"),
         status: ThreadStatus::Idle,
         active_turn: None,
         turns: vec![],
@@ -725,10 +723,10 @@ fn sample_thread_view() -> ThreadView {
 
 fn sample_events_replay_response() -> EventsReplayResponse {
     EventsReplayResponse {
-        thread_id: ThreadId::new("session_123"),
+        thread_id: ThreadId::new("thread_123"),
         events: vec![RuntimeEvent {
             event_id: EventId::new("evt_1"),
-            thread_id: ThreadId::new("session_123"),
+            thread_id: ThreadId::new("thread_123"),
             turn_id: Some(TurnId::new("turn_1")),
             kind: RuntimeEventKind::AssistantTurn {
                 turn: AssistantTurn {
@@ -743,7 +741,7 @@ fn sample_events_replay_response() -> EventsReplayResponse {
 
 fn sample_thread_json() -> Value {
     json!({
-        "id": "session_123",
+        "id": "thread_123",
         "status": "idle",
         "active_turn": null,
         "turns": []
@@ -752,10 +750,10 @@ fn sample_thread_json() -> Value {
 
 fn sample_events_replay_json() -> Value {
     json!({
-        "thread_id": "session_123",
+        "thread_id": "thread_123",
         "events": [{
             "event_id": "evt_1",
-            "thread_id": "session_123",
+            "thread_id": "thread_123",
             "turn_id": "turn_1",
             "kind": {
                 "type": "assistant_turn",

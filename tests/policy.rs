@@ -11,7 +11,7 @@ use tempfile::tempdir;
 
 fn test_context() -> (tempfile::TempDir, ThreadId, ToolContext) {
     let dir = tempdir().unwrap();
-    let thread_id = ThreadId::new("session_policy_1");
+    let thread_id = ThreadId::new("thread_policy_1");
     let ctx = ToolContext {
         config: AgentConfig {
             workspace_root: dir.path().to_path_buf(),
@@ -29,7 +29,7 @@ fn test_context() -> (tempfile::TempDir, ThreadId, ToolContext) {
 
 #[tokio::test]
 async fn safe_commands_execute_immediately_under_enforced_policy() {
-    let (_dir, _session_id, ctx) = test_context();
+    let (_dir, _thread_id, ctx) = test_context();
     let mut registry = ToolRegistry::new();
     registry.register(RunCommandTool);
 

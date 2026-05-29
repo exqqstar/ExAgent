@@ -238,8 +238,7 @@ async fn thread_runtime_live_view_uses_loaded_session_state_not_disk_mutations()
         ..AgentConfig::default()
     };
     write_rollout_meta(&config, &thread_id);
-    let rollout_paths =
-        exagent::state::rollout::rollout_paths(&config.workspace_root, &thread_id);
+    let rollout_paths = exagent::state::rollout::rollout_paths(&config.workspace_root, &thread_id);
     let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
         thread_id.clone(),
         config.clone(),

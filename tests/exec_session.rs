@@ -12,7 +12,7 @@ use tempfile::tempdir;
 
 fn test_context() -> (tempfile::TempDir, ThreadId, ToolContext) {
     let dir = tempdir().unwrap();
-    let thread_id = ThreadId::new("session_exec_1");
+    let thread_id = ThreadId::new("thread_exec_1");
     let ctx = ToolContext {
         config: AgentConfig {
             workspace_root: dir.path().to_path_buf(),
@@ -29,7 +29,7 @@ fn test_context() -> (tempfile::TempDir, ThreadId, ToolContext) {
 
 #[tokio::test]
 async fn persistent_exec_session_accepts_stdin_across_multiple_calls() {
-    let (_dir, _session_id, ctx) = test_context();
+    let (_dir, _thread_id, ctx) = test_context();
     let mut registry = ToolRegistry::new();
     registry.register(RunCommandTool);
 
@@ -153,7 +153,7 @@ async fn persistent_exec_session_streams_output_without_legacy_event_log() {
 
 #[tokio::test]
 async fn persistent_exec_session_terminate_marks_session_closed() {
-    let (_dir, _session_id, ctx) = test_context();
+    let (_dir, _thread_id, ctx) = test_context();
     let mut registry = ToolRegistry::new();
     registry.register(RunCommandTool);
 

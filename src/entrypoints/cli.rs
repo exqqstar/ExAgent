@@ -4,16 +4,9 @@ use crate::types::ThreadId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
-    Run {
-        prompt: String,
-    },
-    Resume {
-        thread_id: ThreadId,
-        prompt: String,
-    },
-    Api {
-        bind_addr: Option<String>,
-    },
+    Run { prompt: String },
+    Resume { thread_id: ThreadId, prompt: String },
+    Api { bind_addr: Option<String> },
 }
 
 pub fn parse_cli_command(args: Vec<String>) -> Result<CliCommand> {

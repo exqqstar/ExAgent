@@ -31,8 +31,8 @@ use crate::runtime::thread_runtime::{
 use crate::runtime::thread_session::RuntimeOverlay;
 use crate::session::ThreadSnapshot;
 use crate::state::rollout::{
-    events_from_rollout_items, rollout_paths, thread_meta_from_snapshot,
-    snapshot_from_rollout_items, RolloutItem, RolloutStore,
+    events_from_rollout_items, rollout_paths, snapshot_from_rollout_items,
+    thread_meta_from_snapshot, RolloutItem, RolloutStore,
 };
 use crate::types::{AssistantTurn, LlmCompletion, ThreadId, TurnId};
 
@@ -258,11 +258,7 @@ impl ThreadManager {
         let Some(stored) = read_thread_state_from_storage(workspace_root, &thread_id)? else {
             return Err(AppServerError::ThreadNotFound(thread_id).into());
         };
-        Ok(self.thread_read_from_state_view(
-            thread_id,
-            RuntimeOverlay::default(),
-            stored.events,
-        ))
+        Ok(self.thread_read_from_state_view(thread_id, RuntimeOverlay::default(), stored.events))
     }
 
     fn thread_read_from_state_view(

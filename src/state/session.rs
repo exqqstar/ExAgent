@@ -121,13 +121,13 @@ mod tests {
     #[test]
     fn snapshot_deserializes_without_reference_turn_context() {
         let snapshot: ThreadSnapshot = serde_json::from_value(json!({
-            "thread_id": "session_old",
+            "thread_id": "thread_old",
             "workspace_root": "/tmp/workspace",
             "cwd": "/tmp/workspace"
         }))
-        .expect("deserialize legacy snapshot");
+        .expect("deserialize thread snapshot");
 
-        assert_eq!(snapshot.thread_id, ThreadId::new("session_old"));
+        assert_eq!(snapshot.thread_id, ThreadId::new("thread_old"));
         assert!(snapshot.reference_turn_context.is_none());
         assert!(snapshot.conversation.is_empty());
     }

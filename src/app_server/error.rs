@@ -14,10 +14,7 @@ pub enum AppServerError {
     ThreadBusy(ThreadId),
 
     #[error("turn rejected for thread {}: {reason}", thread_id.as_str())]
-    TurnRejected {
-        thread_id: ThreadId,
-        reason: String,
-    },
+    TurnRejected { thread_id: ThreadId, reason: String },
 
     #[error("turn interrupted for thread {}: {}", thread_id.as_str(), turn_id.as_str())]
     TurnInterrupted {

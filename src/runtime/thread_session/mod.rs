@@ -272,9 +272,7 @@ impl ThreadSession {
             state.overlay.clear_pending_approvals();
             (interrupted_turn_id, state.snapshot.clone())
         };
-        self.policy
-            .cancel_pending_for_thread(&self.thread_id)
-            .await;
+        self.policy.cancel_pending_for_thread(&self.thread_id).await;
         // append_and_broadcast checkpoints the snapshot atomically with the
         // event, so a separate pre-event checkpoint is no longer needed.
         self.append_and_broadcast_snapshot(

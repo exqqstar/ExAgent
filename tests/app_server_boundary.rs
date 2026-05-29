@@ -95,8 +95,8 @@ fn run_command_registry() -> ToolRegistry {
 }
 
 fn read_thread_snapshot(workspace_root: &std::path::Path, thread: &ThreadView) -> ThreadSnapshot {
-    let workspace_root = std::fs::canonicalize(workspace_root)
-        .unwrap_or_else(|_| workspace_root.to_path_buf());
+    let workspace_root =
+        std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
     let rollout_paths = exagent::state::rollout::rollout_paths(&workspace_root, &thread.id);
     let items =
         exagent::state::rollout::RolloutStore::read_items_blocking(&rollout_paths.rollout_path)
@@ -105,8 +105,8 @@ fn read_thread_snapshot(workspace_root: &std::path::Path, thread: &ThreadView) -
 }
 
 fn assert_rollout_jsonl_is_valid(workspace_root: &std::path::Path, thread: &ThreadView) {
-    let workspace_root = std::fs::canonicalize(workspace_root)
-        .unwrap_or_else(|_| workspace_root.to_path_buf());
+    let workspace_root =
+        std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
     let rollout_paths = exagent::state::rollout::rollout_paths(&workspace_root, &thread.id);
     let contents = std::fs::read_to_string(rollout_paths.rollout_path).unwrap();
     for line in contents.lines() {
@@ -1797,14 +1797,12 @@ async fn turn_interrupt_aborts_pre_turn_auto_compaction() {
     let rollout_paths = exagent::state::rollout::rollout_paths(dir.path(), &thread_id);
     exagent::state::rollout::RolloutStore::new(rollout_paths.rollout_path)
         .append_items_blocking(&[
-            exagent::state::rollout::RolloutItem::ThreadMeta(
-                exagent::state::rollout::ThreadMeta {
-                    thread_id: thread_id.clone(),
-                    workspace_root: snapshot.workspace_root,
-                    initial_cwd: snapshot.cwd,
-                    created_at: "2026-05-20T00:00:00Z".to_string(),
-                },
-            ),
+            exagent::state::rollout::RolloutItem::ThreadMeta(exagent::state::rollout::ThreadMeta {
+                thread_id: thread_id.clone(),
+                workspace_root: snapshot.workspace_root,
+                initial_cwd: snapshot.cwd,
+                created_at: "2026-05-20T00:00:00Z".to_string(),
+            }),
             exagent::state::rollout::RolloutItem::ResponseItem(ConversationMessage::user(
                 "old user",
             )),
@@ -1950,14 +1948,12 @@ fn cold_thread_read_does_not_restore_historical_approval_as_waiting() {
     let store = exagent::state::rollout::RolloutStore::new(rollout_paths.rollout_path);
     store
         .append_items_blocking(&[
-            exagent::state::rollout::RolloutItem::ThreadMeta(
-                exagent::state::rollout::ThreadMeta {
-                    thread_id: thread_id.clone(),
-                    workspace_root: snapshot.workspace_root.clone(),
-                    initial_cwd: snapshot.cwd.clone(),
-                    created_at: "2026-05-20T00:00:00Z".to_string(),
-                },
-            ),
+            exagent::state::rollout::RolloutItem::ThreadMeta(exagent::state::rollout::ThreadMeta {
+                thread_id: thread_id.clone(),
+                workspace_root: snapshot.workspace_root.clone(),
+                initial_cwd: snapshot.cwd.clone(),
+                created_at: "2026-05-20T00:00:00Z".to_string(),
+            }),
             exagent::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
                 event_id: EventId::new("evt_1"),
                 thread_id: thread_id.clone(),
@@ -2027,14 +2023,12 @@ fn token_count_events_are_replayable_without_thread_view_items() {
     let store = exagent::state::rollout::RolloutStore::new(rollout_paths.rollout_path);
     store
         .append_items_blocking(&[
-            exagent::state::rollout::RolloutItem::ThreadMeta(
-                exagent::state::rollout::ThreadMeta {
-                    thread_id: thread_id.clone(),
-                    workspace_root: snapshot.workspace_root,
-                    initial_cwd: snapshot.cwd,
-                    created_at: "2026-05-20T00:00:00Z".to_string(),
-                },
-            ),
+            exagent::state::rollout::RolloutItem::ThreadMeta(exagent::state::rollout::ThreadMeta {
+                thread_id: thread_id.clone(),
+                workspace_root: snapshot.workspace_root,
+                initial_cwd: snapshot.cwd,
+                created_at: "2026-05-20T00:00:00Z".to_string(),
+            }),
             exagent::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
                 event_id: EventId::new("evt_1"),
                 thread_id: thread_id.clone(),

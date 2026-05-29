@@ -33,6 +33,7 @@ impl PromptContext {
                 policy_mode: config.policy_mode,
                 command_timeout_secs: config.command_timeout_secs,
                 max_output_bytes: config.max_output_bytes,
+                thinking_mode: config.thinking_mode,
                 current_utc_date: Some(current_utc_date()),
             },
         }
@@ -678,6 +679,7 @@ mod tests {
             policy_mode: PolicyMode::Off,
             command_timeout_secs: 30,
             max_output_bytes: 1024,
+            thinking_mode: None,
             current_utc_date: Some("2026-05-20".to_string()),
         };
         let items = vec![
@@ -729,6 +731,7 @@ mod tests {
             policy_mode: PolicyMode::Off,
             command_timeout_secs: 30,
             max_output_bytes: 1024,
+            thinking_mode: None,
             current_utc_date: Some("2026-05-20".to_string()),
         };
         let items = vec![

@@ -5,7 +5,7 @@ use anyhow::Result;
 
 use crate::config::AgentConfig;
 use crate::exec_session::ExecSessionManager;
-use crate::llm::LlmClient;
+use crate::llm::{LlmClient, LlmRequestOptions};
 use crate::policy::PolicyManager;
 use crate::registry::ToolRegistry;
 use crate::runtime::tool_call_runtime::ToolCallRuntime;
@@ -73,8 +73,9 @@ impl Agent {
         &self,
         prompt: &[ConversationMessage],
         tool_schemas: &[serde_json::Value],
+        options: &LlmRequestOptions,
     ) -> Result<LlmCompletion> {
-        self.llm.complete(prompt, tool_schemas).await
+        self.llm.complete(prompt, tool_schemas, options).await
     }
 
     pub(crate) fn tool_runtime(

@@ -59,6 +59,7 @@ fn apply_turn_context_rejects_cwd_outside_snapshot_workspace() {
         &snapshot,
         exagent::app_server::protocol::TurnContextOverrides {
             cwd: Some(outside.path().to_string_lossy().to_string()),
+            thinking_mode: None,
         },
     )
     .unwrap_err();

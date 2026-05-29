@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use exagent::agent::Agent;
 use exagent::config::AgentConfig;
 use exagent::events::{RuntimeEvent, RuntimeEventKind};
-use exagent::llm::{LlmClient, MockLlm};
+use exagent::llm::{LlmClient, LlmRequestOptions, MockLlm};
 use exagent::registry::ToolRegistry;
 use exagent::runtime::thread_runtime::{
     AgentFactory, ThreadOpResult, ThreadRuntime, ThreadRuntimeOptions, ThreadRuntimeStatus,
@@ -135,6 +135,7 @@ async fn thread_resume_reconstructs_context_from_rollout_without_snapshot() {
         policy_mode: exagent::policy::PolicyMode::Off,
         command_timeout_secs: 30,
         max_output_bytes: 1024,
+        thinking_mode: None,
         current_utc_date: Some("2026-05-20".to_string()),
     };
     let rollout_paths = rollout_paths(&config.workspace_root, &thread_id);
@@ -513,6 +514,7 @@ impl LlmClient for PanicLlm {
         &self,
         _messages: &[ConversationMessage],
         _tools: &[serde_json::Value],
+        _options: &LlmRequestOptions,
     ) -> anyhow::Result<LlmCompletion> {
         panic!("simulated llm panic to verify StoppedGuard");
     }

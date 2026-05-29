@@ -4,7 +4,9 @@ use anyhow::{anyhow, Result};
 
 use super::{LiveEventSink, RuntimeInterrupt, ThreadEventRecorder, ThreadSession};
 use crate::agent::Agent;
+use crate::config::{AgentConfig, ThinkingMode};
 use crate::events::RuntimeEventKind;
+use crate::llm::LlmRequestOptions;
 use crate::runtime::context::{ContextManager, PromptContext, TurnPaths};
 use crate::runtime::thread_runtime::{
     ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus, ThreadTurnContext,
@@ -37,7 +39,12 @@ impl ThreadSession {
         turn_context: Option<ThreadTurnContext>,
         interrupt: Option<RuntimeInterrupt>,
     ) -> Result<ThreadOpResult> {
-        let turn_cwd = turn_context.and_then(|context| context.cwd);
+        let turn_cwd = turn_context
+            .as_ref()
+            .and_then(|context| context.cwd.clone());
+        let turn_thinking_mode = turn_context
+            .as_ref()
+            .and_then(|context| context.thinking_mode);
 
         // Apply model-visible runtime context before the user message so the
         // sampling prompt has stable background for this turn.
@@ -66,7 +73,13 @@ impl ThreadSession {
             }
 
             let runtime_turn_cwd = turn_cwd.clone();
-            self.record_user_turn_start(&turn_id, prompt, turn_cwd, &mut snapshot)?;
+            self.record_user_turn_start(
+                &turn_id,
+                prompt,
+                turn_cwd,
+                turn_thinking_mode,
+                &mut snapshot,
+            )?;
             let Self {
                 agent,
                 recorder,
@@ -76,7 +89,7 @@ impl ThreadSession {
             } = self;
             let runtime_turn_id = turn_id.clone();
             tokio::select! {
-                result = run_session_turn(agent, recorder, rollout_store, context_manager, &mut snapshot, runtime_turn_id, runtime_turn_cwd) => {
+                result = run_session_turn(agent, recorder, rollout_store, context_manager, &mut snapshot, runtime_turn_id, runtime_turn_cwd, turn_thinking_mode) => {
                     match result {
                         Ok(turn) => turn,
                         Err(err) => {
@@ -102,7 +115,13 @@ impl ThreadSession {
             self.compact_before_turn_if_needed(&turn_id, &mut snapshot)
                 .await?;
             let runtime_turn_cwd = turn_cwd.clone();
-            self.record_user_turn_start(&turn_id, prompt, turn_cwd, &mut snapshot)?;
+            self.record_user_turn_start(
+                &turn_id,
+                prompt,
+                turn_cwd,
+                turn_thinking_mode,
+                &mut snapshot,
+            )?;
             let Self {
                 agent,
                 recorder,
@@ -118,6 +137,7 @@ impl ThreadSession {
                 &mut snapshot,
                 turn_id.clone(),
                 runtime_turn_cwd,
+                turn_thinking_mode,
             )
             .await
             {
@@ -151,13 +171,15 @@ impl ThreadSession {
         turn_id: &TurnId,
         prompt: String,
         turn_cwd: Option<PathBuf>,
+        turn_thinking_mode: Option<ThinkingMode>,
         snapshot: &mut ThreadSnapshot,
     ) -> Result<()> {
         // Apply model-visible runtime context before the user message so the
         // sampling prompt has stable background for this turn.
         let context_cwd = turn_cwd.unwrap_or_else(|| snapshot.cwd.clone());
+        let turn_config = config_for_turn(self.agent.config(), turn_thinking_mode);
         let prompt_context = PromptContext::for_turn(
-            self.agent.config(),
+            &turn_config,
             TurnPaths {
                 workspace_root: snapshot.workspace_root.clone(),
                 cwd: context_cwd,
@@ -229,6 +251,7 @@ async fn run_session_turn(
     snapshot: &mut ThreadSnapshot,
     runtime_turn_id: TurnId,
     turn_cwd: Option<PathBuf>,
+    turn_thinking_mode: Option<ThinkingMode>,
 ) -> Result<AssistantTurn> {
     let cwd = turn_cwd.clone().unwrap_or_else(|| snapshot.cwd.clone());
     let tool_runtime = agent.tool_runtime(
@@ -237,11 +260,14 @@ async fn run_session_turn(
         snapshot.workspace_root.clone(),
         cwd,
     );
+    let llm_options = LlmRequestOptions {
+        thinking_mode: turn_thinking_mode.or(agent.config().thinking_mode),
+    };
 
     for _ in 0..agent.max_turns() {
         let prompt = context_manager.for_prompt();
         let completion = match agent
-            .sample_assistant_turn(&prompt, &tool_runtime.schemas())
+            .sample_assistant_turn(&prompt, &tool_runtime.schemas(), &llm_options)
             .await
         {
             Ok(completion) => completion,
@@ -257,11 +283,12 @@ async fn run_session_turn(
                     snapshot,
                     &runtime_turn_id,
                     turn_cwd.as_ref(),
+                    turn_thinking_mode,
                 )
                 .await?;
                 let prompt = context_manager.for_prompt();
                 agent
-                    .sample_assistant_turn(&prompt, &tool_runtime.schemas())
+                    .sample_assistant_turn(&prompt, &tool_runtime.schemas(), &llm_options)
                     .await?
             }
             Err(err) => return Err(err),
@@ -313,6 +340,7 @@ async fn compact_after_context_window_error(
     snapshot: &mut ThreadSnapshot,
     turn_id: &TurnId,
     turn_cwd: Option<&PathBuf>,
+    turn_thinking_mode: Option<ThinkingMode>,
 ) -> Result<()> {
     let context_window = agent
         .config()
@@ -344,6 +372,7 @@ async fn compact_after_context_window_error(
         context_manager,
         snapshot,
         turn_cwd,
+        turn_thinking_mode,
         last_user_message,
     )
 }
@@ -354,11 +383,13 @@ fn restore_retry_context_after_compaction(
     context_manager: &mut ContextManager,
     snapshot: &mut ThreadSnapshot,
     turn_cwd: Option<&PathBuf>,
+    turn_thinking_mode: Option<ThinkingMode>,
     last_user_message: Option<ConversationMessage>,
 ) -> Result<()> {
     let context_cwd = turn_cwd.cloned().unwrap_or_else(|| snapshot.cwd.clone());
+    let turn_config = config_for_turn(agent.config(), turn_thinking_mode);
     let prompt_context = PromptContext::for_turn(
-        agent.config(),
+        &turn_config,
         TurnPaths {
             workspace_root: snapshot.workspace_root.clone(),
             cwd: context_cwd,
@@ -378,6 +409,14 @@ fn restore_retry_context_after_compaction(
     context_manager.sync_snapshot(snapshot);
     rollout_store.append_items_blocking(&rollout_items)?;
     Ok(())
+}
+
+fn config_for_turn(config: &AgentConfig, turn_thinking_mode: Option<ThinkingMode>) -> AgentConfig {
+    let mut config = config.clone();
+    if let Some(thinking_mode) = turn_thinking_mode {
+        config.thinking_mode = Some(thinking_mode);
+    }
+    config
 }
 
 fn record_compaction_checkpoint(
@@ -562,7 +601,7 @@ mod tests {
     use crate::agent::Agent;
     use crate::config::AgentConfig;
     use crate::events::RuntimeEventKind;
-    use crate::llm::{LlmClient, MockLlm};
+    use crate::llm::{LlmClient, LlmRequestOptions, MockLlm};
     use crate::registry::ToolRegistry;
     use crate::runtime::thread_runtime::{AgentFactory, ThreadOpResult};
     use crate::runtime::thread_session::{ThreadSession, ThreadSessionOptions};
@@ -632,6 +671,7 @@ mod tests {
             &self,
             messages: &[ConversationMessage],
             _tools: &[serde_json::Value],
+            _options: &LlmRequestOptions,
         ) -> Result<LlmCompletion> {
             self.prompt_lens.lock().unwrap().push(messages.len());
             if let Some(prompt_contents) = &self.prompt_contents {
@@ -667,6 +707,7 @@ mod tests {
             &self,
             messages: &[ConversationMessage],
             _tools: &[serde_json::Value],
+            _options: &LlmRequestOptions,
         ) -> Result<LlmCompletion> {
             self.prompt_contents.lock().unwrap().push(
                 messages

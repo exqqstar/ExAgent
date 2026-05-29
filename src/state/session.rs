@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::ThinkingMode;
 use crate::policy::PolicyMode;
 use crate::types::{ConversationMessage, EventId, ThreadId};
 
@@ -105,6 +106,8 @@ pub struct TurnContextItem {
     pub policy_mode: PolicyMode,
     pub command_timeout_secs: u64,
     pub max_output_bytes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_mode: Option<ThinkingMode>,
     #[serde(
         default,
         alias = "current_date",

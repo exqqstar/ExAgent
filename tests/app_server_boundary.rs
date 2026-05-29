@@ -7,9 +7,9 @@ use exagent::app_server::protocol::{
     TurnInterruptParams, TurnStartParams, TurnStatus,
 };
 use exagent::app_server::{AppServerError, AppServerService};
-use exagent::config::AgentConfig;
+use exagent::config::{AgentConfig, ThinkingMode};
 use exagent::events::{RuntimeEvent, RuntimeEventKind};
-use exagent::llm::{LlmClient, MockLlm};
+use exagent::llm::{LlmClient, LlmRequestOptions, MockLlm};
 use exagent::policy::PolicyMode;
 use exagent::registry::{ToolContext, ToolRegistry};
 use exagent::session::{ApprovalId, ThreadSnapshot};
@@ -27,6 +27,10 @@ use tokio::sync::Notify;
 struct BlockingLlm {
     started: Arc<Notify>,
     release: Arc<Notify>,
+}
+
+struct RecordingOptionsLlm {
+    observed_thinking_modes: Arc<Mutex<Vec<Option<ThinkingMode>>>>,
 }
 
 #[derive(Clone)]
@@ -66,11 +70,32 @@ impl LlmClient for BlockingLlm {
         &self,
         _messages: &[ConversationMessage],
         _tools: &[serde_json::Value],
+        _options: &LlmRequestOptions,
     ) -> Result<LlmCompletion> {
         self.started.notify_one();
         self.release.notified().await;
         Ok(AssistantTurn {
             text: Some("released turn".into()),
+            tool_calls: vec![],
+        }
+        .into_completion())
+    }
+}
+
+#[async_trait]
+impl LlmClient for RecordingOptionsLlm {
+    async fn complete(
+        &self,
+        _messages: &[ConversationMessage],
+        _tools: &[serde_json::Value],
+        options: &LlmRequestOptions,
+    ) -> Result<LlmCompletion> {
+        self.observed_thinking_modes
+            .lock()
+            .unwrap()
+            .push(options.thinking_mode);
+        Ok(AssistantTurn {
+            text: Some("recorded options".into()),
             tool_calls: vec![],
         }
         .into_completion())
@@ -676,6 +701,7 @@ async fn turn_start_applies_validated_context_override_with_user_input() {
             workspace_root: None,
             turn_context: Some(TurnContextOverrides {
                 cwd: Some("turn-cwd".into()),
+                thinking_mode: None,
             }),
         })
         .await
@@ -741,6 +767,7 @@ async fn turn_context_cwd_is_used_for_tools_without_becoming_thread_cwd() {
             workspace_root: None,
             turn_context: Some(TurnContextOverrides {
                 cwd: Some("turn-cwd".into()),
+                thinking_mode: None,
             }),
         })
         .await
@@ -753,6 +780,69 @@ async fn turn_context_cwd_is_used_for_tools_without_becoming_thread_cwd() {
     );
     let snapshot = read_thread_snapshot(dir.path(), &thread.thread);
     assert_eq!(snapshot.cwd, std::fs::canonicalize(original_cwd).unwrap());
+}
+
+#[tokio::test]
+async fn turn_context_thinking_mode_reaches_llm_without_mutating_later_turns() {
+    let dir = tempdir().unwrap();
+    let observed_thinking_modes = Arc::new(Mutex::new(Vec::new()));
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            thinking_mode: Some(ThinkingMode::Low),
+            ..AgentConfig::default()
+        },
+        Box::new(RecordingOptionsLlm {
+            observed_thinking_modes: observed_thinking_modes.clone(),
+        }),
+        ToolRegistry::new,
+    );
+
+    let thread = service
+        .thread_start(ThreadStartParams {
+            workspace_root: None,
+            cwd: None,
+        })
+        .unwrap();
+    let first = service
+        .turn_start(TurnStartParams {
+            thread_id: thread.thread.id.clone(),
+            prompt: "run with high thinking".into(),
+            workspace_root: None,
+            turn_context: Some(TurnContextOverrides {
+                cwd: None,
+                thinking_mode: Some(ThinkingMode::High),
+            }),
+        })
+        .await
+        .unwrap();
+    wait_for_turn_completed(&service, &thread.thread.id, &first.turn.id).await;
+
+    let snapshot = read_thread_snapshot(dir.path(), &thread.thread);
+    assert_eq!(
+        snapshot
+            .reference_turn_context
+            .as_ref()
+            .and_then(|context| context.thinking_mode),
+        Some(ThinkingMode::High)
+    );
+
+    let second = service
+        .turn_start(TurnStartParams {
+            thread_id: thread.thread.id.clone(),
+            prompt: "run with default thinking".into(),
+            workspace_root: None,
+            turn_context: None,
+        })
+        .await
+        .unwrap();
+    wait_for_turn_completed(&service, &thread.thread.id, &second.turn.id).await;
+
+    assert_eq!(
+        observed_thinking_modes.lock().unwrap().as_slice(),
+        [Some(ThinkingMode::High), Some(ThinkingMode::Low)]
+    );
 }
 
 #[tokio::test]
@@ -785,6 +875,7 @@ async fn turn_start_rejects_invalid_context_override_before_accepting_input() {
             workspace_root: None,
             turn_context: Some(TurnContextOverrides {
                 cwd: Some(outside.path().to_string_lossy().to_string()),
+                thinking_mode: None,
             }),
         })
         .await
@@ -823,6 +914,7 @@ async fn legacy_run_compatibility_uses_thread_and_turn_lifecycle() {
             workspace_root: None,
             cwd: None,
             thread_id: None,
+            thinking_mode: None,
         })
         .await
         .unwrap();
@@ -1232,6 +1324,7 @@ async fn legacy_run_resume_ignores_cwd_override_and_keeps_thread_snapshot_cwd() 
             workspace_root: None,
             cwd: Some("ignored-cwd".into()),
             thread_id: Some(thread.thread.id.clone()),
+            thinking_mode: None,
         })
         .await
         .unwrap();
@@ -1660,6 +1753,7 @@ async fn rejected_concurrent_turn_context_does_not_mutate_thread_snapshot() {
             workspace_root: None,
             turn_context: Some(TurnContextOverrides {
                 cwd: Some("rejected-cwd".into()),
+                thinking_mode: None,
             }),
         })
         .await

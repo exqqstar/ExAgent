@@ -6,7 +6,7 @@ use std::future::Future;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 
 use crate::agent::Agent;
-use crate::config::AgentConfig;
+use crate::config::{AgentConfig, ThinkingMode};
 use crate::events::RuntimeEvent;
 use crate::policy::PolicyManager;
 use crate::runtime::thread_session::{
@@ -45,6 +45,7 @@ pub enum ThreadRuntimeStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadTurnContext {
     pub cwd: Option<PathBuf>,
+    pub thinking_mode: Option<ThinkingMode>,
 }
 
 #[derive(Debug, Clone)]

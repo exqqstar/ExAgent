@@ -6,9 +6,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
+use crate::config::ThinkingMode;
 use crate::types::{
     AssistantTurn, ConversationMessage, LlmCompletion, MessageRole, TokenUsage, ToolCall,
 };
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LlmRequestOptions {
+    pub thinking_mode: Option<ThinkingMode>,
+}
 
 #[async_trait]
 pub trait LlmClient: Send + Sync {
@@ -16,6 +22,7 @@ pub trait LlmClient: Send + Sync {
         &self,
         messages: &[ConversationMessage],
         tools: &[serde_json::Value],
+        options: &LlmRequestOptions,
     ) -> Result<LlmCompletion>;
 }
 
@@ -58,6 +65,7 @@ impl LlmClient for MockLlm {
         &self,
         _messages: &[ConversationMessage],
         _tools: &[serde_json::Value],
+        _options: &LlmRequestOptions,
     ) -> Result<LlmCompletion> {
         self.completions
             .lock()
@@ -143,12 +151,9 @@ impl LlmClient for OpenAiCompatibleLlm {
         &self,
         messages: &[ConversationMessage],
         tools: &[serde_json::Value],
+        options: &LlmRequestOptions,
     ) -> Result<LlmCompletion> {
-        let request = ChatCompletionRequest {
-            model: self.model.clone(),
-            messages: build_request_messages(messages)?,
-            tools: build_request_tools(tools)?,
-        };
+        let request = build_chat_completion_request(self.model.clone(), messages, tools, options)?;
 
         let response = self
             .client
@@ -185,6 +190,8 @@ struct ChatCompletionRequest {
     messages: Vec<ChatRequestMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ChatRequestTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -326,6 +333,32 @@ fn chat_completions_endpoint(base_url: &str) -> String {
     }
 }
 
+fn build_chat_completion_request(
+    model: String,
+    messages: &[ConversationMessage],
+    tools: &[Value],
+    options: &LlmRequestOptions,
+) -> Result<ChatCompletionRequest> {
+    Ok(ChatCompletionRequest {
+        model,
+        messages: build_request_messages(messages)?,
+        tools: build_request_tools(tools)?,
+        reasoning_effort: options
+            .thinking_mode
+            .and_then(reasoning_effort_for_thinking_mode)
+            .map(str::to_string),
+    })
+}
+
+fn reasoning_effort_for_thinking_mode(mode: ThinkingMode) -> Option<&'static str> {
+    match mode {
+        ThinkingMode::Auto => None,
+        ThinkingMode::Low => Some("low"),
+        ThinkingMode::Medium => Some("medium"),
+        ThinkingMode::High => Some("high"),
+    }
+}
+
 fn build_request_tools(tools: &[Value]) -> Result<Vec<ChatRequestTool>> {
     tools
         .iter()
@@ -383,4 +416,55 @@ fn build_request_messages(messages: &[ConversationMessage]) -> Result<Vec<ChatRe
             }),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ThinkingMode;
+
+    #[test]
+    fn chat_completion_request_serializes_reasoning_effort_when_thinking_mode_is_set() {
+        let request = build_chat_completion_request(
+            "gpt-thinking".to_string(),
+            &[],
+            &[],
+            &LlmRequestOptions {
+                thinking_mode: Some(ThinkingMode::High),
+            },
+        )
+        .unwrap();
+
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn chat_completion_request_omits_reasoning_effort_when_thinking_mode_is_auto_or_unset() {
+        let auto = build_chat_completion_request(
+            "gpt-thinking".to_string(),
+            &[],
+            &[],
+            &LlmRequestOptions {
+                thinking_mode: Some(ThinkingMode::Auto),
+            },
+        )
+        .unwrap();
+        let unset = build_chat_completion_request(
+            "gpt-thinking".to_string(),
+            &[],
+            &[],
+            &LlmRequestOptions::default(),
+        )
+        .unwrap();
+
+        assert!(serde_json::to_value(auto)
+            .unwrap()
+            .get("reasoning_effort")
+            .is_none());
+        assert!(serde_json::to_value(unset)
+            .unwrap()
+            .get("reasoning_effort")
+            .is_none());
+    }
 }

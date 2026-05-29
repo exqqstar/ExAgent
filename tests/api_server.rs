@@ -13,6 +13,7 @@ use exagent::app_server::protocol::{
 };
 use exagent::app_server::{AppServerBoundary, AppServerError};
 use exagent::cli::{parse_cli_command, CliCommand};
+use exagent::config::ThinkingMode;
 use exagent::events::{RuntimeEvent, RuntimeEventKind};
 use exagent::types::{AssistantTurn, EventId, ThreadId, ToolCall, TurnId};
 use serde_json::{json, Value};
@@ -53,6 +54,7 @@ impl AppServerBoundary for StubBoundary {
             params.thread_id.as_ref().map(ThreadId::as_str),
             Some("thread_123")
         );
+        assert_eq!(params.thinking_mode, Some(ThinkingMode::Medium));
         Ok(self.response.clone())
     }
 
@@ -86,6 +88,13 @@ impl AppServerBoundary for StubBoundary {
         assert_eq!(params.thread_id.as_str(), "thread_123");
         assert_eq!(params.prompt, "continue phase2");
         assert_eq!(params.workspace_root.as_deref(), Some("."));
+        assert_eq!(
+            params
+                .turn_context
+                .as_ref()
+                .and_then(|context| context.thinking_mode),
+            Some(ThinkingMode::High)
+        );
         Ok(self.turn_start_response.clone())
     }
 
@@ -293,7 +302,8 @@ async fn run_route_accepts_existing_thread_id() {
             "prompt": "continue phase2",
             "workspace_root": ".",
             "cwd": ".",
-            "thread_id": "thread_123"
+            "thread_id": "thread_123",
+            "thinking_mode": "medium"
         }),
     )
     .await;
@@ -413,7 +423,10 @@ async fn turn_start_route_accepts_thread_id_and_prompt() {
         json!({
             "thread_id": "thread_123",
             "prompt": "continue phase2",
-            "workspace_root": "."
+            "workspace_root": ".",
+            "turn_context": {
+                "thinking_mode": "high"
+            }
         }),
     )
     .await;

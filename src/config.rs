@@ -1,10 +1,22 @@
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::policy::PolicyMode;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingMode {
+    Auto,
+    Low,
+    Medium,
+    High,
+}
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub model: String,
+    pub thinking_mode: Option<ThinkingMode>,
     pub max_turns: usize,
     pub workspace_root: PathBuf,
     pub cwd: PathBuf,
@@ -37,6 +49,7 @@ impl Default for AgentConfig {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self {
             model: std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4.1".to_string()),
+            thinking_mode: parse_optional_thinking_mode_env("EXAGENT_THINKING_MODE"),
             max_turns: 12,
             workspace_root: cwd.clone(),
             cwd,
@@ -58,9 +71,25 @@ fn parse_optional_i64_env(key: &str) -> Option<i64> {
         .and_then(|value| parse_positive_i64(value.trim()))
 }
 
+fn parse_optional_thinking_mode_env(key: &str) -> Option<ThinkingMode> {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| parse_thinking_mode_value(value.trim()))
+}
+
 fn parse_positive_i64(value: &str) -> Option<i64> {
     let parsed = value.trim().parse::<i64>().ok()?;
     (parsed > 0).then_some(parsed)
+}
+
+fn parse_thinking_mode_value(value: &str) -> Option<ThinkingMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(ThinkingMode::Auto),
+        "low" => Some(ThinkingMode::Low),
+        "medium" => Some(ThinkingMode::Medium),
+        "high" => Some(ThinkingMode::High),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -137,5 +166,23 @@ mod tests {
         assert_eq!(parse_positive_i64("abc"), None);
         assert_eq!(parse_positive_i64("0"), None);
         assert_eq!(parse_positive_i64("-1"), None);
+    }
+
+    #[test]
+    fn thinking_mode_values_accept_known_modes() {
+        assert_eq!(parse_thinking_mode_value("auto"), Some(ThinkingMode::Auto));
+        assert_eq!(parse_thinking_mode_value("low"), Some(ThinkingMode::Low));
+        assert_eq!(
+            parse_thinking_mode_value("medium"),
+            Some(ThinkingMode::Medium)
+        );
+        assert_eq!(parse_thinking_mode_value("high"), Some(ThinkingMode::High));
+    }
+
+    #[test]
+    fn thinking_mode_values_ignore_invalid_or_empty_values() {
+        assert_eq!(parse_thinking_mode_value(""), None);
+        assert_eq!(parse_thinking_mode_value("none"), None);
+        assert_eq!(parse_thinking_mode_value("maximum"), None);
     }
 }

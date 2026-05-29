@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::ThinkingMode;
 use crate::events::RuntimeEvent;
 use crate::session::CompactionSummary;
 use crate::types::{EventId, ThreadId, ToolCall, TurnId};
@@ -39,12 +40,14 @@ pub struct AgentRunResponse {
     pub thread_id: ThreadId,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunParams {
     pub prompt: String,
     pub workspace_root: Option<String>,
     pub cwd: Option<String>,
     pub thread_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_mode: Option<ThinkingMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -167,6 +170,8 @@ pub struct ThreadResumeResponse {
 pub struct TurnContextOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_mode: Option<ThinkingMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

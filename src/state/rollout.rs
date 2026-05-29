@@ -292,6 +292,7 @@ mod tests {
             policy_mode: crate::policy::PolicyMode::Off,
             command_timeout_secs: 30,
             max_output_bytes: 1024,
+            thinking_mode: None,
             current_utc_date: Some("2026-05-20".to_string()),
         });
         let compacted = RolloutItem::Compacted(CompactedItem {

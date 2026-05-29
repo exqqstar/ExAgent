@@ -13,15 +13,15 @@ use crate::app_server::protocol::{
     EventsReplayResponse, EventsSubscribeParams, IgnoredOverrideField, InitializeParams,
     InitializeResponse, ReplaySnapshotView, RunParams, RuntimeEventKindFilter, ThreadItem,
     ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
-    ThreadStartParams, ThreadStartResponse, ThreadStatus, ThreadView, TurnInterruptParams,
-    TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnState, TurnStatus, TurnView,
-    BOUNDARY_PROTOCOL_VERSION,
+    ThreadStartParams, ThreadStartResponse, ThreadStatus, ThreadView, TurnContextOverrides,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnState,
+    TurnStatus, TurnView, BOUNDARY_PROTOCOL_VERSION,
 };
 use crate::app_server::AppServerError;
 use crate::config::AgentConfig;
 use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::exec_session::ExecSessionManager;
-use crate::llm::{LlmClient, OpenAiCompatibleLlm};
+use crate::llm::{LlmClient, LlmRequestOptions, OpenAiCompatibleLlm};
 use crate::policy::PolicyManager;
 use crate::registry::ToolRegistry;
 use crate::runtime::thread_runtime::{
@@ -74,8 +74,9 @@ impl LlmClient for SharedLlmClient {
         &self,
         messages: &[crate::types::ConversationMessage],
         tools: &[serde_json::Value],
+        options: &LlmRequestOptions,
     ) -> Result<LlmCompletion> {
-        self.llm.complete(messages, tools).await
+        self.llm.complete(messages, tools, options).await
     }
 }
 
@@ -159,6 +160,7 @@ impl ThreadManager {
 
     pub async fn run(&self, params: RunParams) -> Result<AgentRunResponse> {
         let workspace_root = params.workspace_root.clone();
+        let thinking_mode = params.thinking_mode;
         let thread_id = match params.thread_id {
             Some(thread_id) => {
                 self.thread_resume(ThreadResumeParams {
@@ -183,7 +185,10 @@ impl ThreadManager {
             thread_id,
             prompt: params.prompt,
             workspace_root,
-            turn_context: None,
+            turn_context: thinking_mode.map(|thinking_mode| TurnContextOverrides {
+                cwd: None,
+                thinking_mode: Some(thinking_mode),
+            }),
         })
         .await
     }
@@ -414,19 +419,10 @@ impl ThreadManager {
         let turn_id = runtime.next_turn_id();
         let live_view = runtime.live_view();
         let runtime_workspace_root = live_view.snapshot.workspace_root.clone();
-        let turn_cwd = if let Some(turn_context) = params.turn_context {
-            let snapshot = OverridePolicy::apply_turn_context(&live_view.snapshot, turn_context)?;
-            Some(snapshot.cwd)
-        } else {
-            None
-        };
+        let turn_context = resolve_turn_context(&live_view.snapshot, params.turn_context)?;
         let prompt = params.prompt;
         let result = runtime
-            .submit_user_input_and_wait(
-                turn_id.clone(),
-                prompt,
-                turn_cwd.map(|cwd| ThreadTurnContext { cwd: Some(cwd) }),
-            )
+            .submit_user_input_and_wait(turn_id.clone(), prompt, turn_context)
             .await
             .map_err(map_thread_runtime_error)?;
         let ThreadOpResult::UserInput { final_turn, .. } = result else {
@@ -447,18 +443,9 @@ impl ThreadManager {
         let runtime = self.ensure_runtime_loaded(&thread_id, config, requested_workspace_root)?;
         let turn_id = runtime.next_turn_id();
         let live_view = runtime.live_view();
-        let turn_cwd = if let Some(turn_context) = params.turn_context {
-            let snapshot = OverridePolicy::apply_turn_context(&live_view.snapshot, turn_context)?;
-            Some(snapshot.cwd)
-        } else {
-            None
-        };
+        let turn_context = resolve_turn_context(&live_view.snapshot, params.turn_context)?;
         runtime
-            .submit_user_input(
-                turn_id.clone(),
-                params.prompt,
-                turn_cwd.map(|cwd| ThreadTurnContext { cwd: Some(cwd) }),
-            )
+            .submit_user_input(turn_id.clone(), params.prompt, turn_context)
             .await
             .map_err(map_thread_runtime_error)?;
 
@@ -675,6 +662,21 @@ impl ThreadManager {
                 status: TurnStatus::InProgress,
             })
     }
+}
+
+fn resolve_turn_context(
+    snapshot: &ThreadSnapshot,
+    overrides: Option<TurnContextOverrides>,
+) -> Result<Option<ThreadTurnContext>> {
+    let Some(overrides) = overrides else {
+        return Ok(None);
+    };
+    let thinking_mode = overrides.thinking_mode;
+    let resolved_snapshot = OverridePolicy::apply_turn_context(snapshot, overrides)?;
+    Ok(Some(ThreadTurnContext {
+        cwd: Some(resolved_snapshot.cwd),
+        thinking_mode,
+    }))
 }
 
 fn ignored_resume_overrides(params: &ThreadResumeParams) -> Vec<IgnoredOverrideField> {

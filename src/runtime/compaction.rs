@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 
+use crate::llm::LlmRequestOptions;
 use crate::runtime::agent::Agent;
 use crate::types::ConversationMessage;
 
@@ -19,7 +20,15 @@ pub(crate) async fn compact_history(
     history: &[ConversationMessage],
 ) -> Result<CompactionResult> {
     let prompt = build_compaction_prompt(history)?;
-    let completion = agent.sample_assistant_turn(&prompt, &[]).await?;
+    let completion = agent
+        .sample_assistant_turn(
+            &prompt,
+            &[],
+            &LlmRequestOptions {
+                thinking_mode: agent.config().thinking_mode,
+            },
+        )
+        .await?;
     let summary = completion.turn.text.unwrap_or_default().trim().to_string();
     if summary.is_empty() {
         return Err(anyhow!("empty compaction summary"));
@@ -85,6 +94,7 @@ mod tests {
             &self,
             messages: &[ConversationMessage],
             _tools: &[serde_json::Value],
+            _options: &crate::llm::LlmRequestOptions,
         ) -> Result<LlmCompletion> {
             self.prompts
                 .lock()

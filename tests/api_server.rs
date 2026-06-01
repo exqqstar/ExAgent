@@ -4,12 +4,12 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use exagent::api::build_router;
 use exagent::app_server::protocol::{
-    AgentRunResponse, BoundaryCapability, BoundaryOp, BoundaryOpResponse, EventsReplayParams,
-    EventsReplayResponse, EventsSubscribeParams, IgnoredOverrideField, InitializeResponse,
-    RunParams, ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
-    ThreadStartParams, ThreadStartResponse, ThreadStatus, ThreadView, TurnInterruptParams,
-    TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnStatus, TurnView,
-    BOUNDARY_PROTOCOL_VERSION,
+    AgentRunResponse, ApprovalDecisionParams, ApprovalDecisionResponse, BoundaryCapability,
+    BoundaryOp, BoundaryOpResponse, EventsReplayParams, EventsReplayResponse,
+    EventsSubscribeParams, IgnoredOverrideField, InitializeResponse, RunParams, ThreadReadParams,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
+    ThreadStartResponse, ThreadStatus, ThreadView, TurnInterruptParams, TurnInterruptResponse,
+    TurnStartParams, TurnStartResponse, TurnStatus, TurnView, BOUNDARY_PROTOCOL_VERSION,
 };
 use exagent::app_server::{AppServerBoundary, AppServerError};
 use exagent::cli::{parse_cli_command, CliCommand};
@@ -92,6 +92,14 @@ impl AppServerBoundary for StubBoundary {
             params
                 .turn_context
                 .as_ref()
+                .and_then(|context| context.model.as_ref())
+                .map(|model| model.model_id.as_str()),
+            Some("gpt-4.1-mini")
+        );
+        assert_eq!(
+            params
+                .turn_context
+                .as_ref()
                 .and_then(|context| context.thinking_mode),
             Some(ThinkingMode::High)
         );
@@ -113,6 +121,17 @@ impl AppServerBoundary for StubBoundary {
                 status: TurnStatus::Interrupted,
             }),
         })
+    }
+
+    async fn approval_decision(
+        &self,
+        _params: ApprovalDecisionParams,
+    ) -> anyhow::Result<ApprovalDecisionResponse> {
+        self.calls.lock().unwrap().push("approval_decision".into());
+        Err(AppServerError::InvalidRequest(
+            "approval decision is not used in these API tests".into(),
+        )
+        .into())
     }
 
     async fn submit_boundary_op(&self, op: BoundaryOp) -> anyhow::Result<BoundaryOpResponse> {
@@ -212,6 +231,13 @@ impl AppServerBoundary for ErrorBoundary {
         Err(self.error())
     }
 
+    async fn approval_decision(
+        &self,
+        _params: ApprovalDecisionParams,
+    ) -> anyhow::Result<ApprovalDecisionResponse> {
+        Err(self.error())
+    }
+
     async fn submit_boundary_op(&self, _op: BoundaryOp) -> anyhow::Result<BoundaryOpResponse> {
         Err(self.error())
     }
@@ -273,6 +299,7 @@ async fn initialize_route_returns_protocol_capabilities() {
                 "thread_read",
                 "turn_start",
                 "turn_interrupt",
+                "approval_decision",
                 "events_replay"
             ],
             "supported_streams": ["events_subscribe"]
@@ -425,6 +452,10 @@ async fn turn_start_route_accepts_thread_id_and_prompt() {
             "prompt": "continue phase2",
             "workspace_root": ".",
             "turn_context": {
+                "model": {
+                    "provider_id": "openai",
+                    "model_id": "gpt-4.1-mini"
+                },
                 "thinking_mode": "high"
             }
         }),
@@ -677,6 +708,7 @@ fn sample_initialize_response() -> InitializeResponse {
             BoundaryCapability::ThreadRead,
             BoundaryCapability::TurnStart,
             BoundaryCapability::TurnInterrupt,
+            BoundaryCapability::ApprovalDecision,
             BoundaryCapability::EventsReplay,
         ],
         supported_streams: vec![BoundaryCapability::EventsSubscribe],

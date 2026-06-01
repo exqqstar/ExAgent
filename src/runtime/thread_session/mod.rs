@@ -81,6 +81,7 @@ impl ThreadSessionOptions {
 pub struct ThreadSession {
     thread_id: ThreadId,
     agent: Agent,
+    agent_factory: AgentFactory,
     recorder: ThreadEventRecorder,
     rollout_store: RolloutStore,
     context_manager: ContextManager,
@@ -171,6 +172,7 @@ impl ThreadSession {
         Ok(Self {
             thread_id,
             agent,
+            agent_factory,
             recorder,
             rollout_store,
             context_manager,

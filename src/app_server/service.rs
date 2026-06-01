@@ -1,18 +1,22 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::broadcast;
 
 use crate::app_server::protocol::{
-    AgentRunResponse, BoundaryOp, BoundaryOpResponse, EventsReplayParams, EventsReplayResponse,
-    EventsSubscribeParams, RunParams, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, TurnInterruptParams,
-    TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    AgentRunResponse, ApprovalDecisionParams, ApprovalDecisionResponse, BoundaryOp,
+    BoundaryOpResponse, EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, RunParams,
+    ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
+    ThreadStartParams, ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse,
+    TurnStartParams, TurnStartResponse,
 };
 use crate::app_server::ThreadManager;
 use crate::config::AgentConfig;
 use crate::events::RuntimeEvent;
 use crate::llm::LlmClient;
 use crate::registry::ToolRegistry;
+use crate::resolver::ModelResolver;
 
 #[async_trait]
 pub trait AppServerBoundary: Send + Sync {
@@ -22,6 +26,10 @@ pub trait AppServerBoundary: Send + Sync {
     async fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse>;
     async fn turn_start(&self, params: TurnStartParams) -> Result<TurnStartResponse>;
     async fn turn_interrupt(&self, params: TurnInterruptParams) -> Result<TurnInterruptResponse>;
+    async fn approval_decision(
+        &self,
+        params: ApprovalDecisionParams,
+    ) -> Result<ApprovalDecisionResponse>;
     async fn submit_boundary_op(&self, op: BoundaryOp) -> Result<BoundaryOpResponse>;
     async fn events_replay(&self, params: EventsReplayParams) -> Result<EventsReplayResponse>;
     async fn events_subscribe(
@@ -53,12 +61,40 @@ impl AppServerService {
         }
     }
 
+    pub fn with_config_and_model_resolver(
+        config: AgentConfig,
+        model_resolver: Arc<dyn ModelResolver>,
+    ) -> Self {
+        Self {
+            thread_manager: ThreadManager::with_model_resolver(config, model_resolver),
+        }
+    }
+
     pub fn with_llm<F>(config: AgentConfig, llm: Box<dyn LlmClient>, registry_factory: F) -> Self
     where
         F: Fn() -> ToolRegistry + Send + Sync + 'static,
     {
         Self {
             thread_manager: ThreadManager::with_llm(config, llm, registry_factory),
+        }
+    }
+
+    pub fn with_llm_and_model_resolver<F>(
+        config: AgentConfig,
+        llm: Box<dyn LlmClient>,
+        registry_factory: F,
+        model_resolver: Arc<dyn ModelResolver>,
+    ) -> Self
+    where
+        F: Fn() -> ToolRegistry + Send + Sync + 'static,
+    {
+        Self {
+            thread_manager: ThreadManager::with_llm_and_model_resolver(
+                config,
+                llm,
+                registry_factory,
+                model_resolver,
+            ),
         }
     }
 
@@ -87,6 +123,13 @@ impl AppServerService {
         params: TurnInterruptParams,
     ) -> Result<TurnInterruptResponse> {
         self.thread_manager.turn_interrupt(params).await
+    }
+
+    pub async fn approval_decision(
+        &self,
+        params: ApprovalDecisionParams,
+    ) -> Result<ApprovalDecisionResponse> {
+        self.thread_manager.approval_decision(params).await
     }
 
     pub async fn submit_boundary_op(&self, op: BoundaryOp) -> Result<BoundaryOpResponse> {
@@ -129,6 +172,13 @@ impl AppServerBoundary for AppServerService {
 
     async fn turn_interrupt(&self, params: TurnInterruptParams) -> Result<TurnInterruptResponse> {
         self.turn_interrupt(params).await
+    }
+
+    async fn approval_decision(
+        &self,
+        params: ApprovalDecisionParams,
+    ) -> Result<ApprovalDecisionResponse> {
+        self.approval_decision(params).await
     }
 
     async fn submit_boundary_op(&self, op: BoundaryOp) -> Result<BoundaryOpResponse> {

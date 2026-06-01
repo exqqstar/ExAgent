@@ -262,6 +262,7 @@ impl RolloutStore {
 mod tests {
     use super::*;
     use crate::events::{RuntimeEvent, RuntimeEventKind};
+    use crate::resolved::ModelRef;
     use crate::session::{ApprovalId, TurnContextItem};
     use crate::types::{
         ConversationMessage, EventId, ThreadId, TokenUsage, TokenUsageInfo, TurnId,
@@ -288,7 +289,7 @@ mod tests {
         let context = RolloutItem::TurnContext(TurnContextItem {
             workspace_root: PathBuf::from("/workspace"),
             cwd: PathBuf::from("/workspace"),
-            model: "mock".to_string(),
+            model: ModelRef::new("openai", "mock"),
             policy_mode: crate::policy::PolicyMode::Off,
             command_timeout_secs: 30,
             max_output_bytes: 1024,

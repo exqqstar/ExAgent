@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::model::resolved::ResolvedModelConfig;
 use crate::policy::PolicyMode;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -15,20 +16,19 @@ pub enum ThinkingMode {
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
-    pub model: String,
+    pub model: ResolvedModelConfig,
     pub thinking_mode: Option<ThinkingMode>,
     pub workspace_root: PathBuf,
     pub cwd: PathBuf,
     pub command_timeout_secs: u64,
     pub max_output_bytes: usize,
     pub policy_mode: PolicyMode,
-    pub model_context_window: Option<i64>,
     pub auto_compact_token_limit: Option<i64>,
 }
 
 impl AgentConfig {
     pub fn resolved_auto_compact_token_limit(&self) -> Option<i64> {
-        let context_limit = self.model_context_window.map(ninety_percent);
+        let context_limit = self.model.capabilities.context_window.map(ninety_percent);
 
         match (self.auto_compact_token_limit, context_limit) {
             (Some(configured), Some(context_limit)) => Some(configured.min(context_limit)),
@@ -47,7 +47,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self {
-            model: std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4.1".to_string()),
+            model: ResolvedModelConfig::default(),
             thinking_mode: parse_optional_thinking_mode_env("EXAGENT_THINKING_MODE"),
             workspace_root: cwd.clone(),
             cwd,
@@ -57,7 +57,6 @@ impl Default for AgentConfig {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or_default(),
-            model_context_window: parse_optional_i64_env("EXAGENT_MODEL_CONTEXT_WINDOW"),
             auto_compact_token_limit: parse_optional_i64_env("EXAGENT_AUTO_COMPACT_TOKEN_LIMIT"),
         }
     }
@@ -94,62 +93,86 @@ fn parse_thinking_mode_value(value: &str) -> Option<ThinkingMode> {
 mod tests {
     use super::*;
 
+    use crate::model::provider::ProviderProtocol;
+    use crate::model::resolved::ResolvedCredential;
+
     #[test]
     fn auto_compact_limit_uses_explicit_limit_without_context_window() {
-        let config = AgentConfig {
+        let mut config = AgentConfig {
             auto_compact_token_limit: Some(32_000),
-            model_context_window: None,
             ..AgentConfig::default()
         };
+        config.model.capabilities.context_window = None;
 
         assert_eq!(config.resolved_auto_compact_token_limit(), Some(32_000));
     }
 
     #[test]
     fn auto_compact_limit_derives_ninety_percent_of_context_window() {
-        let config = AgentConfig {
+        let mut config = AgentConfig {
             auto_compact_token_limit: None,
-            model_context_window: Some(100_000),
             ..AgentConfig::default()
         };
+        config.model.capabilities.context_window = Some(100_000);
 
         assert_eq!(config.resolved_auto_compact_token_limit(), Some(90_000));
     }
 
     #[test]
     fn auto_compact_limit_clamps_explicit_limit_to_context_window_headroom() {
-        let config = AgentConfig {
+        let mut config = AgentConfig {
             auto_compact_token_limit: Some(95_000),
-            model_context_window: Some(100_000),
             ..AgentConfig::default()
         };
+        config.model.capabilities.context_window = Some(100_000);
 
         assert_eq!(config.resolved_auto_compact_token_limit(), Some(90_000));
     }
 
     #[test]
     fn auto_compact_limit_is_none_without_limit_or_context_window() {
-        let config = AgentConfig {
+        let mut config = AgentConfig {
             auto_compact_token_limit: None,
-            model_context_window: None,
             ..AgentConfig::default()
         };
+        config.model.capabilities.context_window = None;
 
         assert_eq!(config.resolved_auto_compact_token_limit(), None);
     }
 
     #[test]
     fn auto_compact_limit_handles_large_context_window_without_overflow() {
-        let config = AgentConfig {
+        let mut config = AgentConfig {
             auto_compact_token_limit: None,
-            model_context_window: Some(i64::MAX),
             ..AgentConfig::default()
         };
+        config.model.capabilities.context_window = Some(i64::MAX);
 
         assert_eq!(
             config.resolved_auto_compact_token_limit(),
             Some(((i64::MAX as i128 * 9) / 10) as i64)
         );
+    }
+
+    #[test]
+    fn default_agent_config_has_resolved_openai_model_without_env_secret() {
+        let previous = std::env::var("OPENAI_API_KEY").ok();
+        std::env::set_var("OPENAI_API_KEY", "sk-env");
+
+        let config = AgentConfig::default();
+
+        assert_eq!(config.model.identity.provider_id, "openai");
+        assert_eq!(config.model.identity.model_id, "gpt-4.1");
+        assert_eq!(
+            config.model.protocol,
+            ProviderProtocol::OpenAiChatCompletions
+        );
+        assert_eq!(config.model.credential, ResolvedCredential::None);
+
+        match previous {
+            Some(value) => std::env::set_var("OPENAI_API_KEY", value),
+            None => std::env::remove_var("OPENAI_API_KEY"),
+        }
     }
 
     #[test]

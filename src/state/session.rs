@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
+use serde::de;
 use serde::{Deserialize, Serialize};
 
 use crate::config::ThinkingMode;
 use crate::policy::PolicyMode;
+use crate::resolved::ModelRef;
 use crate::types::{ConversationMessage, EventId, ThreadId};
 
 macro_rules! string_id {
@@ -102,7 +104,8 @@ impl ThreadSnapshot {
 pub struct TurnContextItem {
     pub workspace_root: PathBuf,
     pub cwd: PathBuf,
-    pub model: String,
+    #[serde(deserialize_with = "deserialize_model_ref")]
+    pub model: ModelRef,
     pub policy_mode: PolicyMode,
     pub command_timeout_secs: u64,
     pub max_output_bytes: usize,
@@ -114,6 +117,38 @@ pub struct TurnContextItem {
         skip_serializing_if = "Option::is_none"
     )]
     pub current_utc_date: Option<String>,
+}
+
+fn deserialize_model_ref<'de, D>(deserializer: D) -> Result<ModelRef, D::Error>
+where
+    D: de::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ModelRefWire {
+        Current(ModelRef),
+        LegacyString(String),
+    }
+
+    match ModelRefWire::deserialize(deserializer)? {
+        ModelRefWire::Current(model_ref) => Ok(model_ref),
+        ModelRefWire::LegacyString(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(de::Error::custom("turn context model cannot be empty"));
+            }
+            if let Some((provider_id, model_id)) = value.split_once(':') {
+                let provider_id = provider_id.trim();
+                let model_id = model_id.trim();
+                if provider_id.is_empty() || model_id.is_empty() {
+                    return Err(de::Error::custom("turn context model ref cannot be empty"));
+                }
+                Ok(ModelRef::new(provider_id, model_id))
+            } else {
+                Ok(ModelRef::new("openai", value))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

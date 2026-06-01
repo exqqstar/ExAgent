@@ -1,10 +1,11 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use exagent::app_server::protocol::{
-    BoundaryCapability, BoundaryOp, BoundaryOpResponse, EventsReplayParams, IgnoredOverrideField,
-    InitializeParams, RunParams, RuntimeEventKindFilter, ThreadItem, ThreadReadParams,
-    ThreadResumeParams, ThreadStartParams, ThreadStatus, ThreadView, TurnContextOverrides,
-    TurnInterruptParams, TurnStartParams, TurnStatus,
+    ApprovalDecisionParams, ApprovalDecisionStatus, BoundaryCapability, BoundaryOp,
+    BoundaryOpResponse, EventsReplayParams, IgnoredOverrideField, InitializeParams, RunParams,
+    RuntimeEventKindFilter, ThreadItem, ThreadReadParams, ThreadResumeParams, ThreadStartParams,
+    ThreadStatus, ThreadView, TurnContextOverrides, TurnInterruptParams, TurnStartParams,
+    TurnStatus,
 };
 use exagent::app_server::{AppServerError, AppServerService};
 use exagent::config::{AgentConfig, ThinkingMode};
@@ -12,6 +13,7 @@ use exagent::events::{RuntimeEvent, RuntimeEventKind};
 use exagent::llm::{LlmClient, LlmRequestOptions, MockLlm};
 use exagent::policy::PolicyMode;
 use exagent::registry::{ToolContext, ToolRegistry};
+use exagent::resolved::{ModelRef, ResolvedCredential, ResolvedModelConfig};
 use exagent::session::{ApprovalId, ThreadSnapshot};
 use exagent::tools::run_command::RunCommandTool;
 use exagent::tools::Tool;
@@ -232,6 +234,7 @@ async fn initialize_boundary_advertises_v2_protocol_surface() {
             BoundaryCapability::ThreadRead,
             BoundaryCapability::TurnStart,
             BoundaryCapability::TurnInterrupt,
+            BoundaryCapability::ApprovalDecision,
             BoundaryCapability::EventsReplay,
         ]
     );
@@ -288,6 +291,18 @@ fn boundary_capabilities_match_boundary_op_type_names() {
             serde_json::to_value(BoundaryOp::TurnInterrupt(TurnInterruptParams {
                 thread_id: ThreadId::new("session_123"),
                 turn_id: None,
+                workspace_root: None,
+            }))
+            .unwrap(),
+        ),
+        (
+            BoundaryCapability::ApprovalDecision,
+            serde_json::to_value(BoundaryOp::ApprovalDecision(ApprovalDecisionParams {
+                thread_id: ThreadId::new("session_123"),
+                turn_id: None,
+                approval_id: ApprovalId::new("approval_123"),
+                decision: ApprovalDecisionStatus::Denied,
+                note: None,
                 workspace_root: None,
             }))
             .unwrap(),
@@ -701,6 +716,7 @@ async fn turn_start_applies_validated_context_override_with_user_input() {
             workspace_root: None,
             turn_context: Some(TurnContextOverrides {
                 cwd: Some("turn-cwd".into()),
+                model: None,
                 thinking_mode: None,
             }),
         })
@@ -767,6 +783,7 @@ async fn turn_context_cwd_is_used_for_tools_without_becoming_thread_cwd() {
             workspace_root: None,
             turn_context: Some(TurnContextOverrides {
                 cwd: Some("turn-cwd".into()),
+                model: None,
                 thinking_mode: None,
             }),
         })
@@ -812,6 +829,7 @@ async fn turn_context_thinking_mode_reaches_llm_without_mutating_later_turns() {
             workspace_root: None,
             turn_context: Some(TurnContextOverrides {
                 cwd: None,
+                model: None,
                 thinking_mode: Some(ThinkingMode::High),
             }),
         })
@@ -846,6 +864,87 @@ async fn turn_context_thinking_mode_reaches_llm_without_mutating_later_turns() {
 }
 
 #[tokio::test]
+async fn turn_context_model_reaches_turn_context_without_mutating_later_turns() {
+    let dir = tempdir().unwrap();
+    let workspace = dir.path().to_path_buf();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            model: ResolvedModelConfig::from_provider_profile(
+                "openai",
+                "base-model",
+                None,
+                ResolvedCredential::None,
+                None,
+            ),
+            workspace_root: workspace.clone(),
+            cwd: workspace.clone(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![
+            AssistantTurn {
+                text: Some("first done".into()),
+                tool_calls: vec![],
+            },
+            AssistantTurn {
+                text: Some("second done".into()),
+                tool_calls: vec![],
+            },
+        ])),
+        ToolRegistry::new,
+    );
+
+    let thread = service
+        .thread_start(ThreadStartParams {
+            workspace_root: Some(workspace.display().to_string()),
+            cwd: None,
+        })
+        .unwrap();
+    let first = service
+        .turn_start(TurnStartParams {
+            thread_id: thread.thread.id.clone(),
+            prompt: "run with override model".into(),
+            workspace_root: Some(workspace.display().to_string()),
+            turn_context: Some(TurnContextOverrides {
+                cwd: None,
+                model: Some(ModelRef::new("openai", "override-model")),
+                thinking_mode: None,
+            }),
+        })
+        .await
+        .unwrap();
+    wait_for_turn_completed(&service, &thread.thread.id, &first.turn.id).await;
+
+    let second = service
+        .turn_start(TurnStartParams {
+            thread_id: thread.thread.id.clone(),
+            prompt: "run with default model".into(),
+            workspace_root: Some(workspace.display().to_string()),
+            turn_context: None,
+        })
+        .await
+        .unwrap();
+    wait_for_turn_completed(&service, &thread.thread.id, &second.turn.id).await;
+
+    let rollout_paths = exagent::state::rollout::rollout_paths(&workspace, &thread.thread.id);
+    let contexts: Vec<_> =
+        exagent::state::rollout::RolloutStore::read_items_blocking(&rollout_paths.rollout_path)
+            .unwrap()
+            .into_iter()
+            .filter_map(|item| match item {
+                exagent::state::rollout::RolloutItem::TurnContext(context) => Some(context.model),
+                _ => None,
+            })
+            .collect();
+
+    assert!(contexts
+        .iter()
+        .any(|model| model == &ModelRef::new("openai", "override-model")));
+    assert!(contexts
+        .iter()
+        .all(|model| model != &ModelRef::new("openai", "base-model")));
+}
+
+#[tokio::test]
 async fn turn_start_rejects_invalid_context_override_before_accepting_input() {
     let dir = tempdir().unwrap();
     let outside = tempdir().unwrap();
@@ -875,6 +974,7 @@ async fn turn_start_rejects_invalid_context_override_before_accepting_input() {
             workspace_root: None,
             turn_context: Some(TurnContextOverrides {
                 cwd: Some(outside.path().to_string_lossy().to_string()),
+                model: None,
                 thinking_mode: None,
             }),
         })
@@ -1008,14 +1108,15 @@ fn events_replay_can_include_latest_snapshot_for_ui_reconstruction() {
 #[tokio::test]
 async fn events_replay_snapshot_includes_latest_compaction_after_auto_compact() {
     let dir = tempdir().unwrap();
+    let mut config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        auto_compact_token_limit: Some(1),
+        ..AgentConfig::default()
+    };
+    config.model.capabilities.context_window = Some(1_000);
     let service = AppServerService::with_llm(
-        AgentConfig {
-            workspace_root: dir.path().to_path_buf(),
-            cwd: dir.path().to_path_buf(),
-            model_context_window: Some(1_000),
-            auto_compact_token_limit: Some(1),
-            ..AgentConfig::default()
-        },
+        config,
         Box::new(MockLlm::new(vec![
             AssistantTurn {
                 text: Some("first done".into()),
@@ -1753,6 +1854,7 @@ async fn rejected_concurrent_turn_context_does_not_mutate_thread_snapshot() {
             workspace_root: None,
             turn_context: Some(TurnContextOverrides {
                 cwd: Some("rejected-cwd".into()),
+                model: None,
                 thinking_mode: None,
             }),
         })

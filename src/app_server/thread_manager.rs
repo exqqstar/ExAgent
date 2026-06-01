@@ -3,82 +3,43 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use async_trait::async_trait;
 use tokio::sync::broadcast;
 
 use crate::agent::Agent;
 use crate::app_server::override_policy::{OverridePolicy, RuntimeOverrides};
 use crate::app_server::protocol::{
-    AgentRunResponse, BoundaryCapability, BoundaryOp, BoundaryOpResponse, EventsReplayParams,
-    EventsReplayResponse, EventsSubscribeParams, IgnoredOverrideField, InitializeParams,
-    InitializeResponse, ReplaySnapshotView, RunParams, RuntimeEventKindFilter, ThreadItem,
-    ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
-    ThreadStartParams, ThreadStartResponse, ThreadStatus, ThreadView, TurnContextOverrides,
-    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnState,
-    TurnStatus, TurnView, BOUNDARY_PROTOCOL_VERSION,
+    AgentRunResponse, ApprovalDecisionParams, ApprovalDecisionResponse, ApprovalDecisionStatus,
+    BoundaryCapability, BoundaryOp, BoundaryOpResponse, EventsReplayParams, EventsReplayResponse,
+    EventsSubscribeParams, IgnoredOverrideField, InitializeParams, InitializeResponse,
+    ReplaySnapshotView, RunParams, RuntimeEventKindFilter, ThreadItem, ThreadReadParams,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
+    ThreadStartResponse, ThreadStatus, ThreadView, TurnContextOverrides, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnState, TurnStatus, TurnView,
+    BOUNDARY_PROTOCOL_VERSION,
 };
 use crate::app_server::AppServerError;
 use crate::config::AgentConfig;
 use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::exec_session::ExecSessionManager;
-use crate::llm::{LlmClient, LlmRequestOptions, OpenAiCompatibleLlm};
+use crate::llm::LlmClient;
+use crate::model::factory::{DefaultLlmClientFactory, LlmClientFactory, SharedLlmFactory};
 use crate::policy::PolicyManager;
 use crate::registry::ToolRegistry;
+use crate::resolver::{EnvModelResolver, ModelResolver};
 use crate::runtime::thread_runtime::{
     AgentFactory, ThreadOpResult, ThreadRuntime, ThreadRuntimeError, ThreadRuntimeOptions,
     ThreadTurnContext,
 };
 use crate::runtime::thread_session::RuntimeOverlay;
+use crate::session::ApprovalStatus;
 use crate::session::ThreadSnapshot;
 use crate::state::rollout::{
     events_from_rollout_items, rollout_paths, snapshot_from_rollout_items,
     thread_meta_from_snapshot, RolloutItem, RolloutStore,
 };
-use crate::types::{AssistantTurn, LlmCompletion, ThreadId, TurnId};
+use crate::types::{AssistantTurn, ThreadId, TurnId};
 
 type RegistryFactory = Arc<dyn Fn() -> ToolRegistry + Send + Sync>;
-
-trait LlmFactory: Send + Sync {
-    fn build(&self, config: &AgentConfig) -> Result<Box<dyn LlmClient>>;
-}
-
-struct EnvLlmFactory;
-
-impl LlmFactory for EnvLlmFactory {
-    fn build(&self, config: &AgentConfig) -> Result<Box<dyn LlmClient>> {
-        Ok(Box::new(OpenAiCompatibleLlm::from_env_with_model(
-            config.model.clone(),
-        )?))
-    }
-}
-
-struct SharedLlmFactory {
-    llm: Arc<dyn LlmClient>,
-}
-
-impl LlmFactory for SharedLlmFactory {
-    fn build(&self, _config: &AgentConfig) -> Result<Box<dyn LlmClient>> {
-        Ok(Box::new(SharedLlmClient {
-            llm: self.llm.clone(),
-        }))
-    }
-}
-
-struct SharedLlmClient {
-    llm: Arc<dyn LlmClient>,
-}
-
-#[async_trait]
-impl LlmClient for SharedLlmClient {
-    async fn complete(
-        &self,
-        messages: &[crate::types::ConversationMessage],
-        tools: &[serde_json::Value],
-        options: &LlmRequestOptions,
-    ) -> Result<LlmCompletion> {
-        self.llm.complete(messages, tools, options).await
-    }
-}
 
 pub struct StartThreadOptions {
     pub config: AgentConfig,
@@ -113,7 +74,8 @@ struct StoredThreadState {
 
 pub struct ThreadManager {
     base_config: AgentConfig,
-    llm_factory: Arc<dyn LlmFactory>,
+    llm_factory: Arc<dyn LlmClientFactory>,
+    model_resolver: Arc<dyn ModelResolver>,
     registry_factory: RegistryFactory,
     exec_sessions: Arc<ExecSessionManager>,
     policy: Arc<PolicyManager>,
@@ -128,9 +90,17 @@ impl Default for ThreadManager {
 
 impl ThreadManager {
     pub fn from_env(base_config: AgentConfig) -> Self {
+        Self::with_model_resolver(base_config, Arc::new(EnvModelResolver))
+    }
+
+    pub fn with_model_resolver(
+        base_config: AgentConfig,
+        model_resolver: Arc<dyn ModelResolver>,
+    ) -> Self {
         Self {
             base_config,
-            llm_factory: Arc::new(EnvLlmFactory),
+            llm_factory: Arc::new(DefaultLlmClientFactory),
+            model_resolver,
             registry_factory: Arc::new(crate::default_tool_registry),
             exec_sessions: Arc::new(ExecSessionManager::default()),
             policy: Arc::new(PolicyManager::default()),
@@ -146,11 +116,27 @@ impl ThreadManager {
     where
         F: Fn() -> ToolRegistry + Send + Sync + 'static,
     {
+        Self::with_llm_and_model_resolver(
+            base_config,
+            llm,
+            registry_factory,
+            Arc::new(EnvModelResolver),
+        )
+    }
+
+    pub fn with_llm_and_model_resolver<F>(
+        base_config: AgentConfig,
+        llm: Box<dyn LlmClient>,
+        registry_factory: F,
+        model_resolver: Arc<dyn ModelResolver>,
+    ) -> Self
+    where
+        F: Fn() -> ToolRegistry + Send + Sync + 'static,
+    {
         Self {
             base_config,
-            llm_factory: Arc::new(SharedLlmFactory {
-                llm: Arc::from(llm),
-            }),
+            llm_factory: Arc::new(SharedLlmFactory::new(Arc::from(llm))),
+            model_resolver,
             registry_factory: Arc::new(registry_factory),
             exec_sessions: Arc::new(ExecSessionManager::default()),
             policy: Arc::new(PolicyManager::default()),
@@ -187,6 +173,7 @@ impl ThreadManager {
             workspace_root,
             turn_context: thinking_mode.map(|thinking_mode| TurnContextOverrides {
                 cwd: None,
+                model: None,
                 thinking_mode: Some(thinking_mode),
             }),
         })
@@ -203,6 +190,7 @@ impl ThreadManager {
                 BoundaryCapability::ThreadRead,
                 BoundaryCapability::TurnStart,
                 BoundaryCapability::TurnInterrupt,
+                BoundaryCapability::ApprovalDecision,
                 BoundaryCapability::EventsReplay,
             ],
             supported_streams: vec![BoundaryCapability::EventsSubscribe],
@@ -392,6 +380,51 @@ impl ThreadManager {
         Err(AppServerError::ThreadNotFound(params.thread_id).into())
     }
 
+    pub async fn approval_decision(
+        &self,
+        params: ApprovalDecisionParams,
+    ) -> Result<ApprovalDecisionResponse> {
+        let requested_workspace_root = params.workspace_root.clone();
+        let requested_workspace_root = requested_workspace_root.is_some();
+        let config =
+            OverridePolicy::merge_events_replay(&self.base_config, params.workspace_root.clone())?;
+        if let Some(loaded) = self.resolve_loaded_runtime(
+            &params.thread_id,
+            requested_workspace_root,
+            &config.workspace_root,
+        )? {
+            let status = approval_decision_status_to_session(&params.decision);
+            let result = loaded
+                .runtime
+                .approval_decision(params.turn_id, params.approval_id, status, params.note)
+                .await
+                .map_err(map_thread_runtime_error)?;
+            return match result {
+                ThreadOpResult::ApprovalDecision {
+                    turn_id,
+                    approval_id,
+                    status,
+                } => Ok(ApprovalDecisionResponse {
+                    thread_id: params.thread_id,
+                    turn_id,
+                    approval_id,
+                    status: session_approval_status_to_decision(status)?,
+                }),
+                response => Err(unexpected_runtime_result("approval_decision", &response).into()),
+            };
+        }
+
+        if thread_exists_in_storage(&config.workspace_root, &params.thread_id) {
+            return Err(AppServerError::TurnRejected {
+                thread_id: params.thread_id,
+                reason: "thread has no pending approval".to_string(),
+            }
+            .into());
+        }
+
+        Err(AppServerError::ThreadNotFound(params.thread_id).into())
+    }
+
     async fn turn_start_direct(&self, params: TurnStartParams) -> Result<TurnStartResponse> {
         let TurnStartStarted {
             thread_id, turn_id, ..
@@ -419,7 +452,9 @@ impl ThreadManager {
         let turn_id = runtime.next_turn_id();
         let live_view = runtime.live_view();
         let runtime_workspace_root = live_view.snapshot.workspace_root.clone();
-        let turn_context = resolve_turn_context(&live_view.snapshot, params.turn_context)?;
+        let turn_context = self
+            .resolve_turn_context(&live_view.snapshot, params.turn_context)
+            .await?;
         let prompt = params.prompt;
         let result = runtime
             .submit_user_input_and_wait(turn_id.clone(), prompt, turn_context)
@@ -443,7 +478,9 @@ impl ThreadManager {
         let runtime = self.ensure_runtime_loaded(&thread_id, config, requested_workspace_root)?;
         let turn_id = runtime.next_turn_id();
         let live_view = runtime.live_view();
-        let turn_context = resolve_turn_context(&live_view.snapshot, params.turn_context)?;
+        let turn_context = self
+            .resolve_turn_context(&live_view.snapshot, params.turn_context)
+            .await?;
         runtime
             .submit_user_input(turn_id.clone(), params.prompt, turn_context)
             .await
@@ -474,6 +511,10 @@ impl ThreadManager {
                 .turn_interrupt(params)
                 .await
                 .map(BoundaryOpResponse::TurnInterrupted),
+            BoundaryOp::ApprovalDecision(params) => self
+                .approval_decision(params)
+                .await
+                .map(BoundaryOpResponse::ApprovalDecisionSubmitted),
             BoundaryOp::EventsReplay(params) => self
                 .events_replay(params)
                 .map(BoundaryOpResponse::EventsReplayed),
@@ -555,7 +596,7 @@ impl ThreadManager {
         let policy = self.policy.clone();
 
         Arc::new(move |config: AgentConfig| {
-            let llm = llm_factory.build(&config)?;
+            let llm = llm_factory.build(&config.model)?;
             Ok(Agent::with_runtime(
                 config,
                 llm,
@@ -662,21 +703,28 @@ impl ThreadManager {
                 status: TurnStatus::InProgress,
             })
     }
-}
 
-fn resolve_turn_context(
-    snapshot: &ThreadSnapshot,
-    overrides: Option<TurnContextOverrides>,
-) -> Result<Option<ThreadTurnContext>> {
-    let Some(overrides) = overrides else {
-        return Ok(None);
-    };
-    let thinking_mode = overrides.thinking_mode;
-    let resolved_snapshot = OverridePolicy::apply_turn_context(snapshot, overrides)?;
-    Ok(Some(ThreadTurnContext {
-        cwd: Some(resolved_snapshot.cwd),
-        thinking_mode,
-    }))
+    async fn resolve_turn_context(
+        &self,
+        snapshot: &ThreadSnapshot,
+        overrides: Option<TurnContextOverrides>,
+    ) -> Result<Option<ThreadTurnContext>> {
+        let Some(overrides) = overrides else {
+            return Ok(None);
+        };
+        let model_ref = overrides.model.clone();
+        let thinking_mode = overrides.thinking_mode;
+        let resolved_snapshot = OverridePolicy::apply_turn_context(snapshot, overrides)?;
+        let resolved_model = match model_ref.as_ref() {
+            Some(model_ref) => Some(self.model_resolver.resolve(model_ref).await?),
+            None => None,
+        };
+        Ok(Some(ThreadTurnContext {
+            cwd: Some(resolved_snapshot.cwd),
+            resolved_model,
+            thinking_mode,
+        }))
+    }
 }
 
 fn ignored_resume_overrides(params: &ThreadResumeParams) -> Vec<IgnoredOverrideField> {
@@ -716,7 +764,42 @@ fn boundary_response_name(response: &BoundaryOpResponse) -> &'static str {
         BoundaryOpResponse::ThreadResumed(_) => "thread_resumed",
         BoundaryOpResponse::TurnStarted(_) => "turn_started",
         BoundaryOpResponse::TurnInterrupted(_) => "turn_interrupted",
+        BoundaryOpResponse::ApprovalDecisionSubmitted(_) => "approval_decision_submitted",
         BoundaryOpResponse::EventsReplayed(_) => "events_replayed",
+    }
+}
+
+fn unexpected_runtime_result(operation: &str, result: &ThreadOpResult) -> AppServerError {
+    AppServerError::InvalidRequest(format!(
+        "{operation} returned unexpected {} runtime result",
+        runtime_result_name(result)
+    ))
+}
+
+fn runtime_result_name(result: &ThreadOpResult) -> &'static str {
+    match result {
+        ThreadOpResult::UserInput { .. } => "user_input",
+        ThreadOpResult::Interrupted { .. } => "interrupted",
+        ThreadOpResult::ApprovalDecision { .. } => "approval_decision",
+        ThreadOpResult::Ack => "ack",
+    }
+}
+
+fn approval_decision_status_to_session(status: &ApprovalDecisionStatus) -> ApprovalStatus {
+    match status {
+        ApprovalDecisionStatus::Approved => ApprovalStatus::Approved,
+        ApprovalDecisionStatus::Denied => ApprovalStatus::Denied,
+    }
+}
+
+fn session_approval_status_to_decision(status: ApprovalStatus) -> Result<ApprovalDecisionStatus> {
+    match status {
+        ApprovalStatus::Approved => Ok(ApprovalDecisionStatus::Approved),
+        ApprovalStatus::Denied => Ok(ApprovalDecisionStatus::Denied),
+        ApprovalStatus::Pending => Err(AppServerError::InvalidRequest(
+            "approval decision returned pending status".to_string(),
+        )
+        .into()),
     }
 }
 
@@ -860,8 +943,12 @@ fn thread_item_from_event(kind: &RuntimeEventKind) -> Option<ThreadItem> {
             text: chunk.clone(),
         }),
         RuntimeEventKind::ApprovalRequested {
-            tool_name, reason, ..
+            approval_id,
+            tool_name,
+            reason,
+            ..
         } => Some(ThreadItem::ApprovalRequested {
+            approval_id: approval_id.clone(),
             tool_name: tool_name.clone(),
             reason: reason.clone(),
         }),

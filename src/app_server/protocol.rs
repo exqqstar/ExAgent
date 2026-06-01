@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ThinkingMode;
 use crate::events::RuntimeEvent;
+use crate::resolved::ModelRef;
+use crate::session::ApprovalId;
 use crate::session::CompactionSummary;
 use crate::types::{EventId, ThreadId, ToolCall, TurnId};
 
@@ -21,6 +23,7 @@ pub enum BoundaryCapability {
     ThreadRead,
     TurnStart,
     TurnInterrupt,
+    ApprovalDecision,
     EventsSubscribe,
     EventsReplay,
 }
@@ -120,6 +123,7 @@ pub enum ThreadItem {
         text: String,
     },
     ApprovalRequested {
+        approval_id: ApprovalId,
         tool_name: String,
         reason: String,
     },
@@ -171,6 +175,8 @@ pub struct TurnContextOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_mode: Option<ThinkingMode>,
 }
 
@@ -204,6 +210,33 @@ pub struct TurnInterruptResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecisionStatus {
+    Approved,
+    Denied,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApprovalDecisionParams {
+    pub thread_id: ThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<TurnId>,
+    pub approval_id: ApprovalId,
+    pub decision: ApprovalDecisionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub workspace_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApprovalDecisionResponse {
+    pub thread_id: ThreadId,
+    pub turn_id: TurnId,
+    pub approval_id: ApprovalId,
+    pub status: ApprovalDecisionStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BoundaryOp {
     Initialize(InitializeParams),
@@ -212,6 +245,7 @@ pub enum BoundaryOp {
     ThreadResume(ThreadResumeParams),
     TurnStart(TurnStartParams),
     TurnInterrupt(TurnInterruptParams),
+    ApprovalDecision(ApprovalDecisionParams),
     EventsReplay(EventsReplayParams),
 }
 
@@ -224,6 +258,7 @@ pub enum BoundaryOpResponse {
     ThreadResumed(ThreadResumeResponse),
     TurnStarted(TurnStartResponse),
     TurnInterrupted(TurnInterruptResponse),
+    ApprovalDecisionSubmitted(ApprovalDecisionResponse),
     EventsReplayed(EventsReplayResponse),
 }
 

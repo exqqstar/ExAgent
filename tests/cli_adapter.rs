@@ -1,11 +1,11 @@
 use std::sync::Mutex;
 
 use exagent::app_server::protocol::{
-    AgentRunResponse, BoundaryOp, BoundaryOpResponse, EventsReplayParams, EventsReplayResponse,
-    EventsSubscribeParams, RunParams, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, ThreadStatus, ThreadView,
-    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnStatus,
-    TurnView,
+    AgentRunResponse, ApprovalDecisionParams, ApprovalDecisionResponse, BoundaryOp,
+    BoundaryOpResponse, EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, RunParams,
+    ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
+    ThreadStartParams, ThreadStartResponse, ThreadStatus, ThreadView, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnStatus, TurnView,
 };
 use exagent::app_server::AppServerBoundary;
 use exagent::cli::CliCommand;
@@ -112,6 +112,13 @@ impl AppServerBoundary for CliBoundary {
         _params: TurnInterruptParams,
     ) -> anyhow::Result<TurnInterruptResponse> {
         panic!("turn_interrupt is not used in these CLI adapter tests");
+    }
+
+    async fn approval_decision(
+        &self,
+        _params: ApprovalDecisionParams,
+    ) -> anyhow::Result<ApprovalDecisionResponse> {
+        panic!("approval_decision is not used in these CLI adapter tests");
     }
 
     async fn submit_boundary_op(&self, _op: BoundaryOp) -> anyhow::Result<BoundaryOpResponse> {

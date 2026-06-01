@@ -3,6 +3,7 @@ use serde_json::Value;
 
 use crate::types::{ToolCall, ToolResult};
 
+pub(crate) mod output_projection;
 pub mod read_file;
 pub mod registry;
 pub mod run_command;

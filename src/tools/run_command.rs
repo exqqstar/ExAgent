@@ -5,13 +5,18 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
 use crate::policy::PolicyDecision;
 use crate::registry::ToolContext;
+use crate::runtime::process_cleanup::{
+    cleanup_child_process_tree, configure_process_group, ProcessCleanupReason,
+};
 use crate::session::{ApprovalId, ApprovalStatus};
 use crate::session::{ExecSessionId, ExecSessionStatus};
+use crate::tools::output_projection::{output_projection_meta, project_output};
 use crate::tools::Tool;
 use crate::types::{ToolCall, ToolResult, ToolStatus};
 use crate::workspace::resolve_workspace_path;
@@ -317,64 +322,127 @@ async fn run_one_shot_command(
     timeout_secs: u64,
     ctx: &ToolContext,
 ) -> Result<CommandOutcome, String> {
+    let started_at = tokio::time::Instant::now();
     let mut command = Command::new("sh");
     command.arg("-lc").arg(command_text);
     command.current_dir(&cwd);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     command.kill_on_drop(true);
+    configure_process_group(&mut command);
 
-    let child = command.spawn().map_err(|err| err.to_string())?;
-    let wait = timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await;
+    let mut child = command.spawn().map_err(|err| err.to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "failed to capture stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "failed to capture stderr".to_string())?;
+    let stdout_task = tokio::spawn(read_output_pipe(stdout));
+    let stderr_task = tokio::spawn(read_output_pipe(stderr));
+    let wait = timeout(Duration::from_secs(timeout_secs), child.wait()).await;
 
     match wait {
-        Ok(Ok(output)) => {
-            let stdout = truncate_utf8(
-                &String::from_utf8_lossy(&output.stdout),
-                ctx.config.max_output_bytes,
-            );
-            let stderr = truncate_utf8(
-                &String::from_utf8_lossy(&output.stderr),
-                ctx.config.max_output_bytes,
-            );
-            let status = if output.status.success() {
+        Ok(Ok(status_result)) => {
+            let stdout_bytes = join_output_task(stdout_task).await?;
+            let stderr_bytes = join_output_task(stderr_task).await?;
+            let stdout = project_output(&stdout_bytes, ctx.config.max_output_bytes);
+            let stderr = project_output(&stderr_bytes, ctx.config.max_output_bytes);
+            let status = if status_result.success() {
                 ToolStatus::Success
             } else {
                 ToolStatus::Error
             };
+            let content = format!("stdout:\n{}\n\nstderr:\n{}", stdout.content, stderr.content);
+            let duration_ms = elapsed_millis(started_at);
 
             Ok(CommandOutcome {
                 status,
-                content: format!("stdout:\n{}\n\nstderr:\n{}", stdout, stderr),
+                content,
                 meta: json!({
-                    "exit_code": output.status.code(),
-                    "stdout": stdout,
-                    "stderr": stderr,
+                    "command": command_text,
+                    "exit_code": status_result.code(),
+                    "stdout": stdout.content,
+                    "stderr": stderr.content,
+                    "stdout_bytes": stdout.original_bytes,
+                    "stderr_bytes": stderr.original_bytes,
+                    "stdout_truncated": stdout.truncated,
+                    "stderr_truncated": stderr.truncated,
+                    "output_projection": output_projection_meta(ctx.config.max_output_bytes),
                     "timed_out": false,
+                    "duration_ms": duration_ms,
                     "cwd": cwd,
                 }),
             })
         }
         Ok(Err(err)) => Err(err.to_string()),
-        Err(_) => Ok(CommandOutcome {
-            status: ToolStatus::Error,
-            content: "Command timed out".into(),
-            meta: json!({
-                "exit_code": Value::Null,
-                "stdout": "",
-                "stderr": "",
-                "timed_out": true,
-                "cwd": cwd,
-            }),
-        }),
+        Err(_) => {
+            let cleanup = cleanup_child_process_tree(
+                &mut child,
+                ProcessCleanupReason::Timeout,
+                Duration::from_millis(750),
+            )
+            .await;
+            let stdout_bytes = join_output_task(stdout_task).await.unwrap_or_default();
+            let stderr_bytes = join_output_task(stderr_task).await.unwrap_or_default();
+            let stdout = project_output(&stdout_bytes, ctx.config.max_output_bytes);
+            let stderr = project_output(&stderr_bytes, ctx.config.max_output_bytes);
+            let duration_ms = elapsed_millis(started_at);
+
+            Ok(CommandOutcome {
+                status: ToolStatus::Error,
+                content: format!(
+                    "Command timed out\n\nstdout:\n{}\n\nstderr:\n{}",
+                    stdout.content, stderr.content
+                ),
+                meta: json!({
+                    "command": command_text,
+                    "exit_code": Value::Null,
+                    "stdout": stdout.content,
+                    "stderr": stderr.content,
+                    "stdout_bytes": stdout.original_bytes,
+                    "stderr_bytes": stderr.original_bytes,
+                    "stdout_truncated": stdout.truncated,
+                    "stderr_truncated": stderr.truncated,
+                    "output_projection": output_projection_meta(ctx.config.max_output_bytes),
+                    "timed_out": true,
+                    "duration_ms": duration_ms,
+                    "cwd": cwd,
+                    "cleanup": cleanup,
+                }),
+            })
+        }
     }
+}
+
+fn elapsed_millis(started_at: tokio::time::Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+async fn read_output_pipe<R>(mut reader: R) -> std::io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut output = Vec::new();
+    reader.read_to_end(&mut output).await?;
+    Ok(output)
+}
+
+async fn join_output_task(
+    task: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
+) -> Result<Vec<u8>, String> {
+    task.await
+        .map_err(|err| err.to_string())?
+        .map_err(|err| err.to_string())
 }
 
 fn resolve_cwd(args: &RunCommandArgs, ctx: &ToolContext) -> Result<PathBuf, String> {
     match &args.cwd {
-        Some(raw) => {
-            resolve_workspace_path(&ctx.config.workspace_root, raw).map_err(|err| err.to_string())
-        }
+        Some(raw) => resolve_workspace_path(&ctx.config.workspace_root, raw)
+            .map(|resolved| resolved.canonical_path)
+            .map_err(|err| err.to_string()),
         None => Ok(ctx.config.cwd.clone()),
     }
 }
@@ -418,19 +486,4 @@ fn annotate_policy_meta(
             object.insert("approval_reason".into(), Value::String(reason.to_string()));
         }
     }
-}
-
-fn truncate_utf8(output: &str, max_bytes: usize) -> String {
-    if output.len() <= max_bytes {
-        return output.to_string();
-    }
-
-    let mut end = 0;
-    for (idx, ch) in output.char_indices() {
-        if idx + ch.len_utf8() > max_bytes {
-            break;
-        }
-        end = idx + ch.len_utf8();
-    }
-    output[..end].to_string()
 }

@@ -17,7 +17,6 @@ pub enum ThinkingMode {
 pub struct AgentConfig {
     pub model: String,
     pub thinking_mode: Option<ThinkingMode>,
-    pub max_turns: usize,
     pub workspace_root: PathBuf,
     pub cwd: PathBuf,
     pub command_timeout_secs: u64,
@@ -50,7 +49,6 @@ impl Default for AgentConfig {
         Self {
             model: std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4.1".to_string()),
             thinking_mode: parse_optional_thinking_mode_env("EXAGENT_THINKING_MODE"),
-            max_turns: 12,
             workspace_root: cwd.clone(),
             cwd,
             command_timeout_secs: 30,

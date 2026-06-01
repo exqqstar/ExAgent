@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use crate::registry::ToolContext;
 use crate::tools::Tool;
 use crate::types::{ToolCall, ToolResult, ToolStatus};
-use crate::workspace::resolve_workspace_path;
+use crate::workspace::{resolve_workspace_path, ResolvedWorkspacePath};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadFileArgs {
@@ -46,12 +46,12 @@ impl Tool for ReadFileTool {
         };
 
         match read_file(&ctx.config.workspace_root, &args) {
-            Ok((path, content)) => ToolResult {
+            Ok((resolved, content)) => ToolResult {
                 tool_call_id: call.id,
                 tool_name: call.name,
                 status: ToolStatus::Success,
                 content,
-                meta: Some(json!({ "path": path })),
+                meta: Some(workspace_path_meta(&resolved)),
             },
             Err(err) => ToolResult {
                 tool_call_id: call.id,
@@ -67,9 +67,10 @@ impl Tool for ReadFileTool {
 fn read_file(
     workspace_root: &std::path::Path,
     args: &ReadFileArgs,
-) -> Result<(std::path::PathBuf, String), String> {
-    let path = resolve_workspace_path(workspace_root, &args.path).map_err(|err| err.to_string())?;
-    let body = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
+) -> Result<(ResolvedWorkspacePath, String), String> {
+    let resolved =
+        resolve_workspace_path(workspace_root, &args.path).map_err(|err| err.to_string())?;
+    let body = std::fs::read_to_string(&resolved.canonical_path).map_err(|err| err.to_string())?;
     let start_line = args.start_line.unwrap_or(1);
     let end_line = args.end_line.unwrap_or(usize::MAX);
     let content = body
@@ -83,5 +84,15 @@ fn read_file(
         .collect::<Vec<_>>()
         .join("\n");
 
-    Ok((path, content))
+    Ok((resolved, content))
+}
+
+fn workspace_path_meta(resolved: &ResolvedWorkspacePath) -> Value {
+    json!({
+        "path": resolved.canonical_path,
+        "requested_path": resolved.requested_path,
+        "normalized_path": resolved.normalized_path,
+        "canonical_path": resolved.canonical_path,
+        "was_absolute": resolved.was_absolute,
+    })
 }

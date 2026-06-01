@@ -204,6 +204,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "libc",
  "reqwest",
  "schemars",
  "serde",

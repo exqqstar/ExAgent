@@ -264,7 +264,7 @@ async fn run_session_turn(
         thinking_mode: turn_thinking_mode.or(agent.config().thinking_mode),
     };
 
-    for _ in 0..agent.max_turns() {
+    loop {
         let prompt = context_manager.for_prompt();
         let completion = match agent
             .sample_assistant_turn(&prompt, &tool_runtime.schemas(), &llm_options)
@@ -325,11 +325,6 @@ async fn run_session_turn(
             )?;
         }
     }
-
-    Err(anyhow!(
-        "Agent reached max turns ({}) without a final assistant turn",
-        agent.max_turns()
-    ))
 }
 
 async fn compact_after_context_window_error(
@@ -932,6 +927,60 @@ mod tests {
             .expect("run turn");
 
         assert_eq!(*prompt_lens.lock().unwrap(), vec![3, 5]);
+    }
+
+    #[tokio::test]
+    async fn thread_session_continues_until_assistant_turn_has_no_tool_calls() {
+        let dir = tempdir().unwrap();
+        let thread_id = ThreadId::new("session_thread_session_no_legacy_max_turns");
+        let turn_id = TurnId::new("turn_1");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        let prompt_lens = Arc::new(Mutex::new(Vec::new()));
+        let prompt_lens_for_llm = prompt_lens.clone();
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            let mut turns = Vec::new();
+            for index in 0..13 {
+                turns.push(AssistantTurn {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: format!("call_{index}"),
+                        name: "missing_tool".into(),
+                        arguments: serde_json::json!({}),
+                    }],
+                });
+            }
+            turns.push(AssistantTurn {
+                text: Some("done after tools".into()),
+                tool_calls: vec![],
+            });
+            Ok(Agent::new(
+                config,
+                Box::new(RecordingLlm::new(turns, prompt_lens_for_llm.clone())),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config,
+            agent_factory,
+        ))
+        .expect("create thread session");
+
+        let result = session
+            .handle_user_input(turn_id, "keep going".into(), None, None)
+            .await
+            .expect("run turn");
+        let ThreadOpResult::UserInput { final_turn, .. } = result else {
+            panic!("expected user input result");
+        };
+
+        assert_eq!(final_turn.text.as_deref(), Some("done after tools"));
+        assert_eq!(prompt_lens.lock().unwrap().len(), 14);
     }
 
     #[tokio::test]

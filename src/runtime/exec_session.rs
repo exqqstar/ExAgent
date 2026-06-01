@@ -2,12 +2,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::Mutex;
 
 use crate::events::ExecOutputStream;
+use crate::runtime::process_cleanup::{
+    cleanup_child_process_tree, configure_process_group, ProcessCleanupReason,
+};
 use crate::session::{ExecSessionId, ExecSessionStatus};
 use crate::types::ThreadId;
 
@@ -55,16 +59,18 @@ impl ExecSessionManager {
         command: &str,
         cwd: PathBuf,
     ) -> Result<ExecSessionSnapshot, String> {
-        let mut child = Command::new("sh")
+        let mut command_builder = Command::new("sh");
+        command_builder
             .arg("-lc")
             .arg(command)
             .current_dir(&cwd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|err| err.to_string())?;
+            .kill_on_drop(true);
+        configure_process_group(&mut command_builder);
+
+        let mut child = command_builder.spawn().map_err(|err| err.to_string())?;
 
         let stdin = child
             .stdin
@@ -148,7 +154,12 @@ impl ExecSessionManager {
         {
             let mut child = handle.child.lock().await;
             if child.try_wait().map_err(|err| err.to_string())?.is_none() {
-                child.kill().await.map_err(|err| err.to_string())?;
+                cleanup_child_process_tree(
+                    &mut child,
+                    ProcessCleanupReason::Terminate,
+                    Duration::from_millis(750),
+                )
+                .await;
             }
         }
 

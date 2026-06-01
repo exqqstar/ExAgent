@@ -194,3 +194,81 @@ async fn persistent_exec_session_terminate_marks_session_closed() {
     assert_eq!(meta["lifecycle"], "terminated");
     assert_eq!(meta["exit_code"], serde_json::Value::Null);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn persistent_exec_session_terminate_kills_background_children() {
+    let (dir, _thread_id, ctx) = test_context();
+    let mut registry = ToolRegistry::new();
+    registry.register(RunCommandTool);
+
+    let pid_file = dir.path().join("persistent-child.pid");
+    let command = format!("sleep 60 & echo $! > {}; sleep 60", pid_file.display());
+
+    let started = registry
+        .execute(
+            ToolCall {
+                id: "call_start_group".into(),
+                name: "run_command".into(),
+                arguments: json!({
+                    "command": command,
+                    "persistent": true
+                }),
+            },
+            Some(&ctx),
+        )
+        .await;
+
+    let exec_session_id = started.meta.as_ref().unwrap()["exec_session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !pid_file.exists() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(pid_file.exists(), "persistent child pid should be written");
+
+    let terminated = registry
+        .execute(
+            ToolCall {
+                id: "call_terminate_group".into(),
+                name: "run_command".into(),
+                arguments: json!({
+                    "exec_session_id": exec_session_id,
+                    "terminate": true
+                }),
+            },
+            Some(&ctx),
+        )
+        .await;
+
+    assert_eq!(terminated.status.as_str(), "success");
+    assert_eq!(terminated.meta.as_ref().unwrap()["lifecycle"], "terminated");
+
+    let child_pid = std::fs::read_to_string(pid_file).expect("child pid should be written");
+    assert!(
+        wait_until_pid_exits(child_pid.trim(), Duration::from_secs(2)),
+        "persistent background child should be gone after terminate"
+    );
+}
+
+#[cfg(unix)]
+fn wait_until_pid_exits(pid: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let status = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid)
+            .status()
+            .expect("check process status");
+        if !status.success() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

@@ -2,9 +2,13 @@
 **/.DS_Store
 /target
 /.exagent
+/.exagent-bench
+/.superpowers
 /.worktrees
 /external-references
 docs/.private-archive/
 /.env
 /.env.local
 /.env.deepseek.local
+**/node_modules
+apps/desktop/dist

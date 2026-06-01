@@ -126,6 +126,44 @@ async fn read_file_accepts_absolute_path_inside_workspace() {
 }
 
 #[tokio::test]
+async fn read_file_accepts_absolute_path_that_normalizes_from_root_parent() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("notes.txt");
+    std::fs::write(&file, "inside").unwrap();
+    let canonical_file = std::fs::canonicalize(&file).unwrap();
+    let root_parent_path = format!("/..{}", canonical_file.display());
+
+    let mut registry = ToolRegistry::new();
+    registry.register(ReadFileTool);
+
+    let ctx = ToolContext {
+        config: AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        thread_id: None,
+        turn_id: None,
+        exec_sessions: Arc::new(ExecSessionManager::default()),
+        policy: Arc::new(PolicyManager::default()),
+    };
+
+    let result = registry
+        .execute(
+            ToolCall {
+                id: "call_absolute_root_parent_read".into(),
+                name: "read_file".into(),
+                arguments: json!({"path": root_parent_path}),
+            },
+            Some(&ctx),
+        )
+        .await;
+
+    assert_eq!(result.status.as_str(), "success");
+    assert_eq!(result.content, "inside");
+}
+
+#[tokio::test]
 async fn write_file_accepts_absolute_missing_path_inside_workspace() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("nested").join("out.txt");

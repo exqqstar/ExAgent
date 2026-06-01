@@ -96,7 +96,7 @@ fn normalize_path(path: &Path) -> Result<PathBuf> {
             Component::CurDir => {}
             Component::Normal(part) => normalized.push(part),
             Component::ParentDir => {
-                if !normalized.pop() {
+                if !normalized.pop() && !normalized.has_root() {
                     bail!("Path escapes workspace");
                 }
             }

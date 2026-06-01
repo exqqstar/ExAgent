@@ -26,16 +26,19 @@ pub(crate) fn output_projection_meta(max_bytes: usize) -> OutputProjectionMeta {
 
 pub(crate) fn project_output(bytes: &[u8], max_bytes: usize) -> ProjectedOutput {
     if bytes.len() <= max_bytes {
+        let (content, lossy_truncated) = lossy_string_with_byte_limit(bytes, max_bytes);
         return ProjectedOutput {
-            content: String::from_utf8_lossy(bytes).to_string(),
+            content,
             original_bytes: bytes.len(),
-            truncated: false,
+            truncated: lossy_truncated,
         };
     }
 
     if max_bytes <= OUTPUT_TRUNCATION_MARKER.len() {
+        let (content, _lossy_truncated) =
+            lossy_string_with_byte_limit(&bytes[..max_bytes], max_bytes);
         return ProjectedOutput {
-            content: String::from_utf8_lossy(&bytes[..max_bytes]).to_string(),
+            content,
             original_bytes: bytes.len(),
             truncated: true,
         };
@@ -49,9 +52,50 @@ pub(crate) fn project_output(bytes: &[u8], max_bytes: usize) -> ProjectedOutput 
     projected.extend_from_slice(OUTPUT_TRUNCATION_MARKER);
     projected.extend_from_slice(&bytes[bytes.len() - tail_len..]);
 
+    let (content, _lossy_truncated) = lossy_string_with_byte_limit(&projected, max_bytes);
     ProjectedOutput {
-        content: String::from_utf8_lossy(&projected).to_string(),
+        content,
         original_bytes: bytes.len(),
         truncated: true,
+    }
+}
+
+fn lossy_string_with_byte_limit(bytes: &[u8], max_bytes: usize) -> (String, bool) {
+    let content = String::from_utf8_lossy(bytes).to_string();
+    if content.len() <= max_bytes {
+        return (content, false);
+    }
+
+    let mut end = 0;
+    for (idx, ch) in content.char_indices() {
+        if idx + ch.len_utf8() > max_bytes {
+            break;
+        }
+        end = idx + ch.len_utf8();
+    }
+
+    (content[..end].to_string(), true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_output;
+
+    #[test]
+    fn lossy_projection_respects_byte_limit_for_binary_output() {
+        let output = project_output(&[0xff; 32], 8);
+
+        assert!(output.content.len() <= 8);
+        assert_eq!(output.original_bytes, 32);
+        assert!(output.truncated);
+    }
+
+    #[test]
+    fn lossy_projection_marks_short_invalid_output_as_truncated_when_relimited() {
+        let output = project_output(&[0xff; 4], 4);
+
+        assert!(output.content.len() <= 4);
+        assert_eq!(output.original_bytes, 4);
+        assert!(output.truncated);
     }
 }

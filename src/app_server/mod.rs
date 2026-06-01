@@ -1,3 +1,4 @@
+pub mod desktop_facade;
 pub mod error;
 pub mod override_policy;
 pub mod protocol;

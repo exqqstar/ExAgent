@@ -16,6 +16,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { exagentClient } from "@/api/exagentClient";
+import { applyProviderSettings } from "@/stores/workbenchStore";
 import type {
   ProviderConnectionTestResponse,
   ProviderDescriptor,
@@ -202,6 +203,7 @@ export function SettingsDialog({
       setClearApiKey(false);
       setConnectionResult(null);
       setModelDiscoveryResult(null);
+      applyProviderSettings(nextSettings);
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {

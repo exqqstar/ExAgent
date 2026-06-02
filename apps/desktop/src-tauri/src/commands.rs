@@ -380,16 +380,10 @@ pub async fn provider_settings_save(
         .save_provider_settings(request)
         .await
         .map_err(error_string)?;
-    let config = state
-        .settings
-        .runtime_config()
+    state
+        .rebuild_facade_from_settings()
         .await
         .map_err(error_string)?;
-    let facade = exagent::app_server::desktop_facade::DesktopFacade::new(
-        exagent::app_server::AppServerService::with_config(config),
-        state.index.clone(),
-    );
-    *state.facade.write().await = facade;
     Ok(response)
 }
 

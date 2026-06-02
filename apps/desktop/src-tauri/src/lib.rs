@@ -2,8 +2,6 @@ mod commands;
 pub mod settings;
 mod state;
 
-use std::sync::Arc;
-
 use tauri::Manager;
 
 use state::DesktopState;
@@ -16,15 +14,11 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir()?;
             let db_path = app_data_dir.join("exagent.sqlite");
             let settings = settings::DesktopSettingsStore::new(app_data_dir.join("settings.json"));
-            let config = tauri::async_runtime::block_on(settings.runtime_config())?;
             let index = tauri::async_runtime::block_on(exagent::index_db::IndexDb::open(db_path))?;
-            let facade = exagent::app_server::desktop_facade::DesktopFacade::new(
-                exagent::app_server::AppServerService::with_config_and_model_resolver(
-                    config,
-                    Arc::new(settings.clone()),
-                ),
+            let facade = tauri::async_runtime::block_on(state::desktop_facade_from_settings(
                 index.clone(),
-            );
+                settings.clone(),
+            ))?;
             app.manage(DesktopState::new(facade, index, settings));
             Ok(())
         })

@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "@/App";
+import { exagentClient } from "@/api/exagentClient";
 
 describe("AppShell", () => {
   it("renders the main desktop workbench regions", async () => {
@@ -139,5 +140,37 @@ describe("AppShell", () => {
     expect(screen.getByText("auto")).toBeInTheDocument();
     expect(screen.getByText("MCP servers")).toBeInTheDocument();
     expect(screen.getByText("Skill roots")).toBeInTheDocument();
+  });
+
+  it("uses the saved provider for prompts without reloading the workbench", async () => {
+    const user = userEvent.setup();
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-desktop",
+      turn: {
+        id: "turn-provider-switch",
+        status: "in_progress",
+        items: []
+      }
+    });
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("button", { name: "Configure OpenAI Compatible" }));
+    await user.click(screen.getByRole("button", { name: "提交" }));
+    await user.keyboard("{Escape}");
+    await user.type(screen.getByLabelText("Message ExAgent"), "Use the new provider");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(startTurn).toHaveBeenCalledWith(
+      "project-exagent",
+      "session-desktop",
+      "Use the new provider",
+      {
+        provider_id: "openai_compatible",
+        model_id: "local-model"
+      },
+      "auto"
+    );
   });
 });

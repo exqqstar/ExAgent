@@ -3,6 +3,7 @@ import { exagentClient } from "@/api/exagentClient";
 import type {
   BackendRuntimeEvent,
   ModelRef,
+  ProviderSettingsResponse,
   ProjectSummary,
   RuntimeEvent,
   RuntimeSettingsSaveRequest,
@@ -38,6 +39,7 @@ type WorkbenchState = WorkbenchSnapshot & {
   setComposerValue: (composerValue: string) => void;
   setSelectedModel: (model: string | ModelRef | null) => void;
   setSelectedThinkingMode: (thinkingMode: ThinkingMode | null) => void;
+  applyProviderSettings: (settings: ProviderSettingsResponse) => void;
   applyRuntimePreset: (presetId: string) => void;
   saveRuntimeSettings: (settings: RuntimeSettingsSaveRequest) => Promise<void>;
   setSearch: (search: string) => Promise<void>;
@@ -338,6 +340,14 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     set({ selectedThinkingMode });
   },
 
+  applyProviderSettings(settings) {
+    const activeProviderId = settings.active_provider_id || DEFAULT_PROVIDER_ID;
+    set({
+      activeProviderId,
+      selectedModel: modelRefFromString(settings.config.model, activeProviderId)
+    });
+  },
+
   applyRuntimePreset(presetId) {
     const preset = get().runtimeSettings?.presets.find((item) => item.id === presetId);
     if (!preset) {
@@ -407,6 +417,8 @@ export const setSelectedModel = (model: string | ModelRef | null) =>
   useWorkbenchStore.getState().setSelectedModel(model);
 export const setSelectedThinkingMode = (thinkingMode: ThinkingMode | null) =>
   useWorkbenchStore.getState().setSelectedThinkingMode(thinkingMode);
+export const applyProviderSettings = (settings: ProviderSettingsResponse) =>
+  useWorkbenchStore.getState().applyProviderSettings(settings);
 export const applyRuntimePreset = (presetId: string) =>
   useWorkbenchStore.getState().applyRuntimePreset(presetId);
 export const sendPrompt = () => useWorkbenchStore.getState().sendPrompt();

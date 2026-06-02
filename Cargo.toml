@@ -3,6 +3,10 @@ name = "exagent"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+members = [".", "apps/desktop/src-tauri"]
+resolver = "2"
+
 [dependencies]
 anyhow = "1"
 async-stream = "0.3"
@@ -12,11 +16,15 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 schemars = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "time"] }
 thiserror = "2"
 time = "0.3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

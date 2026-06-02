@@ -51,9 +51,11 @@ pub(crate) enum ApprovalUpdate {
     },
     Approved {
         approval_id: ApprovalId,
+        note: Option<String>,
     },
     Denied {
         approval_id: ApprovalId,
+        note: Option<String>,
     },
 }
 
@@ -163,8 +165,14 @@ fn approval_effect_from_result(result: &ToolResult) -> Option<ApprovalUpdate> {
                 reason,
             })
         }
-        "approved" => Some(ApprovalUpdate::Approved { approval_id }),
-        "denied" => Some(ApprovalUpdate::Denied { approval_id }),
+        "approved" => Some(ApprovalUpdate::Approved {
+            approval_id,
+            note: None,
+        }),
+        "denied" => Some(ApprovalUpdate::Denied {
+            approval_id,
+            note: None,
+        }),
         _ => None,
     }
 }

@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use crate::registry::ToolContext;
 use crate::tools::Tool;
 use crate::types::{ToolCall, ToolResult, ToolStatus};
-use crate::workspace::resolve_workspace_path;
+use crate::workspace::{resolve_workspace_path, ResolvedWorkspacePath};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WriteFileArgs {
@@ -45,12 +45,12 @@ impl Tool for WriteFileTool {
         };
 
         match write_file(&ctx.config.workspace_root, &args) {
-            Ok(path) => ToolResult {
+            Ok(resolved) => ToolResult {
                 tool_call_id: call.id,
                 tool_name: call.name,
                 status: ToolStatus::Success,
-                content: format!("Wrote {}", path.display()),
-                meta: Some(json!({ "path": path })),
+                content: format!("Wrote {}", resolved.canonical_path.display()),
+                meta: Some(workspace_path_meta(&resolved)),
             },
             Err(err) => ToolResult {
                 tool_call_id: call.id,
@@ -66,11 +66,23 @@ impl Tool for WriteFileTool {
 fn write_file(
     workspace_root: &std::path::Path,
     args: &WriteFileArgs,
-) -> Result<std::path::PathBuf, String> {
-    let path = resolve_workspace_path(workspace_root, &args.path).map_err(|err| err.to_string())?;
-    if let Some(parent) = path.parent() {
+) -> Result<ResolvedWorkspacePath, String> {
+    let resolved =
+        resolve_workspace_path(workspace_root, &args.path).map_err(|err| err.to_string())?;
+    if let Some(parent) = resolved.canonical_path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
-    std::fs::write(&path, args.content.as_bytes()).map_err(|err| err.to_string())?;
-    Ok(path)
+    std::fs::write(&resolved.canonical_path, args.content.as_bytes())
+        .map_err(|err| err.to_string())?;
+    Ok(resolved)
+}
+
+fn workspace_path_meta(resolved: &ResolvedWorkspacePath) -> Value {
+    json!({
+        "path": resolved.canonical_path,
+        "requested_path": resolved.requested_path,
+        "normalized_path": resolved.normalized_path,
+        "canonical_path": resolved.canonical_path,
+        "was_absolute": resolved.was_absolute,
+    })
 }

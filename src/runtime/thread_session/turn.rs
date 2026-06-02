@@ -7,14 +7,15 @@ use crate::agent::Agent;
 use crate::config::{AgentConfig, ThinkingMode};
 use crate::events::RuntimeEventKind;
 use crate::llm::LlmRequestOptions;
+use crate::resolved::ResolvedModelConfig;
 use crate::runtime::context::{ContextManager, PromptContext, TurnPaths};
 use crate::runtime::thread_runtime::{
     ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus, ThreadTurnContext,
 };
 use crate::runtime::tool_call_runtime::{ApprovalUpdate, ToolEffect, ToolExecutionOutcome};
-use crate::session::{ApprovalStatus, CompactionSummary, ThreadSnapshot};
+use crate::session::{ApprovalId, ApprovalStatus, CompactionSummary, ThreadSnapshot};
 use crate::state::rollout::{CompactedItem, RolloutItem};
-use crate::types::{AssistantTurn, ConversationMessage, MessageRole, TurnId};
+use crate::types::{AssistantTurn, ConversationMessage, MessageRole, ToolCall, TurnId};
 
 impl ThreadSession {
     pub(crate) async fn handle_user_input(
@@ -42,6 +43,9 @@ impl ThreadSession {
         let turn_cwd = turn_context
             .as_ref()
             .and_then(|context| context.cwd.clone());
+        let turn_resolved_model = turn_context
+            .as_ref()
+            .and_then(|context| context.resolved_model.clone());
         let turn_thinking_mode = turn_context
             .as_ref()
             .and_then(|context| context.thinking_mode);
@@ -54,6 +58,7 @@ impl ThreadSession {
             .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?
             .snapshot
             .clone();
+        self.ensure_agent_for_turn_model(turn_resolved_model.as_ref())?;
 
         let final_turn = if let Some(mut interrupt) = interrupt {
             let interrupted_during_compaction = tokio::select! {
@@ -77,6 +82,7 @@ impl ThreadSession {
                 &turn_id,
                 prompt,
                 turn_cwd,
+                turn_resolved_model.as_ref(),
                 turn_thinking_mode,
                 &mut snapshot,
             )?;
@@ -89,7 +95,7 @@ impl ThreadSession {
             } = self;
             let runtime_turn_id = turn_id.clone();
             tokio::select! {
-                result = run_session_turn(agent, recorder, rollout_store, context_manager, &mut snapshot, runtime_turn_id, runtime_turn_cwd, turn_thinking_mode) => {
+                result = run_session_turn(agent, recorder, rollout_store, context_manager, &mut snapshot, runtime_turn_id, runtime_turn_cwd, turn_resolved_model.as_ref(), turn_thinking_mode) => {
                     match result {
                         Ok(turn) => turn,
                         Err(err) => {
@@ -119,6 +125,7 @@ impl ThreadSession {
                 &turn_id,
                 prompt,
                 turn_cwd,
+                turn_resolved_model.as_ref(),
                 turn_thinking_mode,
                 &mut snapshot,
             )?;
@@ -137,6 +144,7 @@ impl ThreadSession {
                 &mut snapshot,
                 turn_id.clone(),
                 runtime_turn_cwd,
+                turn_resolved_model.as_ref(),
                 turn_thinking_mode,
             )
             .await
@@ -166,18 +174,36 @@ impl ThreadSession {
         })
     }
 
+    fn ensure_agent_for_turn_model(
+        &mut self,
+        resolved_model: Option<&ResolvedModelConfig>,
+    ) -> Result<()> {
+        let Some(resolved_model) = resolved_model else {
+            return Ok(());
+        };
+        if &self.agent.config().model == resolved_model {
+            return Ok(());
+        }
+
+        let mut config = self.agent.config().clone();
+        config.model = resolved_model.clone();
+        self.agent = (self.agent_factory)(config)?;
+        Ok(())
+    }
+
     fn record_user_turn_start(
         &mut self,
         turn_id: &TurnId,
         prompt: String,
         turn_cwd: Option<PathBuf>,
+        turn_model: Option<&ResolvedModelConfig>,
         turn_thinking_mode: Option<ThinkingMode>,
         snapshot: &mut ThreadSnapshot,
     ) -> Result<()> {
         // Apply model-visible runtime context before the user message so the
         // sampling prompt has stable background for this turn.
         let context_cwd = turn_cwd.unwrap_or_else(|| snapshot.cwd.clone());
-        let turn_config = config_for_turn(self.agent.config(), turn_thinking_mode);
+        let turn_config = config_for_turn(self.agent.config(), turn_model, turn_thinking_mode);
         let prompt_context = PromptContext::for_turn(
             &turn_config,
             TurnPaths {
@@ -212,6 +238,136 @@ impl ThreadSession {
         )?;
         interrupted.notify_one();
         Ok(())
+    }
+
+    pub(crate) async fn handle_approval_decision(
+        &mut self,
+        requested_turn_id: Option<TurnId>,
+        approval_id: ApprovalId,
+        status: ApprovalStatus,
+        note: Option<String>,
+    ) -> Result<ThreadOpResult> {
+        if matches!(status, ApprovalStatus::Pending) {
+            return Err(ThreadRuntimeError::TurnRejected {
+                thread_id: self.thread_id.clone(),
+                reason: "approval decision cannot be pending".to_string(),
+            }
+            .into());
+        }
+
+        let (turn_id, mut snapshot) =
+            self.resolve_pending_approval_turn(requested_turn_id, &approval_id)?;
+        let cwd = snapshot.cwd.clone();
+        let tool_runtime = self.agent.tool_runtime(
+            snapshot.thread_id.clone(),
+            turn_id.clone(),
+            snapshot.workspace_root.clone(),
+            cwd,
+        );
+        let decision = match status {
+            ApprovalStatus::Approved => "approved",
+            ApprovalStatus::Denied => "denied",
+            ApprovalStatus::Pending => unreachable!("pending status is rejected above"),
+        };
+        let call = ToolCall {
+            id: format!("approval_decision_{}", approval_id.as_str()),
+            name: "run_command".to_string(),
+            arguments: serde_json::json!({
+                "approval_id": approval_id.as_str(),
+                "decision": decision,
+            }),
+        };
+        let mut outcome = tool_runtime.execute(call).await;
+        attach_approval_note(&mut outcome, &approval_id, note.clone());
+        if !approval_outcome_matches(&outcome, &approval_id, &status) {
+            return Err(ThreadRuntimeError::TurnRejected {
+                thread_id: self.thread_id.clone(),
+                reason: outcome.result.content,
+            }
+            .into());
+        }
+        record_tool_outcome(
+            &mut self.recorder,
+            &self.rollout_store,
+            &mut self.context_manager,
+            &mut snapshot,
+            &turn_id,
+            outcome,
+        )?;
+
+        Ok(ThreadOpResult::ApprovalDecision {
+            turn_id,
+            approval_id,
+            status,
+        })
+    }
+
+    fn resolve_pending_approval_turn(
+        &self,
+        requested_turn_id: Option<TurnId>,
+        approval_id: &ApprovalId,
+    ) -> Result<(TurnId, ThreadSnapshot)> {
+        let state = self
+            .live_state
+            .read()
+            .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?;
+        if !state
+            .overlay
+            .pending_approvals
+            .iter()
+            .any(|approval| &approval.approval_id == approval_id)
+        {
+            return Err(ThreadRuntimeError::TurnRejected {
+                thread_id: self.thread_id.clone(),
+                reason: format!("unknown approval id: {}", approval_id.as_str()),
+            }
+            .into());
+        }
+        let approval_turn_id = state
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                RuntimeEventKind::ApprovalRequested {
+                    approval_id: event_approval_id,
+                    ..
+                } if event_approval_id == approval_id => event.turn_id.clone(),
+                _ => None,
+            });
+        let latest_turn_id = state
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| event.turn_id.clone());
+        let resolved_turn_id = requested_turn_id
+            .or(approval_turn_id)
+            .or(latest_turn_id)
+            .ok_or_else(|| ThreadRuntimeError::TurnRejected {
+                thread_id: self.thread_id.clone(),
+                reason: "approval has no turn id".to_string(),
+            })?;
+        if let Some(event_turn_id) = state
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                RuntimeEventKind::ApprovalRequested {
+                    approval_id: event_approval_id,
+                    ..
+                } if event_approval_id == approval_id => event.turn_id.clone(),
+                _ => None,
+            })
+        {
+            if event_turn_id != resolved_turn_id {
+                return Err(ThreadRuntimeError::TurnRejected {
+                    thread_id: self.thread_id.clone(),
+                    reason: format!("approval turn is {}", event_turn_id.as_str()),
+                }
+                .into());
+            }
+        }
+
+        Ok((resolved_turn_id, state.snapshot.clone()))
     }
 
     async fn compact_before_turn_if_needed(
@@ -251,6 +407,7 @@ async fn run_session_turn(
     snapshot: &mut ThreadSnapshot,
     runtime_turn_id: TurnId,
     turn_cwd: Option<PathBuf>,
+    turn_model: Option<&ResolvedModelConfig>,
     turn_thinking_mode: Option<ThinkingMode>,
 ) -> Result<AssistantTurn> {
     let cwd = turn_cwd.clone().unwrap_or_else(|| snapshot.cwd.clone());
@@ -261,10 +418,14 @@ async fn run_session_turn(
         cwd,
     );
     let llm_options = LlmRequestOptions {
+        model: turn_model
+            .map(|model| model.identity.model_id.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         thinking_mode: turn_thinking_mode.or(agent.config().thinking_mode),
     };
 
-    for _ in 0..agent.max_turns() {
+    loop {
         let prompt = context_manager.for_prompt();
         let completion = match agent
             .sample_assistant_turn(&prompt, &tool_runtime.schemas(), &llm_options)
@@ -273,7 +434,7 @@ async fn run_session_turn(
             Ok(completion) => completion,
             Err(err)
                 if crate::llm::is_context_window_error(&err)
-                    && agent.config().model_context_window.is_some() =>
+                    && agent.config().model.capabilities.context_window.is_some() =>
             {
                 compact_after_context_window_error(
                     agent,
@@ -283,6 +444,7 @@ async fn run_session_turn(
                     snapshot,
                     &runtime_turn_id,
                     turn_cwd.as_ref(),
+                    turn_model,
                     turn_thinking_mode,
                 )
                 .await?;
@@ -304,8 +466,10 @@ async fn run_session_turn(
             &turn,
         )?;
         if let Some(usage) = token_usage.as_ref() {
-            context_manager
-                .update_token_info_from_usage(usage, agent.config().model_context_window);
+            context_manager.update_token_info_from_usage(
+                usage,
+                agent.config().model.capabilities.context_window,
+            );
             record_token_count_event(recorder, context_manager, snapshot, &runtime_turn_id)?;
         }
 
@@ -325,11 +489,6 @@ async fn run_session_turn(
             )?;
         }
     }
-
-    Err(anyhow!(
-        "Agent reached max turns ({}) without a final assistant turn",
-        agent.max_turns()
-    ))
 }
 
 async fn compact_after_context_window_error(
@@ -340,11 +499,14 @@ async fn compact_after_context_window_error(
     snapshot: &mut ThreadSnapshot,
     turn_id: &TurnId,
     turn_cwd: Option<&PathBuf>,
+    turn_model: Option<&ResolvedModelConfig>,
     turn_thinking_mode: Option<ThinkingMode>,
 ) -> Result<()> {
     let context_window = agent
         .config()
-        .model_context_window
+        .model
+        .capabilities
+        .context_window
         .ok_or_else(|| anyhow!("model context window is required for context-window retry"))?;
     context_manager.set_token_usage_full(context_window);
     record_token_count_event(recorder, context_manager, snapshot, turn_id)?;
@@ -372,6 +534,7 @@ async fn compact_after_context_window_error(
         context_manager,
         snapshot,
         turn_cwd,
+        turn_model,
         turn_thinking_mode,
         last_user_message,
     )
@@ -383,11 +546,12 @@ fn restore_retry_context_after_compaction(
     context_manager: &mut ContextManager,
     snapshot: &mut ThreadSnapshot,
     turn_cwd: Option<&PathBuf>,
+    turn_model: Option<&ResolvedModelConfig>,
     turn_thinking_mode: Option<ThinkingMode>,
     last_user_message: Option<ConversationMessage>,
 ) -> Result<()> {
     let context_cwd = turn_cwd.cloned().unwrap_or_else(|| snapshot.cwd.clone());
-    let turn_config = config_for_turn(agent.config(), turn_thinking_mode);
+    let turn_config = config_for_turn(agent.config(), turn_model, turn_thinking_mode);
     let prompt_context = PromptContext::for_turn(
         &turn_config,
         TurnPaths {
@@ -411,8 +575,15 @@ fn restore_retry_context_after_compaction(
     Ok(())
 }
 
-fn config_for_turn(config: &AgentConfig, turn_thinking_mode: Option<ThinkingMode>) -> AgentConfig {
+fn config_for_turn(
+    config: &AgentConfig,
+    turn_model: Option<&ResolvedModelConfig>,
+    turn_thinking_mode: Option<ThinkingMode>,
+) -> AgentConfig {
     let mut config = config.clone();
+    if let Some(model) = turn_model {
+        config.model = model.clone();
+    }
     if let Some(thinking_mode) = turn_thinking_mode {
         config.thinking_mode = Some(thinking_mode);
     }
@@ -558,7 +729,7 @@ fn apply_approval_update(
                 },
             )?;
         }
-        ApprovalUpdate::Approved { approval_id } => {
+        ApprovalUpdate::Approved { approval_id, note } => {
             recorder.clear_approval(&approval_id)?;
             recorder.record(
                 snapshot,
@@ -566,11 +737,11 @@ fn apply_approval_update(
                 RuntimeEventKind::ApprovalDecision {
                     approval_id,
                     status: ApprovalStatus::Approved,
-                    note: None,
+                    note,
                 },
             )?;
         }
-        ApprovalUpdate::Denied { approval_id } => {
+        ApprovalUpdate::Denied { approval_id, note } => {
             recorder.clear_approval(&approval_id)?;
             recorder.record(
                 snapshot,
@@ -578,13 +749,59 @@ fn apply_approval_update(
                 RuntimeEventKind::ApprovalDecision {
                     approval_id,
                     status: ApprovalStatus::Denied,
-                    note: None,
+                    note,
                 },
             )?;
         }
     }
 
     Ok(())
+}
+
+fn attach_approval_note(
+    outcome: &mut ToolExecutionOutcome,
+    approval_id: &ApprovalId,
+    note: Option<String>,
+) {
+    for effect in &mut outcome.effects {
+        match effect {
+            ToolEffect::ApprovalUpdate(ApprovalUpdate::Approved {
+                approval_id: effect_approval_id,
+                note: effect_note,
+            })
+            | ToolEffect::ApprovalUpdate(ApprovalUpdate::Denied {
+                approval_id: effect_approval_id,
+                note: effect_note,
+            }) if effect_approval_id == approval_id => {
+                *effect_note = note.clone();
+            }
+            _ => {}
+        }
+    }
+}
+
+fn approval_outcome_matches(
+    outcome: &ToolExecutionOutcome,
+    approval_id: &ApprovalId,
+    status: &ApprovalStatus,
+) -> bool {
+    outcome.effects.iter().any(|effect| match (effect, status) {
+        (
+            ToolEffect::ApprovalUpdate(ApprovalUpdate::Approved {
+                approval_id: effect_approval_id,
+                ..
+            }),
+            ApprovalStatus::Approved,
+        )
+        | (
+            ToolEffect::ApprovalUpdate(ApprovalUpdate::Denied {
+                approval_id: effect_approval_id,
+                ..
+            }),
+            ApprovalStatus::Denied,
+        ) => effect_approval_id == approval_id,
+        _ => false,
+    })
 }
 
 #[cfg(test)]
@@ -932,6 +1149,60 @@ mod tests {
             .expect("run turn");
 
         assert_eq!(*prompt_lens.lock().unwrap(), vec![3, 5]);
+    }
+
+    #[tokio::test]
+    async fn thread_session_continues_until_assistant_turn_has_no_tool_calls() {
+        let dir = tempdir().unwrap();
+        let thread_id = ThreadId::new("session_thread_session_no_legacy_max_turns");
+        let turn_id = TurnId::new("turn_1");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        let prompt_lens = Arc::new(Mutex::new(Vec::new()));
+        let prompt_lens_for_llm = prompt_lens.clone();
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            let mut turns = Vec::new();
+            for index in 0..13 {
+                turns.push(AssistantTurn {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: format!("call_{index}"),
+                        name: "missing_tool".into(),
+                        arguments: serde_json::json!({}),
+                    }],
+                });
+            }
+            turns.push(AssistantTurn {
+                text: Some("done after tools".into()),
+                tool_calls: vec![],
+            });
+            Ok(Agent::new(
+                config,
+                Box::new(RecordingLlm::new(turns, prompt_lens_for_llm.clone())),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config,
+            agent_factory,
+        ))
+        .expect("create thread session");
+
+        let result = session
+            .handle_user_input(turn_id, "keep going".into(), None, None)
+            .await
+            .expect("run turn");
+        let ThreadOpResult::UserInput { final_turn, .. } = result else {
+            panic!("expected user input result");
+        };
+
+        assert_eq!(final_turn.text.as_deref(), Some("done after tools"));
+        assert_eq!(prompt_lens.lock().unwrap().len(), 14);
     }
 
     #[tokio::test]
@@ -1308,12 +1579,12 @@ mod tests {
             reasoning_output_tokens: 2,
             total_tokens: 52,
         };
-        let config = AgentConfig {
+        let mut config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
-            model_context_window: Some(1_000),
             ..AgentConfig::default()
         };
+        config.model.capabilities.context_window = Some(1_000);
         write_rollout_meta(&config, &thread_id);
         let usage_for_llm = usage.clone();
         let agent_factory: AgentFactory = Arc::new(move |config| {
@@ -1365,12 +1636,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let thread_id = ThreadId::new("session_no_bogus_token_usage");
         let turn_id = TurnId::new("turn_1");
-        let config = AgentConfig {
+        let mut config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
-            model_context_window: Some(1_000),
             ..AgentConfig::default()
         };
+        config.model.capabilities.context_window = Some(1_000);
         write_rollout_meta(&config, &thread_id);
         let agent_factory: AgentFactory = Arc::new(move |config| {
             Ok(Agent::new(
@@ -1407,12 +1678,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let thread_id = ThreadId::new("session_context_window_retry");
         let turn_id = TurnId::new("turn_1");
-        let config = AgentConfig {
+        let mut config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
-            model_context_window: Some(1_000),
             ..AgentConfig::default()
         };
+        config.model.capabilities.context_window = Some(1_000);
         write_rollout_meta(&config, &thread_id);
         let prompt_contents = Arc::new(Mutex::new(Vec::new()));
         let prompt_contents_for_llm = prompt_contents.clone();
@@ -1494,12 +1765,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let thread_id = ThreadId::new("session_context_window_retry_once");
         let turn_id = TurnId::new("turn_1");
-        let config = AgentConfig {
+        let mut config = AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
-            model_context_window: Some(1_000),
             ..AgentConfig::default()
         };
+        config.model.capabilities.context_window = Some(1_000);
         write_rollout_meta(&config, &thread_id);
         let prompt_contents = Arc::new(Mutex::new(Vec::new()));
         let prompt_contents_for_llm = prompt_contents.clone();

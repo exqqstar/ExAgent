@@ -29,7 +29,7 @@ impl PromptContext {
             turn_context: TurnContextItem {
                 workspace_root: paths.workspace_root,
                 cwd: paths.cwd,
-                model: config.model.clone(),
+                model: config.model.identity.clone(),
                 policy_mode: config.policy_mode,
                 command_timeout_secs: config.command_timeout_secs,
                 max_output_bytes: config.max_output_bytes,
@@ -271,8 +271,8 @@ fn build_context_update_messages(
     push_changed(
         &mut runtime_updates,
         "Model",
-        previous.model.as_str(),
-        current.model.as_str(),
+        previous.model.display(),
+        current.model.display(),
     );
     push_changed(
         &mut runtime_updates,
@@ -372,13 +372,16 @@ fn current_utc_date() -> String {
 mod tests {
     use super::*;
     use crate::policy::PolicyMode;
+    use crate::resolved::ModelRef;
     use crate::types::{MessageRole, TokenUsage};
 
     fn test_config(workspace_root: &Path, cwd: &Path) -> AgentConfig {
+        let mut model = AgentConfig::default().model;
+        model.identity = ModelRef::new("openai", "test-model");
         AgentConfig {
             workspace_root: workspace_root.to_path_buf(),
             cwd: cwd.to_path_buf(),
-            model: "test-model".to_string(),
+            model,
             policy_mode: PolicyMode::Enforced,
             command_timeout_secs: 42,
             max_output_bytes: 1024,
@@ -455,7 +458,7 @@ mod tests {
             },
         ));
 
-        config.model = "next-model".to_string();
+        config.model.identity = ModelRef::new("openai", "next-model");
         config.policy_mode = PolicyMode::Advisory;
         let next_cwd = workspace_root.join("other");
         let messages = manager.apply_context_updates(PromptContext::for_turn(
@@ -471,7 +474,7 @@ mod tests {
         assert!(messages[0].content.contains("Runtime context updated:"));
         assert!(messages[0]
             .content
-            .contains("Model: test-model -> next-model"));
+            .contains("Model: openai:test-model -> openai:next-model"));
         assert!(messages[0]
             .content
             .contains("Policy mode: enforced -> advisory"));
@@ -675,7 +678,7 @@ mod tests {
         let context = TurnContextItem {
             workspace_root: workspace_root.clone(),
             cwd: workspace_root.clone(),
-            model: "mock".to_string(),
+            model: ModelRef::new("openai", "mock"),
             policy_mode: PolicyMode::Off,
             command_timeout_secs: 30,
             max_output_bytes: 1024,
@@ -727,7 +730,7 @@ mod tests {
         let context = TurnContextItem {
             workspace_root: workspace_root.clone(),
             cwd: workspace_root,
-            model: "mock".to_string(),
+            model: ModelRef::new("openai", "mock"),
             policy_mode: PolicyMode::Off,
             command_timeout_secs: 30,
             max_output_bytes: 1024,

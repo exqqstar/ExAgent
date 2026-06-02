@@ -25,6 +25,7 @@ pub(crate) async fn compact_history(
             &prompt,
             &[],
             &LlmRequestOptions {
+                model: None,
                 thinking_mode: agent.config().thinking_mode,
             },
         )

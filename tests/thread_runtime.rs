@@ -4,6 +4,7 @@ use exagent::config::AgentConfig;
 use exagent::events::{RuntimeEvent, RuntimeEventKind};
 use exagent::llm::{LlmClient, LlmRequestOptions, MockLlm};
 use exagent::registry::ToolRegistry;
+use exagent::resolved::ModelRef;
 use exagent::runtime::thread_runtime::{
     AgentFactory, ThreadOpResult, ThreadRuntime, ThreadRuntimeOptions, ThreadRuntimeStatus,
 };
@@ -131,7 +132,7 @@ async fn thread_resume_reconstructs_context_from_rollout_without_snapshot() {
     let turn_context = TurnContextItem {
         workspace_root: config.workspace_root.clone(),
         cwd: config.cwd.clone(),
-        model: "mock".to_string(),
+        model: ModelRef::new("openai", "mock"),
         policy_mode: exagent::policy::PolicyMode::Off,
         command_timeout_secs: 30,
         max_output_bytes: 1024,

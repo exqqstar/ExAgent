@@ -116,13 +116,23 @@ reported in `ignored_overrides`.
   "prompt": "Summarize this runtime.",
   "workspace_root": ".",
   "turn_context": {
-    "cwd": "src"
+    "cwd": "src",
+    "model": {
+      "provider_id": "openai",
+      "model_id": "gpt-4.1"
+    }
   }
 }
 ```
 
 `turn_context.cwd` is optional. When present, it applies only to that turn and
 does not rewrite the thread snapshot's durable `cwd`.
+
+`turn_context.model` is optional. When present, it is a durable model identity
+object with `provider_id` and `model_id`; it never carries resolved provider
+endpoints, API keys, OAuth tokens, or other credential material. The app-server
+resolves that `ModelRef` before submitting the turn to the runtime actor, and a
+running turn keeps the resolved model frozen until completion or interruption.
 
 The response shape is:
 

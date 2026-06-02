@@ -61,10 +61,6 @@ impl Agent {
         }
     }
 
-    pub(crate) fn max_turns(&self) -> usize {
-        self.config.max_turns
-    }
-
     pub(crate) fn config(&self) -> &AgentConfig {
         &self.config
     }

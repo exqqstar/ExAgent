@@ -9,10 +9,12 @@ use crate::agent::Agent;
 use crate::config::{AgentConfig, ThinkingMode};
 use crate::events::RuntimeEvent;
 use crate::policy::PolicyManager;
+use crate::resolved::ResolvedModelConfig;
 use crate::runtime::thread_session::{
     RuntimeInterrupt, ThreadSession, ThreadSessionLiveState, ThreadSessionLiveView,
     ThreadSessionOptions,
 };
+use crate::session::{ApprovalId, ApprovalStatus};
 use crate::types::{AssistantTurn, ThreadId, TurnId};
 
 const THREAD_OP_CHANNEL_CAPACITY: usize = 64;
@@ -45,6 +47,7 @@ pub enum ThreadRuntimeStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadTurnContext {
     pub cwd: Option<PathBuf>,
+    pub resolved_model: Option<ResolvedModelConfig>,
     pub thinking_mode: Option<ThinkingMode>,
 }
 
@@ -58,6 +61,12 @@ pub enum ThreadOp {
     Interrupt {
         turn_id: Option<TurnId>,
     },
+    ApprovalDecision {
+        turn_id: Option<TurnId>,
+        approval_id: ApprovalId,
+        status: ApprovalStatus,
+        note: Option<String>,
+    },
     Shutdown,
 }
 
@@ -68,6 +77,11 @@ pub enum ThreadOpResult {
     },
     Interrupted {
         turn_id: TurnId,
+    },
+    ApprovalDecision {
+        turn_id: TurnId,
+        approval_id: ApprovalId,
+        status: ApprovalStatus,
     },
     Ack,
 }
@@ -305,6 +319,22 @@ impl ThreadRuntime {
         }
     }
 
+    pub(crate) async fn approval_decision(
+        &self,
+        requested_turn_id: Option<TurnId>,
+        approval_id: ApprovalId,
+        status: ApprovalStatus,
+        note: Option<String>,
+    ) -> Result<ThreadOpResult> {
+        self.submit_control_and_wait(ThreadOp::ApprovalDecision {
+            turn_id: requested_turn_id,
+            approval_id,
+            status,
+            note,
+        })
+        .await
+    }
+
     pub async fn wait_until_terminated(&self) {
         let mut status_rx = self.status_rx.clone();
         loop {
@@ -405,6 +435,18 @@ impl ThreadRuntimeLoop {
                 }
                 ThreadOp::Interrupt { turn_id } => {
                     let result = self.session.handle_interrupt(turn_id).await;
+                    complete(submission.completion_tx, result);
+                }
+                ThreadOp::ApprovalDecision {
+                    turn_id,
+                    approval_id,
+                    status,
+                    note,
+                } => {
+                    let result = self
+                        .session
+                        .handle_approval_decision(turn_id, approval_id, status, note)
+                        .await;
                     complete(submission.completion_tx, result);
                 }
             }

@@ -1,0 +1,101 @@
+use serde::Serialize;
+
+pub(crate) const OUTPUT_TRUNCATION_MARKER: &[u8] = b"\n...[output truncated]...\n";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectedOutput {
+    pub content: String,
+    pub original_bytes: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct OutputProjectionMeta {
+    pub strategy: &'static str,
+    pub max_bytes: usize,
+    pub marker: &'static str,
+}
+
+pub(crate) fn output_projection_meta(max_bytes: usize) -> OutputProjectionMeta {
+    OutputProjectionMeta {
+        strategy: "head_tail_bytes",
+        max_bytes,
+        marker: std::str::from_utf8(OUTPUT_TRUNCATION_MARKER).unwrap_or(""),
+    }
+}
+
+pub(crate) fn project_output(bytes: &[u8], max_bytes: usize) -> ProjectedOutput {
+    if bytes.len() <= max_bytes {
+        let (content, lossy_truncated) = lossy_string_with_byte_limit(bytes, max_bytes);
+        return ProjectedOutput {
+            content,
+            original_bytes: bytes.len(),
+            truncated: lossy_truncated,
+        };
+    }
+
+    if max_bytes <= OUTPUT_TRUNCATION_MARKER.len() {
+        let (content, _lossy_truncated) =
+            lossy_string_with_byte_limit(&bytes[..max_bytes], max_bytes);
+        return ProjectedOutput {
+            content,
+            original_bytes: bytes.len(),
+            truncated: true,
+        };
+    }
+
+    let remaining = max_bytes - OUTPUT_TRUNCATION_MARKER.len();
+    let head_len = remaining / 2;
+    let tail_len = remaining - head_len;
+    let mut projected = Vec::with_capacity(max_bytes);
+    projected.extend_from_slice(&bytes[..head_len]);
+    projected.extend_from_slice(OUTPUT_TRUNCATION_MARKER);
+    projected.extend_from_slice(&bytes[bytes.len() - tail_len..]);
+
+    let (content, _lossy_truncated) = lossy_string_with_byte_limit(&projected, max_bytes);
+    ProjectedOutput {
+        content,
+        original_bytes: bytes.len(),
+        truncated: true,
+    }
+}
+
+fn lossy_string_with_byte_limit(bytes: &[u8], max_bytes: usize) -> (String, bool) {
+    let content = String::from_utf8_lossy(bytes).to_string();
+    if content.len() <= max_bytes {
+        return (content, false);
+    }
+
+    let mut end = 0;
+    for (idx, ch) in content.char_indices() {
+        if idx + ch.len_utf8() > max_bytes {
+            break;
+        }
+        end = idx + ch.len_utf8();
+    }
+
+    (content[..end].to_string(), true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_output;
+
+    #[test]
+    fn lossy_projection_respects_byte_limit_for_binary_output() {
+        let output = project_output(&[0xff; 32], 8);
+
+        assert!(output.content.len() <= 8);
+        assert_eq!(output.original_bytes, 32);
+        assert!(output.truncated);
+    }
+
+    #[test]
+    fn lossy_projection_marks_short_invalid_output_as_truncated_when_relimited() {
+        let output = project_output(&[0xff; 4], 4);
+
+        assert!(output.content.len() <= 4);
+        assert_eq!(output.original_bytes, 4);
+        assert!(output.truncated);
+    }
+}

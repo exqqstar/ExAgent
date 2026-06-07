@@ -24,32 +24,13 @@ recoverable agent work: event replay, persistent shell sessions, approval-gated
 tools, subagents, goal tracking, procedural memory, MCP tools, and a desktop
 inspector for what the agent is doing.
 
-## Current Capabilities
+## Highlights
 
-- **Desktop project workspace**: add local projects, search sessions, pin or
-  archive threads, rename conversations, and reopen prior work from the sidebar.
-- **GUI provider setup**: configure OpenAI-compatible endpoints, Anthropic,
-  Google, DeepSeek, Moonshot/Kimi, Zhipu, ChatGPT OAuth, and GitHub Copilot
-  OAuth from Settings.
-- **Threaded coding sessions**: run turns with per-turn model, thinking-mode,
-  and turn-mode controls directly from the composer.
-- **Approval-gated tools**: review risky command or file actions in the GUI
-  before they execute.
-- **Live runtime inspector**: inspect progress, runtime events, token usage,
-  environment state, changed files, tool calls, and subagent activity while a
-  turn is running.
-- **Durable local history**: store replayable thread records under each
-  project's `.exagent/threads` directory, so sessions can be restored after the
-  app restarts.
-- **Persistent shell sessions**: keep long-running processes alive across
-  turns, stream stdout/stderr, send stdin, and interrupt work when needed.
-- **Thread-native subagents**: spawn child agents with their own thread state,
-  mailbox, profile, lifecycle, and visible activity in the inspector.
-- **Goal runtime**: create and update explicit thread goals, track usage
-  against budgets, and continue work with goal state preserved.
-- **Skills, instructions, and MCP**: load project instructions, scan `SKILL.md`
-  skill roots, and route MCP tools through the same approval and event pipeline
-  as built-in tools.
+- Desktop-first local agent workbench for coding projects
+- Durable sessions that can be reopened from local project history
+- GUI provider setup for API-key and OAuth-based model providers
+- Approval-gated coding tools with live transcript and event inspection
+- Persistent shells, subagents, goals, MCP tools, and `SKILL.md` support
 
 ## Quickstart
 

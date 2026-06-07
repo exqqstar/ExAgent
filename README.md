@@ -9,22 +9,79 @@ The same runtime also exposes lower-level CLI and HTTP protocol adapters for
 development, tests, and integrations, but they are no longer the recommended
 entry point for everyday use.
 
+ExAgent is not just a chat UI. It is a local coding-agent runtime substrate:
+durable threads, replayable events, approval-gated tools, persistent shell
+sessions, thread-native subagents, goal tracking, procedural memory, MCP tools,
+and a desktop workbench built around observability.
+
+## Why This Exists
+
+Most local agent prototypes stop at prompt, sample, tool call, response. That
+is not enough for long-running coding work. ExAgent focuses on the runtime
+pieces that make agent work inspectable and recoverable:
+
+- durable local state instead of process-only conversations
+- append-only event and rollout history for replay and audit
+- explicit separation between durable facts, live-only state, and model-visible
+  context
+- approval gates around risky tool execution
+- long-lived subprocess sessions across turns
+- multiple cooperating agent threads instead of detached background model calls
+- desktop controls for provider setup, projects, sessions, goals, tools, and
+  runtime events
+
 ## Current Capabilities
 
-- Manage local projects and indexed conversations from the desktop sidebar
-- Start, resume, rename, pin, archive, and search durable agent threads
-- Persist thread state under each project at `.exagent/threads/<thread_id>/rollout.jsonl`
-- Configure model providers from the settings UI, including OpenAI-compatible
+Desktop workbench:
+
+- Manage local projects, indexed conversations, archived sessions, pinned
+  threads, search, and project worktrees from the sidebar
+- Configure model providers from Settings, including OpenAI-compatible
   endpoints, Anthropic, Google, DeepSeek, Moonshot/Kimi, Zhipu, ChatGPT OAuth,
   and GitHub Copilot OAuth
-- Store provider credentials locally and keep resolved credentials out of
-  persisted runtime events
-- Run turns from a chat composer with per-turn model and thinking-mode choices
-- Review live tool calls, approvals, stdout/stderr, token usage, and runtime
-  events in the desktop inspector
+- Store provider credentials locally while keeping resolved API keys and OAuth
+  tokens out of persisted runtime events
+- Run turns from a composer with per-turn model, thinking-mode, and turn-mode
+  choices
+- Inspect live transcripts, tool calls, approvals, stdout/stderr chunks, token
+  usage, runtime events, subagent trees, and goal state
 - Configure MCP servers and skill roots from desktop settings
-- Create project worktrees for isolated implementation branches
-- Use the Rust CLI and HTTP boundary as advanced integration surfaces
+
+Runtime and persistence:
+
+- Run each thread through a serialized `ThreadRuntime` actor and
+  `ThreadSession` state machine
+- Persist thread history under each project at
+  `.exagent/threads/<thread_id>/rollout.jsonl`
+- Replay cold threads from append-only rollout records and project a stable
+  `ThreadView` for GUI/API clients
+- Keep live-only state, such as pending approvals and open exec sessions, in a
+  `RuntimeOverlay` that is not resurrected as actionable state during cold
+  replay
+- Track token usage and use rollout-backed logical compaction to control
+  prompt-visible context without deleting old audit history
+
+Tools, agents, and context:
+
+- Execute built-in coding tools through a typed tool runtime with visibility,
+  provider capability checks, approval interception, lifecycle events, and
+  model-visible result projection
+- Keep persistent shell sessions alive across turns, with `write_stdin`, live
+  stdout/stderr deltas, process-group cleanup, and interrupt/cancel handling
+- Spawn thread-native subagents that have their own runtime, rollout, profile,
+  mailbox, and lifecycle instead of being detached one-off model calls
+- Coordinate subagents through `spawn_agent`, `list_agents`, `send_message`,
+  `followup_task`, `wait_agent`, and `close_agent`
+- Use agent profiles such as explorer, planner, reviewer, and worker to shape
+  instructions, thinking defaults, forked history, and tool policy
+- Track explicit thread goals with status, token budgets, usage accounting,
+  automatic continuation, and desktop goal controls
+- Load procedural context from project instructions and `SKILL.md` skill roots,
+  including project/global skill source scanning and shadowing warnings
+- Refresh configured MCP servers and route external MCP tools through the same
+  tool selection, approval, hook, and event pipeline
+- Use CLI and HTTP protocol adapters as advanced integration surfaces over the
+  same runtime boundary
 
 ## Quickstart
 
@@ -106,13 +163,18 @@ flowchart TB
     Commands["Tauri commands"]
     Facade["DesktopFacade"]
     Index["SQLite project/thread index"]
+    Settings["Provider / MCP / skill settings"]
     Boundary["AppServerService"]
     Runtime["ThreadRuntime"]
     Session["ThreadSession"]
     Context["ContextManager"]
     Overlay["RuntimeOverlay"]
+    Goal["GoalRuntime"]
+    Subagents["AgentControl / subagent registry"]
     Agent["Agent sampling"]
     Tools["Tool runtime and registry"]
+    Mcp["MCP tool adapters"]
+    Providers["Model resolver and provider adapters"]
     Rollout["project .exagent/threads/*/rollout.jsonl"]
     Advanced["Advanced CLI / HTTP adapters"]
 
@@ -120,14 +182,19 @@ flowchart TB
     React --> Commands
     Commands --> Facade
     Facade --> Index
+    Facade --> Settings
     Facade --> Boundary
     Advanced --> Boundary
     Boundary --> Runtime
+    Boundary --> Goal
     Runtime --> Session
     Session --> Context
     Session --> Overlay
+    Session --> Subagents
     Session --> Agent
     Session --> Tools
+    Tools --> Mcp
+    Agent --> Providers
     Session --> Rollout
 ```
 
@@ -143,6 +210,8 @@ Key runtime rules:
 - `RuntimeOverlay` owns live-only approvals and open exec session references
 - cold rollout replay never recreates live-only approvals or running exec
   sessions
+- subagents are real child threads with their own rollout and lifecycle records
+- MCP tools are normalized into the same tool runtime as built-in tools
 
 ## Desktop Development
 
@@ -216,11 +285,14 @@ If both are set, the explicit threshold is clamped to that 90% headroom.
 
 ## Built-In Tools
 
-The default tool registry currently includes:
+The default tool registry includes:
 
-- `read_file`
-- `write_file`
-- `run_command`
+- File and patch tools: `read_file`, `write_file`, `search_files`,
+  `apply_patch`
+- Command tools: `run_command`, `exec_command`, `write_stdin`
+- Subagent tools: `spawn_agent`, `list_agents`, `send_message`,
+  `followup_task`, `wait_agent`, `close_agent`
+- Goal tools: `get_goal`, `create_goal`, `update_goal`
 
 ## Project Status
 
@@ -234,10 +306,16 @@ Currently implemented:
 - policy and approval flow
 - app-server runtime boundary v2 behind desktop and advanced adapters
 - thread-scoped runtime actor
+- thread-native subagents with profiles, mailboxes, forked history, and spawn
+  edge lifecycle records
+- tool runtime selection, resolution, orchestration, hooks, lifecycle events,
+  and model-visible result projection
 - token budget accounting and rollout-backed logical compaction
+- goal runtime with continuation, accounting, and desktop controls
+- project instruction loading and `SKILL.md` procedural memory
+- MCP server settings and dynamic MCP tool integration
 - explicit `full_access` permission profile semantics
 - live-only runtime overlay for approvals and persistent exec refs
-- MCP server and skill-root settings in the desktop app
 
 Current non-goals:
 

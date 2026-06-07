@@ -3,6 +3,8 @@
 ExAgent is licensed under `MIT OR Apache-2.0`. Some documentation in this
 repository summarizes or references third-party open-source projects.
 
+The root [NOTICE](NOTICE) file contains attribution notices for ExAgent itself.
+
 ## External Reference Material
 
 Private design notes and local-only reference checkouts are not distributed in

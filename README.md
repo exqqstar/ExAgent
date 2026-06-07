@@ -291,6 +291,11 @@ Please keep secrets out of issues, pull requests, rollout files, and logs. Use
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the dependency license
 policy and rules for external reference material.
 
+## Authors And Notices
+
+ExAgent was created by exqqstar. See [AUTHORS.md](AUTHORS.md) for authorship
+and contribution attribution, and [NOTICE](NOTICE) for distribution notices.
+
 ## License
 
 Copyright (c) 2026 exqqstar.

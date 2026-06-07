@@ -32,8 +32,7 @@ entry point for everyday use.
 
 - Rust toolchain
 - Node.js and npm
-- A model provider credential, configured in the desktop app or exported through
-  the environment
+- A model provider credential configured in the desktop app
 
 ### 1. Install desktop dependencies
 
@@ -187,9 +186,12 @@ For the protocol contract, see
 
 ## Configuration Notes
 
-The Rust runtime still accepts environment variables for non-desktop flows and
-fallback provider resolution. The desktop settings UI is preferred for normal
-use.
+Desktop users should configure providers in Settings. Enter API keys or complete
+OAuth flows in the GUI; no `.env` file is required for normal desktop use.
+
+The Rust runtime still accepts environment variables for non-desktop CLI/HTTP
+flows and fallback provider resolution. Use [.env.example](.env.example) only
+as an advanced reference for those flows.
 
 ```bash
 export OPENAI_BASE_URL="https://api.openai.com/v1"

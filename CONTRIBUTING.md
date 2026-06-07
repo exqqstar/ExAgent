@@ -12,10 +12,10 @@ cd apps/desktop
 npm ci
 ```
 
-The runtime binary reads environment variables directly. Use `.env.example` as
-a reference and export values in your shell before running model-backed flows.
-Do not commit real API keys, OAuth tokens, rollout files, benchmark outputs, or
-local workspace state.
+The desktop app configures providers through Settings. Use `.env.example` only
+as an advanced reference for CLI/HTTP runtime flows and local protocol
+experiments. Do not commit real API keys, OAuth tokens, rollout files, benchmark
+outputs, or local workspace state.
 
 ## Common Commands
 

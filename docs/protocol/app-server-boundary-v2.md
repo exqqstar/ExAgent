@@ -1,7 +1,11 @@
 # ExAgent App-Server Boundary V2
 
-This document describes the current client-facing HTTP boundary for ExAgent.
-It is a protocol note for CLI, UI, and SDK clients. Historical design docs may
+This document describes the advanced HTTP boundary for ExAgent. The primary
+user entry point is the Tauri desktop app, which calls the Rust runtime through
+in-process Tauri commands and does not require starting this HTTP server.
+
+Use this protocol when building tests, SDK experiments, or external clients that
+need machine-readable thread state and event streams. Historical design docs may
 mention older `fork`, `inspect`, `collect`, or `thread/spawn_child` routes; those
 routes are not part of the current public boundary.
 

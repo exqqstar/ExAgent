@@ -2,7 +2,7 @@
 name = "exagent"
 version = "0.1.0"
 edition = "2021"
-description = "A Rust agent runtime with durable threads, replayable events, approval-gated tools, and an app-server boundary."
+description = "A Rust agent runtime for the ExAgent desktop workbench, with durable threads, replayable events, and approval-gated tools."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/exqqstar/ExAgent"
 readme = "README.md"

@@ -1,50 +1,116 @@
-# ExAgent Walkthrough
+# ExAgent Desktop Walkthrough
 
-This walkthrough shows the smallest realistic operator flow exposed by the
-current runtime boundary:
+This walkthrough covers the current primary flow: running ExAgent as a desktop
+GUI and operating on local projects from the workbench. The HTTP API still
+exists for tests and integrations, but normal desktop usage does not require
+starting a local server.
 
-1. start the API server
-2. check protocol capabilities
-3. create a thread
-4. subscribe to runtime events
-5. start a turn
-6. read the thread view
-7. replay the durable rollout history
+## 1. Start The Desktop App
 
-The current public boundary does not expose `fork`, `inspect`, `collect`, or
-`thread/spawn_child`. Child thread orchestration will return only after it is
-defined as a runtime-native operation.
-
-## Prerequisites
-
-Export the environment variables required by the OpenAI-compatible adapter:
+Install frontend dependencies once:
 
 ```bash
-export OPENAI_BASE_URL="https://api.openai.com/v1"
-export OPENAI_API_KEY="your-api-key"
-export OPENAI_MODEL="gpt-5.2"
-export EXAGENT_POLICY_MODE="off"
-# Optional: enable automatic local compaction.
-export EXAGENT_MODEL_CONTEXT_WINDOW="128000"
-export EXAGENT_AUTO_COMPACT_TOKEN_LIMIT="115200"
+cd apps/desktop
+npm ci
 ```
 
-If `EXAGENT_MODEL_CONTEXT_WINDOW` is set without an explicit compact limit,
-ExAgent derives the compact threshold as 90% of that window. If both values are
-set, the explicit limit is clamped to that 90% headroom.
+Start the Tauri development app:
 
-## 1. Start The Server
+```bash
+npm run tauri:dev
+```
+
+The desktop app starts the Rust runtime inside the Tauri process. The React UI
+communicates with Rust through Tauri commands such as `project_add`,
+`thread_start`, `turn_start`, `events_subscribe`, and `approval_decision`.
+
+## 2. Configure A Provider
+
+Open Settings and select Providers. Choose a provider preset, then configure
+the base URL, model, and credential flow.
+
+Supported provider paths include:
+
+- OpenAI-compatible endpoint with an API key
+- ChatGPT Pro/Plus through device OAuth
+- GitHub Copilot through device OAuth
+- Anthropic, Google, DeepSeek, Moonshot/Kimi, or Zhipu with provider-specific
+  credentials
+
+Use the connection test and model discovery controls to verify the setup before
+starting a session. Credentials are stored locally by the desktop settings
+store; resolved API keys and OAuth tokens are not persisted into rollout events.
+
+## 3. Add A Project
+
+Use Add project in the sidebar and choose a local workspace directory.
+
+When a project is added, the desktop facade:
+
+1. records the project in the desktop SQLite index
+2. scans the project for existing `.exagent/threads` rollout records
+3. uses the project path as `workspace_root` and `cwd` for new sessions
+
+The SQLite index is a navigation cache. The durable thread history remains in
+the project under `.exagent/threads/<thread_id>/rollout.jsonl`.
+
+## 4. Start A Session
+
+Click New session, type a prompt into the composer, and submit it.
+
+The desktop app then:
+
+1. creates or resumes a runtime thread for the active project
+2. sends the prompt through `turn_start`
+3. subscribes to live runtime events through `events_subscribe`
+4. updates the transcript, inspector, token usage panel, and agent tree from
+   runtime events
+
+The composer can submit normal turns and configured turn modes. Per-turn model
+and thinking-mode choices are passed as typed turn context, not as raw provider
+credentials.
+
+## 5. Handle Approvals
+
+When the runtime needs permission for a risky tool action, the GUI renders an
+approval card. Approving or denying the card calls `approval_decision` with the
+project, thread, turn, and approval id.
+
+Approval state is live-only. Historical approval records remain in
+`rollout.jsonl` for audit and replay, but replaying a cold thread does not turn
+old approvals into current actionable UI state.
+
+## 6. Review And Manage Threads
+
+Use the sidebar to:
+
+- search sessions
+- reopen or resume previous threads
+- rename, pin, archive, or unarchive conversations
+- archive all conversations for a project
+- reveal a project in the file manager
+- create a Git worktree project for isolated implementation work
+
+Use the inspector to review runtime events, tool activity, token usage, and
+thread status. The desktop event stream first fills gaps from persisted rollout
+history, then switches to live runtime events for the loaded thread.
+
+## 7. Configure MCP Servers And Skills
+
+Open Settings, then use MCP and Skills sections to configure runtime
+extensions. Saving runtime settings rebuilds the desktop facade so new turns use
+the updated MCP server list, skill roots, and model resolver configuration.
+
+## Advanced: HTTP Boundary
+
+For integration testing or external clients, you can still start the HTTP
+boundary directly:
 
 ```bash
 cargo run -- api
 ```
 
-Expected behavior:
-
-- the process binds to `127.0.0.1:3000` unless `EXAGENT_API_ADDR` is set
-- `GET /health` returns `{"status":"ok"}`
-
-## 2. Check Protocol Capabilities
+By default it listens on `127.0.0.1:3000`. Example capability check:
 
 ```bash
 curl -s http://127.0.0.1:3000/initialize \
@@ -52,238 +118,5 @@ curl -s http://127.0.0.1:3000/initialize \
   -d '{}'
 ```
 
-Expected response shape:
-
-```json
-{
-  "type": "initialized",
-  "protocol_version": "appserver-runtime-boundary-v2",
-  "supported_ops": [
-    "initialize",
-    "thread_start",
-    "thread_resume",
-    "thread_read",
-    "turn_start",
-    "turn_interrupt",
-    "events_replay"
-  ],
-  "supported_streams": ["events_subscribe"]
-}
-```
-
-## 3. Create A Thread
-
-```bash
-curl -s http://127.0.0.1:3000/thread/start \
-  -H 'content-type: application/json' \
-  -d '{
-    "workspace_root": ".",
-    "cwd": "."
-  }'
-```
-
-Expected response shape:
-
-```json
-{
-  "thread": {
-    "id": "session_...",
-    "status": "idle",
-    "active_turn": null,
-    "turns": [],
-    "snapshot_path": ".exagent/sessions/session_.../snapshot.json",
-    "events_path": ".exagent/sessions/session_.../events.jsonl"
-  }
-}
-```
-
-Save `thread.id` as `THREAD_ID`.
-
-`snapshot_path` and `events_path` are v2 compatibility fields. New thread state
-is stored in `.exagent/threads/<thread_id>/rollout.jsonl`.
-
-## 4. Subscribe To Events
-
-Open a second terminal and subscribe before starting a turn:
-
-```bash
-curl -N -s http://127.0.0.1:3000/events/subscribe \
-  -H 'content-type: application/json' \
-  -d '{
-    "thread_id": "<THREAD_ID>",
-    "workspace_root": "."
-  }'
-```
-
-The endpoint returns Server-Sent Events. Each `data:` payload is a serialized
-`RuntimeEvent`. The stream first replays any persisted events after
-`after_event_id`, if provided, then switches to live events from the loaded
-runtime.
-
-## 5. Start A Turn
-
-In the first terminal, submit work to the thread:
-
-```bash
-curl -s http://127.0.0.1:3000/turn/start \
-  -H 'content-type: application/json' \
-  -d '{
-    "thread_id": "<THREAD_ID>",
-    "prompt": "Read this runtime and summarize the persistence model.",
-    "workspace_root": "."
-  }'
-```
-
-Expected response shape:
-
-```json
-{
-  "thread_id": "session_...",
-  "turn": {
-    "id": "turn_1",
-    "status": "in_progress",
-    "items": []
-  }
-}
-```
-
-`turn/start` returns after the turn is accepted. It does not wait for final
-assistant output. Watch the `events/subscribe` terminal for:
-
-- `turn_started`
-- one or more `assistant_turn` or `tool_result` events
-- `token_count` when the model response includes token usage metadata
-- `compaction_written` if the runtime compacts prompt history before sampling
-- `turn_completed`, `runtime_error`, or `turn_interrupted`
-
-## 6. Read The Thread View
-
-After the turn completes, ask the boundary for a renderable thread view:
-
-```bash
-curl -s http://127.0.0.1:3000/thread/read \
-  -H 'content-type: application/json' \
-  -d '{
-    "thread_id": "<THREAD_ID>",
-    "workspace_root": "."
-  }'
-```
-
-Expected response shape:
-
-```json
-{
-  "thread": {
-    "id": "session_...",
-    "status": "idle",
-    "active_turn": null,
-    "turns": [
-      {
-        "id": "turn_1",
-        "status": "completed",
-        "items": [
-          {
-            "type": "assistant_message",
-            "text": "assistant output"
-          }
-        ]
-      }
-    ],
-    "snapshot_path": ".exagent/sessions/session_.../snapshot.json",
-    "events_path": ".exagent/sessions/session_.../events.jsonl"
-  }
-}
-```
-
-When a runtime is loaded, `thread/read` prefers the live `ThreadSession` view.
-That live view contains durable materialized state, the in-memory
-`RuntimeOverlay`, and a bounded recent event window, so it is suitable for UI
-state.
-
-## 7. Replay Durable Events
-
-Use `events/replay` when you need the complete persisted timeline:
-
-```bash
-curl -s http://127.0.0.1:3000/events/replay \
-  -H 'content-type: application/json' \
-  -d '{
-    "thread_id": "<THREAD_ID>",
-    "workspace_root": ".",
-    "include_snapshot": true
-  }'
-```
-
-Expected response shape:
-
-```json
-{
-  "thread_id": "session_...",
-  "events": [
-    {
-      "event_id": "evt_1",
-      "session_id": "session_...",
-      "turn_id": "turn_1",
-      "kind": {
-        "type": "turn_started"
-      }
-    }
-  ],
-  "snapshot": {
-    "thread_id": "session_...",
-    "cwd": "/absolute/workspace/path",
-    "latest_compaction": null,
-    "open_exec_session_count": 0,
-    "conversation_message_count": 2,
-    "pending_approval_count": 0
-  }
-}
-```
-
-`events/replay` supports `after_event_id`, `limit`, and `event_kinds` filters.
-It reads rollout history from disk and remains available after process restart.
-For example, use `"event_kinds": ["token_count"]` to inspect persisted token
-usage events without rendering them into `thread/read` items.
-
-## Optional: Interrupt A Turn
-
-If a turn is running or waiting on approval, interrupt it with:
-
-```bash
-curl -s http://127.0.0.1:3000/turn/interrupt \
-  -H 'content-type: application/json' \
-  -d '{
-    "thread_id": "<THREAD_ID>",
-    "workspace_root": "."
-  }'
-```
-
-The runtime records `turn_interrupted`. If the thread was waiting for command
-approval, pending approvals are removed from the runtime overlay and
-policy-side waiters are cancelled.
-
-## On-Disk Artifacts
-
-Each thread persists under:
-
-```text
-.exagent/threads/<thread_id>/rollout.jsonl
-```
-
-`rollout.jsonl` is the durable source of truth for new threads. It stores
-session metadata, prompt-visible conversation items, turn context records,
-compaction checkpoints, and selected runtime events.
-
-Compaction does not rewrite `rollout.jsonl`. It appends a `compacted`
-checkpoint containing `replacement_history`; cold replay uses the latest
-replacement history as the model-visible conversation and leaves older lines in
-place for auditability. `token_count` events are persisted as selected runtime
-events so clients can replay token usage metadata.
-
-Legacy `.exagent/sessions/<thread_id>/snapshot.json` and `events.jsonl` files
-are not runtime inputs. The v2 protocol still returns `snapshot_path` and
-`events_path` for compatibility, but rollout-backed sessions do not create or
-load those files.
-
-For the full client-facing protocol contract, see
+For the full protocol surface, see
 [docs/protocol/app-server-boundary-v2.md](../protocol/app-server-boundary-v2.md).

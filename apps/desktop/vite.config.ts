@@ -3,6 +3,8 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
+const isCI = Boolean(process.env.CI);
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
@@ -18,6 +20,8 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     globals: true,
-    css: true
+    css: true,
+    fileParallelism: isCI ? false : undefined,
+    maxWorkers: isCI ? 1 : undefined
   }
 });

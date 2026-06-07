@@ -136,12 +136,8 @@ impl McpClient for RmcpClient {
                 ));
             }
         };
-        let params = CallToolRequestParams {
-            meta: None,
-            name: name.to_string().into(),
-            arguments,
-            task: None,
-        };
+        let mut params = CallToolRequestParams::new(name.to_string());
+        params.arguments = arguments;
 
         let service = self.service.lock().await;
         let result = service

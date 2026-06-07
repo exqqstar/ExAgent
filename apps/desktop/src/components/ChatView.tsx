@@ -17,7 +17,7 @@ export function ChatView({ state }: { state: WorkbenchState }) {
     <div className="flex min-h-0 flex-1 flex-col">
       {state.error ? <ChatError message={state.error} /> : null}
       <div className="min-h-0 flex-1 px-2 py-2">
-        <div className="grid h-full w-full grid-cols-1 gap-3 2xl:grid-cols-[minmax(0,1fr)_320px] 2xl:items-start">
+        <div className="grid h-full w-full grid-cols-1 gap-3 2xl:grid-cols-[minmax(0,1fr)_360px] 2xl:items-start">
           <div className="flex h-full min-h-0 min-w-0 flex-col">
             {empty ? (
               <NewSessionState state={state} />
@@ -40,7 +40,7 @@ export function ChatView({ state }: { state: WorkbenchState }) {
           </div>
 
           <aside
-            className="inspector-panel hidden h-fit max-h-[calc(100dvh-4rem)] min-w-0 overflow-x-hidden overflow-y-auto rounded-xl border border-border 2xl:block 2xl:justify-self-end"
+            className="inspector-panel hidden h-fit max-h-[calc(100dvh-4rem)] w-full min-w-0 overflow-x-hidden overflow-y-auto rounded-xl border border-border 2xl:block"
             aria-label="Inspector"
           >
             <Inspector state={state} variant="panel" />

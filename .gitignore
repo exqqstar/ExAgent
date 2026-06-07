@@ -1,0 +1,25 @@
+/.DS_Store
+**/.DS_Store
+
+# Build outputs and dependency folders.
+/target
+**/node_modules
+apps/desktop/dist
+
+# Local runtime state and generated benchmark artifacts.
+/.exagent
+/.exagent-bench
+/.superpowers
+/.worktrees
+
+# Local-only reference checkouts and private notes.
+/external-references
+docs/private/
+docs/.private-archive/
+/.claude
+
+# Local environment files. Keep examples and templates commit-able.
+/.env
+/.env.*
+!/.env.example
+!/.env.*.template

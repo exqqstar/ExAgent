@@ -1,0 +1,42 @@
+[package]
+name = "exagent"
+version = "0.1.0"
+edition = "2021"
+description = "A Rust agent runtime with durable threads, replayable events, approval-gated tools, and an app-server boundary."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/exqqstar/ExAgent"
+readme = "README.md"
+keywords = ["agent", "runtime", "llm", "tools"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+doctest = false
+
+[workspace]
+members = [".", "apps/desktop/src-tauri"]
+resolver = "2"
+
+[dependencies]
+anyhow = "1"
+async-stream = "0.3"
+async-trait = "0.1"
+axum = "0.8"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rmcp = { version = "0.15.0", default-features = false, features = ["base64", "client", "schemars", "server", "transport-child-process"] }
+schemars = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "time"] }
+thiserror = "2"
+time = "0.3"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

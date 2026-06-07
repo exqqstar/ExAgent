@@ -1,0 +1,320 @@
+use std::sync::Arc;
+
+use anyhow::Result;
+
+use crate::config::{AgentConfig, PermissionProfile};
+use crate::mcp::manager::McpRuntimeManager;
+use crate::registry::ToolRegistry;
+use crate::runtime::agent_profile::AgentToolPolicy;
+use crate::runtime::goal::GoalToolApi;
+use crate::runtime::subagent::AgentControl;
+use crate::runtime::tool_resolver::ToolResolver;
+use crate::tools::close_agent::CloseAgentTool;
+use crate::tools::followup_task::FollowupTaskTool;
+use crate::tools::goal::{CreateGoalTool, GetGoalTool, UpdateGoalTool};
+use crate::tools::list_agents::ListAgentsTool;
+use crate::tools::send_message::SendMessageTool;
+use crate::tools::spawn_agent::SpawnAgentTool;
+use crate::tools::wait_agent::WaitAgentTool;
+use crate::tools::ToolSpec;
+
+pub(crate) struct ToolSelection {
+    resolver: ToolResolver,
+    visible_specs: Vec<ToolSpec>,
+}
+
+impl ToolSelection {
+    pub(crate) fn new(resolver: ToolResolver, visible_specs: Vec<ToolSpec>) -> Self {
+        Self {
+            resolver,
+            visible_specs,
+        }
+    }
+
+    pub(crate) fn resolver(&self) -> ToolResolver {
+        self.resolver.clone()
+    }
+
+    pub(crate) fn visible_specs(&self) -> &[ToolSpec] {
+        &self.visible_specs
+    }
+}
+
+pub(crate) struct ToolSelectionInput<'a> {
+    pub(crate) base_registry: ToolRegistry,
+    pub(crate) config: &'a AgentConfig,
+    pub(crate) mcp_runtime: Arc<McpRuntimeManager>,
+    pub(crate) subagent_control: Option<Arc<AgentControl>>,
+    pub(crate) goal_api: Option<Arc<GoalToolApi>>,
+    pub(crate) agent_tool_policy: AgentToolPolicy,
+}
+
+pub(crate) struct ToolVisibilityContext {
+    pub(crate) permission_profile: PermissionProfile,
+    pub(crate) provider_supports_tools: bool,
+    pub(crate) agent_tool_policy: AgentToolPolicy,
+}
+
+pub(crate) async fn build_tool_selection(input: ToolSelectionInput<'_>) -> Result<ToolSelection> {
+    let registry = assemble_tool_registry(&input).await?;
+    let visible_specs = select_visible_specs(
+        &registry,
+        &ToolVisibilityContext {
+            permission_profile: input.config.permission_profile,
+            provider_supports_tools: input.config.model.capabilities.supports_tools,
+            agent_tool_policy: input.agent_tool_policy,
+        },
+    );
+    Ok(ToolSelection::new(
+        ToolResolver::new(registry),
+        visible_specs,
+    ))
+}
+
+async fn assemble_tool_registry(input: &ToolSelectionInput<'_>) -> Result<ToolRegistry> {
+    let mut registry = input.base_registry.clone();
+
+    if let Some(control) = input.subagent_control.clone() {
+        registry.register_handler(SpawnAgentTool::new(control.clone()));
+        registry.register_handler(ListAgentsTool::new(control.clone()));
+        registry.register_handler(CloseAgentTool::new(control.clone()));
+        registry.register_handler(SendMessageTool::new(control.clone()));
+        registry.register_handler(FollowupTaskTool::new(control));
+        registry.register_handler(WaitAgentTool);
+    }
+
+    if let Some(goal_api) = input.goal_api.clone() {
+        registry.register_handler(GetGoalTool::new(goal_api.clone()));
+        registry.register_handler(CreateGoalTool::new(goal_api.clone()));
+        registry.register_handler(UpdateGoalTool::new(goal_api));
+    }
+
+    if input.config.model.capabilities.supports_tools {
+        for handler in input.mcp_runtime.handlers().await? {
+            registry.register_handler(handler);
+        }
+    }
+
+    Ok(registry)
+}
+
+pub(crate) fn select_visible_specs(
+    registry: &ToolRegistry,
+    ctx: &ToolVisibilityContext,
+) -> Vec<ToolSpec> {
+    if !ctx.provider_supports_tools || !ctx.permission_profile.is_supported() {
+        return Vec::new();
+    }
+
+    registry
+        .specs()
+        .into_iter()
+        .filter(|spec| authorize_tool(&spec.name, &ctx.agent_tool_policy))
+        .collect()
+}
+
+pub(crate) fn authorize_tool(tool_name: &str, agent_tool_policy: &AgentToolPolicy) -> bool {
+    agent_tool_policy.allows(tool_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::subagent::{
+        CloseAgentResponse, CloseAgentsRequest, DeliverInterAgentMessageRequest,
+        SendMessageResponse, SpawnAgentResponse, SpawnCleanChildRequest, SubagentLifecycle,
+    };
+    use crate::tools::read_file::ReadFileTool;
+    use crate::tools::run_command::RunCommandTool;
+    use crate::tools::search_files::SearchFilesTool;
+    use crate::tools::write_file::WriteFileTool;
+    use crate::types::ThreadId;
+    use crate::types::ToolCall;
+    use async_trait::async_trait;
+
+    struct NoopSubagentLifecycle;
+
+    #[async_trait]
+    impl SubagentLifecycle for NoopSubagentLifecycle {
+        async fn spawn_clean_child(
+            &self,
+            _request: SpawnCleanChildRequest,
+            _control: Arc<AgentControl>,
+        ) -> Result<SpawnAgentResponse> {
+            unreachable!("tool selection tests do not spawn subagents")
+        }
+
+        async fn close_agents(&self, _request: CloseAgentsRequest) -> Result<CloseAgentResponse> {
+            unreachable!("tool selection tests do not close subagents")
+        }
+
+        async fn deliver_inter_agent_message(
+            &self,
+            _request: DeliverInterAgentMessageRequest,
+        ) -> Result<SendMessageResponse> {
+            unreachable!("tool selection tests do not send messages")
+        }
+    }
+
+    fn registry() -> ToolRegistry {
+        let mut registry = ToolRegistry::new();
+        registry.register(ReadFileTool);
+        registry.register(SearchFilesTool);
+        registry.register(WriteFileTool);
+        registry.register(RunCommandTool);
+        registry
+    }
+
+    fn subagent_control() -> Arc<AgentControl> {
+        let lifecycle = Arc::new(NoopSubagentLifecycle);
+        let lifecycle: Arc<dyn SubagentLifecycle> = lifecycle;
+        AgentControl::new_root(
+            ThreadId::new("thread_tool_selection_root"),
+            Arc::downgrade(&lifecycle),
+        )
+    }
+
+    #[test]
+    fn select_visible_specs_returns_empty_when_provider_does_not_support_tools() {
+        let visible = select_visible_specs(
+            &registry(),
+            &ToolVisibilityContext {
+                permission_profile: PermissionProfile::FullAccess,
+                provider_supports_tools: false,
+                agent_tool_policy: AgentToolPolicy::all(),
+            },
+        );
+
+        assert!(visible.is_empty());
+    }
+
+    #[test]
+    fn select_visible_specs_uses_gate_then_agent_policy() {
+        let visible = select_visible_specs(
+            &registry(),
+            &ToolVisibilityContext {
+                permission_profile: PermissionProfile::FullAccess,
+                provider_supports_tools: true,
+                agent_tool_policy: AgentToolPolicy::allow_only(["read_file"]),
+            },
+        );
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].name, "read_file");
+    }
+
+    #[test]
+    fn authorize_tool_is_the_shared_agent_policy_predicate() {
+        let policy = AgentToolPolicy::allow_only(["read_file"]);
+
+        assert!(authorize_tool("read_file", &policy));
+        assert!(!authorize_tool("run_command", &policy));
+    }
+
+    #[tokio::test]
+    async fn build_selection_keeps_registry_executable_when_visible_specs_are_empty() {
+        let mut config = AgentConfig::default();
+        config.model.capabilities.supports_tools = false;
+
+        let mcp_runtime = Arc::new(McpRuntimeManager::new(
+            config.mcp_servers.clone(),
+            config.workspace_root.clone(),
+        ));
+
+        let selection = build_tool_selection(ToolSelectionInput {
+            base_registry: registry(),
+            config: &config,
+            mcp_runtime,
+            subagent_control: None,
+            goal_api: None,
+            agent_tool_policy: AgentToolPolicy::all(),
+        })
+        .await
+        .expect("selection");
+
+        assert!(selection.visible_specs().is_empty());
+        let call = ToolCall {
+            id: "call_1".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({ "path": "Cargo.toml" }),
+            thought_signature: None,
+        };
+        assert!(selection.resolver().resolve(&call).is_some());
+    }
+
+    #[tokio::test]
+    async fn build_selection_registers_subagent_tools_and_filters_them_by_policy() {
+        let mut config = AgentConfig::default();
+        config.model.capabilities.supports_tools = true;
+        let mcp_runtime = Arc::new(McpRuntimeManager::new(
+            config.mcp_servers.clone(),
+            config.workspace_root.clone(),
+        ));
+
+        let all_selection = build_tool_selection(ToolSelectionInput {
+            base_registry: registry(),
+            config: &config,
+            mcp_runtime: mcp_runtime.clone(),
+            subagent_control: Some(subagent_control()),
+            goal_api: None,
+            agent_tool_policy: AgentToolPolicy::all(),
+        })
+        .await
+        .expect("all selection");
+        let all_names = all_selection
+            .visible_specs()
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect::<Vec<_>>();
+
+        for tool_name in [
+            "spawn_agent",
+            "list_agents",
+            "close_agent",
+            "send_message",
+            "followup_task",
+            "wait_agent",
+        ] {
+            assert!(
+                all_names.contains(&tool_name),
+                "expected {tool_name} in visible specs"
+            );
+        }
+
+        let read_only_selection = build_tool_selection(ToolSelectionInput {
+            base_registry: registry(),
+            config: &config,
+            mcp_runtime,
+            subagent_control: Some(subagent_control()),
+            goal_api: None,
+            agent_tool_policy: AgentToolPolicy::allow_only([
+                "read_file",
+                "search_files",
+                "list_agents",
+            ]),
+        })
+        .await
+        .expect("read-only selection");
+        let read_only_names = read_only_selection
+            .visible_specs()
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(read_only_names.contains(&"read_file"));
+        assert!(read_only_names.contains(&"search_files"));
+        assert!(read_only_names.contains(&"list_agents"));
+        for tool_name in [
+            "spawn_agent",
+            "close_agent",
+            "send_message",
+            "followup_task",
+            "wait_agent",
+        ] {
+            assert!(
+                !read_only_names.contains(&tool_name),
+                "expected {tool_name} to be hidden by agent policy"
+            );
+        }
+    }
+}

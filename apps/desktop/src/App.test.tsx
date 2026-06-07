@@ -1,0 +1,4502 @@
+import "@testing-library/jest-dom/vitest";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import App from "@/App";
+import { exagentClient } from "@/api/exagentClient";
+import { useWorkbenchStore } from "@/stores/workbenchStore";
+import type {
+  BackendRuntimeEvent,
+  ProviderDescriptor,
+  ProviderSettingsResponse,
+  ThreadGoal,
+  ThreadRecord,
+} from "@/types";
+
+const tauriMocks = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  listen: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: tauriMocks.invoke,
+}));
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: tauriMocks.listen,
+}));
+
+class ResizeObserverMock {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+const deepSeekProvider: ProviderDescriptor = {
+  id: "deepseek",
+  name: "DeepSeek",
+  description: "Use DeepSeek API with an API key",
+  recommended: false,
+  supported: true,
+  auth_mode: "api_key_required",
+  protocol: "openai_chat_completions",
+  default_base_url: "https://api.deepseek.com",
+  default_model: "deepseek-v4-flash",
+  supports_model_discovery: true,
+  supports_tools: true,
+  unsupported_reason: null,
+};
+
+function deepSeekProviderSettings(
+  overrides: Partial<ProviderSettingsResponse> = {},
+): ProviderSettingsResponse {
+  return {
+    providers: [deepSeekProvider],
+    active_provider_id: "deepseek",
+    active_credential_id: "key-1",
+    credentials: [
+      {
+        id: "key-1",
+        label: "API key 1",
+        source: "keychain",
+        kind: "api_key",
+        status: "active",
+        auth_method: null,
+        account_label: null,
+      },
+    ],
+    config: {
+      provider_id: "deepseek",
+      base_url: "https://api.deepseek.com",
+      model: "deepseek-v4-flash",
+      has_api_key: true,
+      credential_source: "keychain",
+      auth_required: true,
+    },
+    connected_provider: {
+      id: "deepseek",
+      name: "DeepSeek",
+      model: "deepseek-v4-flash",
+      base_url: "https://api.deepseek.com",
+    },
+    last_connection: null,
+    configured_providers: [
+      {
+        provider_id: "deepseek",
+        base_url: "https://api.deepseek.com",
+        model: "deepseek-v4-flash",
+        has_api_key: true,
+        credential_source: "keychain",
+        auth_required: true,
+      },
+    ],
+    model_options: [],
+    ...overrides,
+  };
+}
+
+function oauthProviderSettings(
+  providerId: "openai" | "github_copilot",
+  name: string,
+): ProviderSettingsResponse {
+  const provider: ProviderDescriptor = {
+    id: providerId,
+    name,
+    description:
+      providerId === "openai"
+        ? "Use ChatGPT Pro/Plus or an API key"
+        : "Use GitHub Copilot with device OAuth",
+    recommended: providerId === "openai",
+    supported: true,
+    auth_mode: providerId === "openai" ? "api_key_required" : "oauth_required",
+    protocol:
+      providerId === "openai" ? "openai_chat_completions" : "copilot_oauth",
+    default_base_url:
+      providerId === "openai"
+        ? "https://api.openai.com/v1"
+        : "https://api.githubcopilot.com",
+    default_model: providerId === "openai" ? "gpt-5.5" : "gpt-5.1-copilot",
+    supports_model_discovery: providerId === "openai",
+    supports_tools: true,
+    unsupported_reason: null,
+  };
+  return {
+    providers: [provider],
+    active_provider_id: providerId,
+    active_credential_id: providerId === "openai" ? "chatgpt-1" : "copilot-1",
+    credentials: [
+      {
+        id: providerId === "openai" ? "chatgpt-1" : "copilot-1",
+        label: providerId === "openai" ? "ChatGPT Pro" : "GitHub Copilot",
+        source: "keychain",
+        kind: "oauth",
+        status: "active",
+        auth_method:
+          providerId === "openai" ? "chatgpt_oauth" : "github_copilot_oauth",
+        account_label: providerId === "openai" ? "user@example.com" : null,
+      },
+    ],
+    config: {
+      provider_id: providerId,
+      base_url: provider.default_base_url,
+      model: provider.default_model,
+      has_api_key: false,
+      has_credential: true,
+      credential_kind: "oauth",
+      credential_source: "keychain",
+      auth_required: true,
+    },
+    connected_provider: {
+      id: providerId,
+      name,
+      model: provider.default_model,
+      base_url: provider.default_base_url,
+    },
+    last_connection: null,
+    configured_providers: [],
+    model_options: [],
+  };
+}
+
+function threadRecord(overrides: Partial<ThreadRecord> = {}): ThreadRecord {
+  return {
+    id: "session-record",
+    project_id: "project-exagent",
+    rollout_path: "/tmp/rollout.jsonl",
+    user_title: null,
+    fallback_title: "Session record",
+    preview: "Session record",
+    title_source: "rollout",
+    archived_at: null,
+    pinned: false,
+    status: "idle",
+    created_at: 1,
+    updated_at: 1,
+    last_opened_at: null,
+    ...overrides,
+  };
+}
+
+function threadGoal(overrides: Partial<ThreadGoal> = {}): ThreadGoal {
+  return {
+    thread_id: "session-desktop",
+    goal_id: "goal-desktop",
+    objective: "Ship goal mode",
+    status: "active",
+    token_budget: null,
+    tokens_used: 0,
+    time_used_seconds: 0,
+    continuation_suppressed: false,
+    continuation_suppressed_after_turn_id: null,
+    created_at_ms: 1,
+    updated_at_ms: 1,
+    ...overrides,
+  };
+}
+
+describe("AppShell", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    tauriMocks.invoke.mockReset();
+    tauriMocks.listen.mockReset();
+    vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+    window.localStorage.clear();
+    document.documentElement.removeAttribute("data-theme");
+    document.documentElement.lang = "";
+    Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+    useWorkbenchStore.setState(useWorkbenchStore.getInitialState(), true);
+  });
+
+  it("renders the main desktop workbench regions", async () => {
+    render(<App />);
+
+    expect(
+      (await screen.findAllByText("Desktop GUI workbench"))[0],
+    ).toBeInTheDocument();
+    expect(screen.getByText("Project")).toBeInTheDocument();
+    const projectButton = screen.getByRole("button", { name: /^ExAgent$/ });
+    expect(projectButton).toHaveAttribute("aria-expanded", "true");
+    act(() => {
+      projectButton.click();
+    });
+    expect(projectButton).toHaveAttribute("aria-expanded", "false");
+    act(() => {
+      projectButton.click();
+    });
+    expect(projectButton).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByLabelText("Inspector")).toBeInTheDocument();
+    expect(screen.getByLabelText("Prompt composer")).toBeInTheDocument();
+  });
+
+  it("resizes and collapses the desktop project sidebar", async () => {
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    const sidebar = screen.getByRole("complementary", {
+      name: "Projects and sessions",
+    });
+    const resizeHandle = screen.getByRole("separator", {
+      name: "Resize project sidebar",
+    });
+
+    expect(sidebar).toHaveStyle({ width: "280px" });
+
+    fireEvent.mouseDown(resizeHandle, { button: 0, clientX: 280 });
+    fireEvent.mouseMove(resizeHandle, { clientX: 720 });
+
+    await waitFor(() => {
+      expect(sidebar).toHaveStyle({ width: "420px" });
+    });
+
+    fireEvent.mouseUp(resizeHandle);
+    fireEvent.mouseDown(resizeHandle, { button: 0, clientX: 420 });
+    fireEvent.mouseMove(resizeHandle, { clientX: 180 });
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("complementary", { name: "Projects and sessions" }),
+      ).not.toBeInTheDocument();
+    });
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Show project sidebar" }),
+    );
+
+    expect(
+      screen.getByRole("complementary", { name: "Projects and sessions" }),
+    ).toHaveStyle({ width: "420px" });
+  });
+
+  it("renders scaffold transcript labels and runtime notes", async () => {
+    render(<App />);
+
+    expect(await screen.findByText("Session restored")).toBeInTheDocument();
+    expect(screen.getByText("Changed Files")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Events/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Token Usage/ })).toHaveTextContent("not reported");
+    expect(screen.getByText("No token usage reported for this thread.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Message ExAgent")).toBeInTheDocument();
+  });
+
+  it("expands an inactive project without switching the active project", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(exagentClient, "reindexProject").mockResolvedValue([
+      threadRecord({
+        id: "session-beta",
+        project_id: "project-beta",
+        fallback_title: "Beta session",
+      }),
+    ]);
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-alpha",
+          name: "Alpha",
+          path: "/tmp/alpha",
+          active: true,
+        },
+        { id: "project-beta", name: "Beta", path: "/tmp/beta", active: false },
+      ],
+      sessions: [
+        {
+          id: "session-alpha",
+          projectId: "project-alpha",
+          title: "Alpha session",
+          updatedAt: "now",
+          status: "idle",
+        },
+      ],
+      activeProjectId: "project-alpha",
+      activeSessionId: "session-alpha",
+    });
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /^Beta$/ }));
+
+    expect(await screen.findByText("Beta session")).toBeInTheDocument();
+    expect(useWorkbenchStore.getState().activeProjectId).toBe("project-alpha");
+    expect(useWorkbenchStore.getState().activeSessionId).toBe("session-alpha");
+  });
+
+  it("opens the clicked session when choosing from an inactive expanded project", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(exagentClient, "reindexProject").mockResolvedValue([
+      threadRecord({
+        id: "session-beta",
+        project_id: "project-beta",
+        fallback_title: "Beta session",
+      }),
+    ]);
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-beta",
+        status: "idle",
+        active_turn: null,
+        turns: [
+          {
+            id: "turn-beta",
+            status: "completed",
+            items: [{ type: "assistant_message", text: "Beta transcript" }],
+          },
+        ],
+      },
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-beta",
+      events: [],
+    });
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-alpha",
+          name: "Alpha",
+          path: "/tmp/alpha",
+          active: true,
+        },
+        { id: "project-beta", name: "Beta", path: "/tmp/beta", active: false },
+      ],
+      sessions: [
+        {
+          id: "session-alpha",
+          projectId: "project-alpha",
+          title: "Alpha session",
+          updatedAt: "now",
+          status: "idle",
+        },
+      ],
+      activeProjectId: "project-alpha",
+      activeSessionId: "session-alpha",
+    });
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /^Beta$/ }));
+    await user.click(await screen.findByText("Beta session"));
+
+    await waitFor(() => {
+      expect(useWorkbenchStore.getState().activeProjectId).toBe("project-beta");
+      expect(useWorkbenchStore.getState().activeSessionId).toBe("session-beta");
+    });
+    expect(useWorkbenchStore.getState().transcript).toEqual([
+      expect.objectContaining({
+        body: "Beta transcript",
+        threadId: "session-beta",
+      }),
+    ]);
+  });
+
+  it("shows token usage from replayed root token count events", async () => {
+    vi.spyOn(exagentClient, "getWorkbenchSnapshot").mockResolvedValue({
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Volumes/EXEXEX/ExAgent",
+          active: true
+        }
+      ],
+      sessions: [
+        {
+          id: "session-token",
+          projectId: "project-exagent",
+          title: "Token session",
+          updatedAt: "now",
+          status: "idle"
+        }
+      ],
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-token",
+      transcript: [],
+      events: [],
+      changedFiles: [],
+      cwd: "/Volumes/EXEXEX/ExAgent",
+      policy: "local",
+      tokenUsage: {
+        input: 0,
+        output: 0,
+        limit: 1
+      },
+      tokenUsageByThreadId: {},
+      runtimeSettings: null,
+      selectedModel: null,
+      selectedThinkingMode: null
+    });
+    vi.spyOn(exagentClient, "getRuntimeSettings").mockResolvedValue({
+      default_model: "gpt-5.5",
+      default_thinking_mode: "medium",
+      presets: [],
+      mcp_servers: [],
+      skill_roots: []
+    });
+    vi.spyOn(exagentClient, "getProviderSettings").mockResolvedValue(deepSeekProviderSettings());
+    vi.spyOn(exagentClient, "reindexProject").mockResolvedValue([
+      threadRecord({
+        id: "session-token",
+        fallback_title: "Token session"
+      })
+    ]);
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-token",
+        status: "idle",
+        active_turn: null,
+        turns: []
+      }
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-token",
+      events: [
+        {
+          event_id: "evt-token-session",
+          thread_id: "session-token",
+          turn_id: "turn-token",
+          kind: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 142000,
+                cached_input_tokens: 28000,
+                output_tokens: 31200,
+                reasoning_output_tokens: 13200,
+                total_tokens: 186400
+              },
+              last_token_usage: {
+                input_tokens: 52000,
+                cached_input_tokens: 8000,
+                output_tokens: 6200,
+                reasoning_output_tokens: 1200,
+                total_tokens: 59400
+              },
+              model_context_window: 400000
+            }
+          }
+        }
+      ]
+    });
+    Reflect.set(window, "__TAURI_INTERNALS__", {});
+
+    render(<App />);
+
+    expect(await screen.findAllByText("Token session")).not.toHaveLength(0);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Token Usage/ })).toHaveTextContent("186.4k tokens");
+    });
+    expect(screen.getByText("186,400")).toBeInTheDocument();
+    expect(screen.queryByText(/0% context/i)).not.toBeInTheDocument();
+  });
+
+  it("starts a draft session from an inactive project action without opening old sessions", async () => {
+    const user = userEvent.setup();
+    const openSession = vi.spyOn(useWorkbenchStore.getState(), "openSession");
+    vi.spyOn(exagentClient, "reindexProject").mockResolvedValue([
+      threadRecord({
+        id: "session-beta",
+        project_id: "project-beta",
+        fallback_title: "Beta session",
+      }),
+    ]);
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-alpha",
+          name: "Alpha",
+          path: "/tmp/alpha",
+          active: true,
+        },
+        { id: "project-beta", name: "Beta", path: "/tmp/beta", active: false },
+      ],
+      sessions: [
+        {
+          id: "session-alpha",
+          projectId: "project-alpha",
+          title: "Alpha session",
+          updatedAt: "now",
+          status: "idle",
+        },
+      ],
+      activeProjectId: "project-alpha",
+      activeSessionId: "session-alpha",
+      transcript: [
+        {
+          id: "message-alpha",
+          role: "assistant",
+          body: "Alpha transcript",
+          timestamp: "now",
+        },
+      ],
+    });
+
+    render(<App />);
+    await user.click(
+      screen.getByRole("button", { name: "New session for Beta" }),
+    );
+
+    await waitFor(() => {
+      expect(useWorkbenchStore.getState()).toMatchObject({
+        activeProjectId: "project-beta",
+        activeSessionId: null,
+        cwd: "/tmp/beta",
+        transcript: [],
+      });
+    });
+    expect(openSession).not.toHaveBeenCalled();
+    expect(
+      screen.getByText("What should we build in Beta?"),
+    ).toBeInTheDocument();
+  });
+
+  it("opens project action menu without switching the active project", async () => {
+    const user = userEvent.setup();
+    const revealProjectInFileManager = vi
+      .spyOn(exagentClient, "revealProjectInFileManager")
+      .mockResolvedValue(undefined);
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-alpha",
+          name: "Alpha",
+          path: "/tmp/alpha",
+          active: true,
+        },
+        { id: "project-beta", name: "Beta", path: "/tmp/beta", active: false },
+      ],
+      sessions: [
+        {
+          id: "session-alpha",
+          projectId: "project-alpha",
+          title: "Alpha session",
+          updatedAt: "now",
+          status: "idle",
+        },
+      ],
+      activeProjectId: "project-alpha",
+      activeSessionId: "session-alpha",
+    });
+
+    render(<App />);
+    await user.click(
+      screen.getByRole("button", { name: "Project actions for Beta" }),
+    );
+
+    expect(await screen.findByText("Show in Finder")).toBeInTheDocument();
+    expect(screen.getByText("Create permanent worktree")).toBeInTheDocument();
+    expect(screen.getByText("Rename project")).toBeInTheDocument();
+    expect(useWorkbenchStore.getState().activeProjectId).toBe("project-alpha");
+
+    await user.click(screen.getByRole("menuitem", { name: /Show in Finder/ }));
+
+    expect(revealProjectInFileManager).toHaveBeenCalledWith("/tmp/beta");
+    expect(useWorkbenchStore.getState().activeProjectId).toBe("project-alpha");
+  });
+
+  it("pins a project from the action menu without switching projects", async () => {
+    const user = userEvent.setup();
+    const pinProject = vi.spyOn(exagentClient, "pinProject").mockResolvedValue({
+      id: "project-beta",
+      name: "Beta",
+      path: "/tmp/beta",
+      archived_at: null,
+      pinned: true,
+    });
+    vi.spyOn(exagentClient, "listProjects").mockResolvedValue([
+      {
+        id: "project-beta",
+        name: "Beta",
+        path: "/tmp/beta",
+        archived_at: null,
+        pinned: true,
+      },
+      {
+        id: "project-alpha",
+        name: "Alpha",
+        path: "/tmp/alpha",
+        archived_at: null,
+        pinned: false,
+      },
+    ]);
+    vi.spyOn(exagentClient, "reindexProject").mockResolvedValue([]);
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-alpha",
+          name: "Alpha",
+          path: "/tmp/alpha",
+          active: true,
+        },
+        { id: "project-beta", name: "Beta", path: "/tmp/beta", active: false },
+      ],
+      sessions: [],
+      activeProjectId: "project-alpha",
+      activeSessionId: null,
+    });
+
+    render(<App />);
+    await user.click(
+      screen.getByRole("button", { name: "Project actions for Beta" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Pin project/ }),
+    );
+
+    expect(pinProject).toHaveBeenCalledWith("project-beta", true);
+    await waitFor(() => {
+      expect(useWorkbenchStore.getState().activeProjectId).toBe(
+        "project-alpha",
+      );
+    });
+  });
+
+  it("renames a project from the action menu", async () => {
+    const user = userEvent.setup();
+    const renameProject = vi
+      .spyOn(exagentClient, "renameProject")
+      .mockResolvedValue({
+        id: "project-beta",
+        name: "Beta Renamed",
+        path: "/tmp/beta",
+        archived_at: null,
+        pinned: false,
+      });
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-alpha",
+          name: "Alpha",
+          path: "/tmp/alpha",
+          active: true,
+        },
+        { id: "project-beta", name: "Beta", path: "/tmp/beta", active: false },
+      ],
+      sessions: [],
+      activeProjectId: "project-alpha",
+      activeSessionId: null,
+    });
+
+    render(<App />);
+    await user.click(
+      screen.getByRole("button", { name: "Project actions for Beta" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Rename project/ }),
+    );
+    await user.clear(screen.getByLabelText("Project name"));
+    await user.type(screen.getByLabelText("Project name"), "Beta Renamed");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(renameProject).toHaveBeenCalledWith("project-beta", "Beta Renamed");
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /^Beta Renamed$/ }),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("archives all conversations in the active project", async () => {
+    const user = userEvent.setup();
+    const archiveProjectConversations = vi
+      .spyOn(exagentClient, "archiveProjectConversations")
+      .mockResolvedValue(undefined);
+    vi.spyOn(exagentClient, "listThreads").mockResolvedValue([]);
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-alpha",
+          name: "Alpha",
+          path: "/tmp/alpha",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-alpha",
+          projectId: "project-alpha",
+          title: "Alpha session",
+          updatedAt: "now",
+          status: "idle",
+        },
+      ],
+      activeProjectId: "project-alpha",
+      activeSessionId: "session-alpha",
+      transcript: [
+        {
+          id: "message-alpha",
+          role: "assistant",
+          body: "Alpha transcript",
+          timestamp: "now",
+        },
+      ],
+    });
+
+    render(<App />);
+    await user.click(
+      screen.getByRole("button", { name: "Project actions for Alpha" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Archive conversations/ }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Archive conversations" }),
+    );
+
+    expect(archiveProjectConversations).toHaveBeenCalledWith("project-alpha");
+    await waitFor(() => {
+      expect(useWorkbenchStore.getState().sessions).toEqual([]);
+      expect(useWorkbenchStore.getState().activeSessionId).toBeNull();
+      expect(useWorkbenchStore.getState().transcript).toEqual([]);
+    });
+  });
+
+  it("selects the next project after archiving the active project", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(exagentClient, "archiveProject").mockResolvedValue(undefined);
+    vi.spyOn(exagentClient, "listProjects").mockResolvedValue([
+      {
+        id: "project-beta",
+        name: "Beta",
+        path: "/tmp/beta",
+        archived_at: null,
+        pinned: false,
+      },
+    ]);
+    vi.spyOn(exagentClient, "reindexProject").mockResolvedValue([]);
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-alpha",
+          name: "Alpha",
+          path: "/tmp/alpha",
+          active: true,
+        },
+        { id: "project-beta", name: "Beta", path: "/tmp/beta", active: false },
+      ],
+      sessions: [],
+      activeProjectId: "project-alpha",
+      activeSessionId: null,
+    });
+
+    render(<App />);
+    await user.click(
+      screen.getByRole("button", { name: "Project actions for Alpha" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Archive project/ }),
+    );
+    await user.click(screen.getByRole("button", { name: "Archive project" }));
+
+    await waitFor(() => {
+      expect(useWorkbenchStore.getState().activeProjectId).toBe("project-beta");
+      expect(useWorkbenchStore.getState().cwd).toBe("/tmp/beta");
+    });
+  });
+
+  it("enters no-project state after removing the only project", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(exagentClient, "removeProject").mockResolvedValue(undefined);
+    vi.spyOn(exagentClient, "listProjects").mockResolvedValue([]);
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-alpha",
+          name: "Alpha",
+          path: "/tmp/alpha",
+          active: true,
+        },
+      ],
+      sessions: [],
+      activeProjectId: "project-alpha",
+      activeSessionId: null,
+      cwd: "/tmp/alpha",
+    });
+
+    render(<App />);
+    await user.click(
+      screen.getByRole("button", { name: "Project actions for Alpha" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Remove from sidebar/ }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Remove from sidebar" }),
+    );
+
+    await waitFor(() => {
+      expect(useWorkbenchStore.getState().activeProjectId).toBeNull();
+      expect(useWorkbenchStore.getState().cwd).toBe("No project selected");
+    });
+  });
+
+  it("archives a session from the quick hover action without opening it", async () => {
+    const user = userEvent.setup();
+    const archiveThread = vi
+      .spyOn(exagentClient, "archiveThread")
+      .mockResolvedValue(undefined);
+    const openSession = vi.spyOn(useWorkbenchStore.getState(), "openSession");
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-alpha",
+          name: "Alpha",
+          path: "/tmp/alpha",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-alpha",
+          projectId: "project-alpha",
+          title: "Alpha session",
+          updatedAt: "now",
+          status: "idle",
+        },
+      ],
+      activeProjectId: "project-alpha",
+      activeSessionId: "session-alpha",
+      transcript: [
+        {
+          id: "message-alpha",
+          role: "assistant",
+          body: "Alpha transcript",
+          timestamp: "now",
+        },
+      ],
+    });
+
+    render(<App />);
+    await user.click(
+      screen.getByRole("button", { name: "Archive Alpha session" }),
+    );
+
+    expect(archiveThread).toHaveBeenCalledWith("session-alpha");
+    expect(openSession).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(useWorkbenchStore.getState().activeSessionId).toBeNull();
+      expect(useWorkbenchStore.getState().transcript).toEqual([]);
+    });
+  });
+
+  it("shows a focused draft-session state before a real session exists", async () => {
+    vi.spyOn(exagentClient, "getWorkbenchSnapshot").mockResolvedValue({
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Volumes/EXEXEX/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [],
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      transcript: [],
+      events: [],
+      changedFiles: [],
+      cwd: "/Volumes/EXEXEX/ExAgent",
+      policy: "local",
+      tokenUsage: {
+        input: 0,
+        output: 0,
+        limit: 1,
+      },
+      tokenUsageByThreadId: {},
+      runtimeSettings: null,
+      selectedModel: null,
+      selectedThinkingMode: null,
+    });
+    vi.spyOn(exagentClient, "getRuntimeSettings").mockResolvedValue({
+      default_model: "gpt-5.5",
+      default_thinking_mode: "medium",
+      presets: [],
+      mcp_servers: [],
+      skill_roots: [],
+    });
+    vi.spyOn(exagentClient, "getProviderSettings").mockResolvedValue({
+      providers: [],
+      active_provider_id: "openai",
+      config: {
+        provider_id: "openai",
+        base_url: "https://api.openai.com/v1",
+        model: "gpt-5.5",
+        has_api_key: false,
+        credential_source: "none",
+        auth_required: true,
+      },
+      connected_provider: null,
+      last_connection: null,
+      configured_providers: [],
+      model_options: [],
+    });
+
+    render(<App />);
+
+    expect(
+      await screen.findByText("What should we build in ExAgent?"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Build a feature")).toBeInTheDocument();
+    expect(screen.queryByText("Start a session")).not.toBeInTheDocument();
+  });
+
+  it("loads the selected model from provider settings instead of runtime defaults", async () => {
+    vi.spyOn(exagentClient, "getWorkbenchSnapshot").mockResolvedValue({
+      projects: [],
+      sessions: [],
+      activeProjectId: null,
+      activeSessionId: null,
+      transcript: [],
+      events: [],
+      changedFiles: [],
+      cwd: "No project selected",
+      policy: "local",
+      tokenUsage: {
+        input: 0,
+        output: 0,
+        limit: 1,
+      },
+      tokenUsageByThreadId: {},
+      runtimeSettings: null,
+      selectedModel: null,
+      selectedThinkingMode: null,
+    });
+    vi.spyOn(exagentClient, "getRuntimeSettings").mockResolvedValue({
+      default_model: "runtime-default",
+      default_thinking_mode: "high",
+      presets: [],
+      mcp_servers: [],
+      skill_roots: [],
+    });
+    vi.spyOn(exagentClient, "getProviderSettings").mockResolvedValue({
+      providers: [],
+      active_provider_id: "openai",
+      config: {
+        provider_id: "openai_compatible",
+        base_url: "http://127.0.0.1:11434/v1",
+        model: "configured-model",
+        has_api_key: false,
+        credential_source: "none",
+        auth_required: false,
+      },
+      connected_provider: null,
+      last_connection: null,
+      configured_providers: [],
+      model_options: [
+        {
+          provider_id: "openai_compatible",
+          id: "configured-model",
+          display_name: "configured-model",
+          context_window: null,
+          supports_tools: true,
+          capabilities: {
+            supports_tools: true,
+            thinking: {
+              supported: false,
+              modes: [],
+            },
+          },
+        },
+      ],
+    });
+
+    await useWorkbenchStore.getState().loadWorkbench();
+
+    expect(useWorkbenchStore.getState().activeProviderId).toBe(
+      "openai_compatible",
+    );
+    expect(useWorkbenchStore.getState().selectedModel).toEqual({
+      provider_id: "openai_compatible",
+      model_id: "configured-model",
+    });
+    expect(useWorkbenchStore.getState().selectedThinkingMode).toBeNull();
+  });
+
+  it("opens settings to the providers tab from the lower sidebar", async () => {
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Open settings" }),
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Settings" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Providers" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(
+      screen.getByRole("heading", { name: "Popular" }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("provider-popular-list")).toHaveClass(
+      "space-y-1",
+    );
+    expect(
+      screen.getByText("Use ChatGPT Pro/Plus or an API key"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Configure OpenRouter" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Configure Vercel AI Gateway" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Configure DeepSeek" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Configure Kimi" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Configure GLM" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Configure OpenAI" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Configure Google" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Configure Anthropic" }),
+    ).toBeEnabled();
+    const providerButtons = within(
+      screen.getByTestId("provider-popular-list"),
+    ).getAllByRole("button");
+    expect(
+      providerButtons
+        .slice(0, 4)
+        .map((button) => button.getAttribute("aria-label")),
+    ).toEqual([
+      "Configure OpenAI",
+      "Configure Anthropic",
+      "Configure Google",
+      "Configure DeepSeek",
+    ]);
+    expect(
+      within(
+        screen.getByRole("button", { name: "Configure OpenAI Compatible" }),
+      ).queryByText("Recommended"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Use GitHub Copilot with device OAuth"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Copilot account support is planned"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("supports keyboard navigation across settings tabs", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+
+    const providersTab = screen.getByRole("tab", { name: "Providers" });
+    providersTab.focus();
+    await user.keyboard("{ArrowRight}");
+
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "MCP" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+    });
+
+    await user.keyboard("{End}");
+
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "Archive" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+    });
+  });
+
+  it("tests provider connections from settings before saving", async () => {
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Open settings" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Configure OpenAI" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Test connection" }),
+    );
+
+    expect(
+      await screen.findByText("Connection succeeded."),
+    ).toBeInTheDocument();
+  });
+
+  it("opens a provider-specific connection page from Configure", async () => {
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Open settings" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Configure OpenAI Compatible" }),
+    );
+
+    const dialog = screen.getByRole("dialog", {
+      name: "Connect OpenAI Compatible",
+    });
+    expect(dialog).toHaveClass("max-w-[920px]");
+    expect(within(dialog).getByTestId("provider-connection-body")).toHaveClass(
+      "max-w-[720px]",
+    );
+    expect(
+      within(dialog).getByRole("button", { name: "Back to providers" }),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Base URL")).toHaveValue(
+      "http://127.0.0.1:11434/v1",
+    );
+  });
+
+  it("opens OpenRouter as an OpenAI-compatible preset", async () => {
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Open settings" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Configure OpenRouter" }),
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "Connect OpenRouter" });
+    expect(within(dialog).getByLabelText("Base URL")).toHaveValue(
+      "https://openrouter.ai/api/v1",
+    );
+    expect(within(dialog).getByLabelText("Model")).toHaveValue(
+      "openrouter/auto",
+    );
+  });
+
+  it("shows OpenAI login method choices before API key fields", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("button", { name: "Configure OpenAI" }));
+
+    expect(
+      screen.getByRole("dialog", { name: "Connect OpenAI" }),
+    ).toBeInTheDocument();
+    const authModeGroup = screen.getByRole("radiogroup", {
+      name: "OpenAI auth mode",
+    });
+    expect(
+      within(authModeGroup).getByRole("radio", {
+        name: "ChatGPT Pro/Plus (headless)",
+      }),
+    ).toHaveAttribute("aria-checked", "false");
+
+    const apiKeyMode = within(authModeGroup).getByRole("radio", {
+      name: "API key",
+    });
+    expect(apiKeyMode).toHaveAttribute("aria-checked", "true");
+
+    apiKeyMode.focus();
+    await user.keyboard("{ArrowLeft}");
+
+    await waitFor(() => {
+      expect(
+        within(authModeGroup).getByRole("radio", {
+          name: "ChatGPT Pro/Plus (headless)",
+        }),
+      ).toHaveAttribute("aria-checked", "true");
+    });
+  });
+
+  it("runs OpenAI headless OAuth device login from settings", async () => {
+    const user = userEvent.setup();
+    const openExternalUrl = vi
+      .spyOn(exagentClient, "openExternalUrl")
+      .mockResolvedValue(undefined);
+    vi.spyOn(exagentClient, "startChatGptOAuthDevice").mockResolvedValue({
+      device_auth_id: "device-1",
+      user_code: "ABCD-EFGH",
+      verification_uri: "https://auth.openai.com/codex/device",
+      expires_in: 900,
+      interval: 1,
+    });
+    vi.spyOn(exagentClient, "completeChatGptOAuthDevice").mockResolvedValue(
+      oauthProviderSettings("openai", "OpenAI"),
+    );
+
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("button", { name: "Configure OpenAI" }));
+    await user.click(
+      screen.getByRole("radio", { name: "ChatGPT Pro/Plus (headless)" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Start OAuth login" }));
+
+    expect(await screen.findByText("ABCD-EFGH")).toBeInTheDocument();
+    expect(openExternalUrl).toHaveBeenCalledWith(
+      "https://auth.openai.com/codex/device",
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Complete OAuth login" }),
+    );
+
+    expect(exagentClient.completeChatGptOAuthDevice).toHaveBeenCalledWith({
+      device_auth_id: "device-1",
+      user_code: "ABCD-EFGH",
+      verification_uri: "https://auth.openai.com/codex/device",
+      expires_in: 900,
+      interval: 1,
+    });
+  });
+
+  it("shows GitHub Copilot deployment choices", async () => {
+    const user = userEvent.setup();
+    const openExternalUrl = vi
+      .spyOn(exagentClient, "openExternalUrl")
+      .mockResolvedValue(undefined);
+    vi.spyOn(exagentClient, "startGitHubCopilotOAuthDevice").mockResolvedValue({
+      device_code: "device-code-1",
+      user_code: "WXYZ-1234",
+      verification_uri: "https://github.com/login/device",
+      expires_in: 900,
+      interval: 1,
+    });
+    vi.spyOn(
+      exagentClient,
+      "completeGitHubCopilotOAuthDevice",
+    ).mockResolvedValue(
+      oauthProviderSettings("github_copilot", "GitHub Copilot"),
+    );
+
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(
+      screen.getByRole("button", { name: "Configure GitHub Copilot" }),
+    );
+
+    expect(
+      screen.getByRole("dialog", { name: "Connect GitHub Copilot" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("GitHub.com")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Start OAuth login" }));
+
+    expect(await screen.findByText("WXYZ-1234")).toBeInTheDocument();
+    expect(openExternalUrl).toHaveBeenCalledWith(
+      "https://github.com/login/device",
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Complete OAuth login" }),
+    );
+    expect(exagentClient.completeGitHubCopilotOAuthDevice).toHaveBeenCalled();
+  });
+
+  it("opens Anthropic as a supported API key provider", async () => {
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Open settings" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Configure Anthropic" }),
+    ).toBeEnabled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Configure Anthropic" }),
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "Connect Anthropic" });
+    expect(within(dialog).getByLabelText("Anthropic API key")).toBeEnabled();
+    expect(
+      within(dialog).getByRole("button", { name: "Save provider" }),
+    ).toBeEnabled();
+    expect(
+      within(dialog).queryByText("Anthropic Messages adapter is planned."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opens Google and OpenAI-compatible vendor providers", async () => {
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Open settings" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Configure Google" }),
+    );
+
+    let dialog = screen.getByRole("dialog", { name: "Connect Google" });
+    expect(within(dialog).getByLabelText("Google API key")).toBeEnabled();
+    expect(within(dialog).getByLabelText("Model")).toHaveValue(
+      "gemini-3-pro-preview",
+    );
+    expect(
+      within(dialog).getByRole("button", { name: "Save provider" }),
+    ).toBeEnabled();
+
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Back to providers" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Configure DeepSeek" }),
+    );
+    dialog = screen.getByRole("dialog", { name: "Connect DeepSeek" });
+    expect(within(dialog).getByLabelText("DeepSeek API key")).toBeEnabled();
+    expect(
+      within(dialog).queryByLabelText("API key credential"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("button", { name: "Add key" }),
+    ).not.toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Base URL")).toHaveValue(
+      "https://api.deepseek.com",
+    );
+    expect(within(dialog).getByLabelText("Model")).toHaveValue(
+      "deepseek-v4-flash",
+    );
+
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Back to providers" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Configure Kimi" }),
+    );
+    dialog = screen.getByRole("dialog", { name: "Connect Kimi" });
+    expect(within(dialog).getByLabelText("Base URL")).toHaveValue(
+      "https://api.moonshot.ai/v1",
+    );
+    expect(within(dialog).getByLabelText("Model")).toHaveValue("kimi-k2.6");
+
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Back to providers" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Configure GLM" }),
+    );
+    dialog = screen.getByRole("dialog", { name: "Connect GLM" });
+    expect(within(dialog).getByLabelText("Base URL")).toHaveValue(
+      "https://open.bigmodel.cn/api/paas/v4",
+    );
+    expect(within(dialog).getByLabelText("Model")).toHaveValue("glm-5.1");
+  });
+
+  it("uses a single API key field without credential profile controls", async () => {
+    const user = userEvent.setup();
+    const saveProviderSettings = vi.spyOn(
+      exagentClient,
+      "saveProviderSettings",
+    );
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(
+      screen.getByRole("button", { name: "Configure DeepSeek" }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "Connect DeepSeek" });
+
+    expect(within(dialog).queryByText("Credential")).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByLabelText("API key credential"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("button", { name: "Add key" }),
+    ).not.toBeInTheDocument();
+
+    await user.type(
+      within(dialog).getByLabelText("DeepSeek API key"),
+      "sk-deepseek",
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "Save provider" }),
+    );
+
+    expect(saveProviderSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: "deepseek",
+        apiKey: "sk-deepseek",
+      }),
+    );
+    expect(saveProviderSettings).toHaveBeenCalledWith(
+      expect.not.objectContaining({
+        credentialId: expect.anything(),
+        createCredential: expect.anything(),
+      }),
+    );
+  });
+
+  it("discovers models on save and renders configured provider groups in the composer", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(exagentClient, "listProviderModels").mockResolvedValue({
+      status: "success",
+      message: "Model discovery succeeded.",
+      models: [
+        {
+          provider_id: "deepseek",
+          id: "deepseek-chat",
+          display_name: "deepseek-chat",
+          context_window: null,
+          supports_tools: true,
+          capabilities: {
+            supports_tools: true,
+            thinking: {
+              supported: false,
+              modes: [],
+            },
+          },
+        },
+        {
+          provider_id: "deepseek",
+          id: "deepseek-reasoner",
+          display_name: "deepseek-reasoner",
+          context_window: null,
+          supports_tools: true,
+          capabilities: {
+            supports_tools: true,
+            thinking: {
+              supported: true,
+              modes: ["off", "high"],
+            },
+          },
+        },
+      ],
+    });
+    const saveProviderSettings = vi
+      .spyOn(exagentClient, "saveProviderSettings")
+      .mockResolvedValue(
+        deepSeekProviderSettings({
+          providers: [
+            {
+              id: "openai",
+              name: "OpenAI",
+              description: "Use ChatGPT Pro/Plus or an API key",
+              recommended: true,
+              supported: true,
+              auth_mode: "api_key_required",
+              protocol: "openai_chat_completions",
+              default_base_url: "https://api.openai.com/v1",
+              default_model: "gpt-5.5",
+              supports_model_discovery: true,
+              supports_tools: true,
+              unsupported_reason: null,
+            },
+            deepSeekProvider,
+          ],
+          configured_providers: [
+            {
+              provider_id: "openai",
+              base_url: "https://api.openai.com/v1",
+              model: "gpt-5.5",
+              has_api_key: true,
+              credential_source: "keychain",
+              auth_required: true,
+            },
+            {
+              provider_id: "deepseek",
+              base_url: "https://api.deepseek.com",
+              model: "deepseek-v4-flash",
+              has_api_key: true,
+              credential_source: "keychain",
+              auth_required: true,
+            },
+          ],
+          model_options: [
+            {
+              provider_id: "openai",
+              id: "gpt-5.5",
+              display_name: "gpt-5.5",
+              context_window: null,
+              supports_tools: true,
+              capabilities: {
+                supports_tools: true,
+                thinking: {
+                  supported: true,
+                  modes: ["off", "high"],
+                },
+              },
+            },
+            {
+              provider_id: "deepseek",
+              id: "deepseek-chat",
+              display_name: "deepseek-chat",
+              context_window: null,
+              supports_tools: true,
+              capabilities: {
+                supports_tools: true,
+                thinking: {
+                  supported: false,
+                  modes: [],
+                },
+              },
+            },
+            {
+              provider_id: "deepseek",
+              id: "deepseek-reasoner",
+              display_name: "deepseek-reasoner",
+              context_window: null,
+              supports_tools: true,
+              capabilities: {
+                supports_tools: true,
+                thinking: {
+                  supported: true,
+                  modes: ["off", "high"],
+                },
+              },
+            },
+          ],
+        }),
+      );
+
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(
+      screen.getByRole("button", { name: "Configure DeepSeek" }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "Connect DeepSeek" });
+    await user.type(
+      within(dialog).getByLabelText("DeepSeek API key"),
+      "sk-deepseek",
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "Save provider" }),
+    );
+
+    await waitFor(() => {
+      expect(saveProviderSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerId: "deepseek",
+          modelOptions: expect.arrayContaining([
+            expect.objectContaining({
+              provider_id: "deepseek",
+              id: "deepseek-chat",
+            }),
+            expect.objectContaining({
+              provider_id: "deepseek",
+              id: "deepseek-reasoner",
+            }),
+          ]),
+        }),
+      );
+    });
+
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Composer model" }));
+
+    expect(screen.getByText("OpenAI")).toBeInTheDocument();
+    expect(screen.getByText("DeepSeek")).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("menuitemradio", { name: /gpt-5.5/i }).length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("menuitemradio", { name: /deepseek-chat/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitemradio", { name: /deepseek-reasoner/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("discovers models from provider settings and keeps manual entry available", async () => {
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Open settings" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Configure OpenAI Compatible" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Discover models" }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Use gpt-4.1-mini" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Model")).toBeEnabled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Use local-coder" }),
+    );
+    expect(screen.getByLabelText("Model")).toHaveValue("local-coder");
+    expect(
+      screen.getByRole("button", { name: "Use gpt-4.1-mini" }),
+    ).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Save provider" }),
+    );
+    expect(
+      useWorkbenchStore
+        .getState()
+        .providerSettings?.model_options.some(
+          (model) =>
+            model.provider_id === "openai_compatible" &&
+            model.id === "local-coder",
+        ),
+    ).toBe(true);
+    expect(
+      useWorkbenchStore
+        .getState()
+        .providerSettings?.model_options.some(
+          (model) =>
+            model.provider_id === "openai_compatible" &&
+            model.id === "gpt-4.1-mini",
+        ),
+    ).toBe(true);
+  });
+
+  it("shows a searchable model picker and renders thinking only for capable models", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText("Session restored");
+
+    const modelButton = screen.getByRole("button", { name: "Composer model" });
+    expect(modelButton).toHaveTextContent("gpt-5.5");
+    expect(
+      screen.getByRole("button", { name: "Thinking mode" }),
+    ).toBeInTheDocument();
+
+    await user.click(modelButton);
+    expect(screen.getByLabelText("Search models")).toBeInTheDocument();
+    expect(screen.getByText("OpenAI")).toBeInTheDocument();
+    expect(screen.queryByText("OpenAI Compatible")).not.toBeInTheDocument();
+    await user.click(screen.getByLabelText("Search models"));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByLabelText("Search models")).not.toBeInTheDocument();
+
+    act(() => {
+      const currentProviderSettings =
+        useWorkbenchStore.getState().providerSettings;
+      useWorkbenchStore.setState({
+        providerSettings: currentProviderSettings
+          ? {
+              ...currentProviderSettings,
+              model_options: [
+                ...currentProviderSettings.model_options,
+                {
+                  provider_id: "openai_compatible",
+                  id: "local-model",
+                  display_name: "local-model",
+                  context_window: null,
+                  supports_tools: true,
+                  capabilities: {
+                    supports_tools: false,
+                    thinking: {
+                      supported: false,
+                      modes: [],
+                    },
+                  },
+                },
+              ],
+            }
+          : currentProviderSettings,
+      });
+    });
+
+    await user.click(modelButton);
+    await user.type(screen.getByLabelText("Search models"), "local");
+    await user.click(
+      screen.getByRole("menuitemradio", { name: /local-model/i }),
+    );
+    expect(modelButton).toHaveTextContent("local-model");
+    expect(
+      screen.queryByRole("button", { name: "Thinking mode" }),
+    ).not.toBeInTheDocument();
+
+    act(() => {
+      const currentProviderSettings =
+        useWorkbenchStore.getState().providerSettings;
+      useWorkbenchStore.setState({
+        providerSettings: currentProviderSettings
+          ? {
+              ...currentProviderSettings,
+              model_options: [
+                ...currentProviderSettings.model_options,
+                {
+                  provider_id: "openai",
+                  id: "gpt-5",
+                  display_name: "gpt-5",
+                  context_window: 400000,
+                  supports_tools: true,
+                  capabilities: {
+                    supports_tools: true,
+                    thinking: {
+                      supported: true,
+                      modes: ["off", "high"],
+                    },
+                  },
+                },
+              ],
+            }
+          : currentProviderSettings,
+        selectedModel: {
+          provider_id: "openai",
+          model_id: "gpt-5",
+        },
+        selectedThinkingMode: "auto",
+      });
+    });
+
+    expect(
+      screen.getByRole("button", { name: "Thinking mode" }),
+    ).toHaveTextContent("Default");
+    await user.click(screen.getByRole("button", { name: "Thinking mode" }));
+    expect(
+      screen.getByRole("menuitemradio", { name: "Thinking default" }),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(
+      screen.getByRole("menuitemradio", { name: "Thinking off" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitemradio", { name: "Thinking high" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitemradio", { name: "Thinking low" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitemradio", { name: "Thinking xhigh" }),
+    ).not.toBeInTheDocument();
+
+    act(() => {
+      const currentProviderSettings =
+        useWorkbenchStore.getState().providerSettings;
+      useWorkbenchStore.setState({
+        providerSettings: currentProviderSettings
+          ? {
+              ...currentProviderSettings,
+              model_options: currentProviderSettings.model_options.map(
+                (model) =>
+                  model.provider_id === "openai" && model.id === "gpt-5"
+                    ? {
+                        ...model,
+                        capabilities: {
+                          ...model.capabilities,
+                          thinking: {
+                            supported: true,
+                            modes: ["off", "high", "x_high"],
+                          },
+                        },
+                      }
+                    : model,
+              ),
+            }
+          : currentProviderSettings,
+      });
+    });
+
+    await user.click(
+      screen.getByRole("menuitemradio", { name: "Thinking xhigh" }),
+    );
+    expect(useWorkbenchStore.getState().selectedThinkingMode).toBe("x_high");
+  });
+
+  it("opens composer context actions from the plus menu", async () => {
+    const user = userEvent.setup();
+    const setThreadGoal = vi
+      .spyOn(exagentClient, "setThreadGoal")
+      .mockResolvedValue({
+        goal: threadGoal({ objective: "Ship goal mode from menu" }),
+      });
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    const actionButton = screen.getByRole("button", {
+      name: "Open composer actions",
+    });
+    expect(actionButton).not.toHaveClass("rounded-full");
+    expect(
+      screen.queryByRole("button", { name: "Attach context" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(actionButton);
+
+    expect(
+      screen.getByRole("menuitem", { name: "添加照片和文件" }),
+    ).toHaveAttribute("aria-disabled", "true");
+    expect(
+      screen.getByRole("menuitem", { name: "附加 Google Chrome" }),
+    ).toHaveAttribute("aria-disabled", "true");
+    const planModeItem = screen.getByRole("menuitemcheckbox", {
+      name: /计划模式/,
+    });
+    expect(planModeItem).toHaveAttribute("aria-checked", "false");
+    await user.click(screen.getByRole("menuitem", { name: /追求目标/ }));
+    await user.type(
+      screen.getByLabelText("Goal objective"),
+      "Ship goal mode from menu",
+    );
+    await user.click(screen.getByRole("button", { name: "Save goal" }));
+
+    expect(setThreadGoal).toHaveBeenCalledWith(
+      "project-exagent",
+      "session-desktop",
+      {
+        objective: "Ship goal mode from menu",
+        status: "active",
+        tokenBudget: null,
+        clearTokenBudget: true,
+      },
+    );
+    expect(screen.getByText("Ship goal mode from menu")).toBeInTheDocument();
+
+    await user.click(actionButton);
+    expect(screen.getByRole("menuitem", { name: /插件/ })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+
+    const reopenedPlanModeItem = screen.getByRole("menuitemcheckbox", {
+      name: /计划模式/,
+    });
+    await user.click(reopenedPlanModeItem);
+
+    expect(
+      screen.getByRole("button", { name: "Plan mode enabled" }),
+    ).toBeInTheDocument();
+  });
+
+  it("sends plan mode with the next prompt and clears the composer toggle", async () => {
+    const user = userEvent.setup();
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-desktop",
+      turn: {
+        id: "turn-plan-mode",
+        status: "in_progress",
+        items: [],
+      },
+    });
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await user.click(
+      screen.getByRole("button", { name: "Open composer actions" }),
+    );
+    await user.click(
+      screen.getByRole("menuitemcheckbox", { name: /计划模式/ }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Plan mode enabled" }),
+    ).toBeInTheDocument();
+
+    await user.type(
+      screen.getByLabelText("Message ExAgent"),
+      "Plan the migration",
+    );
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(startTurn).toHaveBeenCalledWith(
+      "project-exagent",
+      "session-desktop",
+      "Plan the migration",
+      {
+        model: {
+          provider_id: "openai",
+          model_id: "gpt-5.5",
+        },
+        thinkingMode: null,
+        clearThinkingMode: false,
+        turnMode: "plan",
+      },
+    );
+    expect(
+      screen.queryByRole("button", { name: "Plan mode enabled" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("updates the goal control from runtime goal events", async () => {
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    act(() => {
+      useWorkbenchStore.getState().applyRuntimeEvent({
+        event_id: "goal-updated-event",
+        thread_id: "session-desktop",
+        turn_id: null,
+        kind: {
+          type: "thread_goal_updated",
+          goal: threadGoal({ objective: "Runtime event goal" }),
+        },
+      });
+    });
+
+    expect(screen.getByText("Runtime event goal")).toBeInTheDocument();
+
+    act(() => {
+      useWorkbenchStore.getState().applyRuntimeEvent({
+        event_id: "goal-cleared-event",
+        thread_id: "session-desktop",
+        turn_id: null,
+        kind: {
+          type: "thread_goal_cleared",
+          thread_id: "session-desktop",
+        },
+      });
+    });
+
+    expect(screen.queryByText("Runtime event goal")).not.toBeInTheDocument();
+  });
+
+  it("uses the composer action as interrupt while the active session is running", async () => {
+    const user = userEvent.setup();
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-desktop",
+      turn: {
+        id: "turn-should-not-start",
+        status: "in_progress",
+        items: [],
+      },
+    });
+    const interruptTurn = vi
+      .spyOn(exagentClient, "interruptTurn")
+      .mockResolvedValue(undefined);
+    vi.spyOn(exagentClient, "agentTree").mockResolvedValue({
+      root: {
+        thread_id: "session-desktop",
+        root_thread_id: "session-desktop",
+        depth: 0,
+        agent_path: "root",
+        status: "idle",
+        children: [],
+      },
+    });
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    act(() => {
+      const current = useWorkbenchStore.getState();
+      useWorkbenchStore.setState({
+        composerValue: "Do not submit while busy",
+        sessions: current.sessions.map((session) =>
+          session.id === "session-desktop"
+            ? { ...session, status: "running" }
+            : session,
+        ),
+      });
+    });
+
+    await user.click(screen.getByRole("button", { name: "Interrupt" }));
+
+    expect(interruptTurn).toHaveBeenCalledWith(
+      "project-exagent",
+      "session-desktop",
+    );
+    expect(startTurn).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(
+        useWorkbenchStore
+          .getState()
+          .sessions.find((session) => session.id === "session-desktop")?.status,
+      ).toBe("idle");
+    });
+    expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+  });
+
+  it("self-heals a stale running composer when interrupt reports no active turn", async () => {
+    const user = userEvent.setup();
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-desktop",
+      turn: {
+        id: "turn-should-not-start",
+        status: "in_progress",
+        items: [],
+      },
+    });
+    const interruptTurn = vi
+      .spyOn(exagentClient, "interruptTurn")
+      .mockRejectedValue(
+        new Error(
+          "turn rejected for thread session-desktop: thread has no active turn",
+        ),
+      );
+    vi.spyOn(exagentClient, "agentTree").mockResolvedValue({
+      root: {
+        thread_id: "session-desktop",
+        root_thread_id: "session-desktop",
+        depth: 0,
+        agent_path: "root",
+        status: "idle",
+        children: [],
+      },
+    });
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    act(() => {
+      const current = useWorkbenchStore.getState();
+      useWorkbenchStore.setState({
+        composerValue: "Do not submit while stale",
+        sessions: current.sessions.map((session) =>
+          session.id === "session-desktop"
+            ? { ...session, status: "running" }
+            : session,
+        ),
+      });
+    });
+
+    await user.click(screen.getByRole("button", { name: "Interrupt" }));
+
+    expect(interruptTurn).toHaveBeenCalledWith(
+      "project-exagent",
+      "session-desktop",
+    );
+    expect(startTurn).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(
+        useWorkbenchStore
+          .getState()
+          .sessions.find((session) => session.id === "session-desktop")?.status,
+      ).toBe("idle");
+    });
+    expect(useWorkbenchStore.getState().error).toBeNull();
+  });
+
+  it("clears unsupported selected thinking mode when switching to a model with narrower backend modes", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText("Session restored");
+
+    act(() => {
+      const currentProviderSettings =
+        useWorkbenchStore.getState().providerSettings;
+      useWorkbenchStore.setState({
+        providerSettings: currentProviderSettings
+          ? {
+              ...currentProviderSettings,
+              model_options: [
+                ...currentProviderSettings.model_options,
+                {
+                  provider_id: "openai",
+                  id: "gpt-5",
+                  display_name: "gpt-5",
+                  context_window: 400000,
+                  supports_tools: true,
+                  capabilities: {
+                    supports_tools: true,
+                    thinking: {
+                      supported: true,
+                      modes: ["low"],
+                    },
+                  },
+                },
+              ],
+            }
+          : currentProviderSettings,
+        selectedModel: {
+          provider_id: "openai",
+          model_id: "gpt-4.1",
+        },
+        selectedThinkingMode: "high",
+      });
+    });
+
+    const modelButton = screen.getByRole("button", { name: "Composer model" });
+    await user.click(modelButton);
+    await user.click(
+      screen.getByRole("menuitemradio", { name: "gpt-5 Available" }),
+    );
+
+    expect(useWorkbenchStore.getState().selectedThinkingMode).toBeNull();
+    expect(modelButton).toHaveTextContent("gpt-5");
+    expect(
+      screen.getByRole("button", { name: "Thinking mode" }),
+    ).toHaveTextContent("Default");
+
+    await user.click(screen.getByRole("button", { name: "Thinking mode" }));
+    expect(
+      screen.getByRole("menuitemradio", { name: "Thinking default" }),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(
+      screen.getByRole("menuitemradio", { name: "Thinking low" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitemradio", { name: "Thinking high" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows general mcp skills and archive settings tabs without runtime", async () => {
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Open settings" }),
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "Settings" });
+    expect(dialog).toHaveClass("h-[min(720px,calc(100dvh-64px))]");
+    expect(screen.getByRole("tab", { name: "Providers" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: "Runtime" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "General" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "MCP" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Skills" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: "Language" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Archive" })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: "General" }));
+    expect(dialog).toHaveClass("h-[min(720px,calc(100dvh-64px))]");
+    expect(screen.getByRole("heading", { name: "General" })).toBeInTheDocument();
+    expect(screen.getByText("Theme")).toBeInTheDocument();
+    expect(screen.getByText("Language")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: "MCP" }));
+    expect(dialog).toHaveClass("h-[min(720px,calc(100dvh-64px))]");
+    expect(
+      screen.getByRole("button", { name: "Add MCP server" }),
+    ).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Skills" }));
+    expect(dialog).toHaveClass("h-[min(720px,calc(100dvh-64px))]");
+    expect(
+      screen.getByRole("button", { name: "Add global root" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Catalog" })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Archive" }));
+    expect(dialog).toHaveClass("h-[min(720px,calc(100dvh-64px))]");
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
+  });
+
+  it("changes the desktop theme from general settings", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("tab", { name: "General" }));
+    await user.click(screen.getByRole("radio", { name: /Light/ }));
+
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(window.localStorage.getItem("exagent.theme")).toBe("light");
+
+    await user.click(screen.getByRole("radio", { name: /System/ }));
+
+    expect(document.documentElement.dataset.theme).toBeUndefined();
+    expect(window.localStorage.getItem("exagent.theme")).toBe("system");
+  });
+
+  it("restores an archived conversation from settings", async () => {
+    const user = userEvent.setup();
+    const unarchiveThread = vi
+      .spyOn(exagentClient, "unarchiveThread")
+      .mockResolvedValue(undefined);
+    vi.spyOn(exagentClient, "listProjects").mockResolvedValue([
+      {
+        id: "project-alpha",
+        name: "Alpha",
+        path: "/tmp/alpha",
+        archived_at: null,
+        pinned: false,
+      },
+    ]);
+    vi.spyOn(exagentClient, "listThreads")
+      .mockResolvedValueOnce([
+        threadRecord({
+          id: "session-archived",
+          project_id: "project-alpha",
+          fallback_title: "Archived alpha",
+          archived_at: 10,
+        }),
+      ])
+      .mockResolvedValueOnce([]);
+
+    render(<App />);
+    await screen.findByText("Session restored");
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("tab", { name: "Archive" }));
+
+    expect(await screen.findByText("Archived alpha")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Restore" }));
+
+    expect(unarchiveThread).toHaveBeenCalledWith("session-archived");
+    expect(
+      await screen.findByText("No archived conversations"),
+    ).toBeInTheDocument();
+  });
+
+  it("opens an archived conversation after restoring it from settings", async () => {
+    const user = userEvent.setup();
+    const unarchiveThread = vi
+      .spyOn(exagentClient, "unarchiveThread")
+      .mockResolvedValue(undefined);
+    vi.spyOn(exagentClient, "listProjects").mockResolvedValue([
+      {
+        id: "project-alpha",
+        name: "Alpha",
+        path: "/tmp/alpha",
+        archived_at: null,
+        pinned: false,
+      },
+    ]);
+    vi.spyOn(exagentClient, "listThreads")
+      .mockResolvedValueOnce([
+        threadRecord({
+          id: "session-archived",
+          project_id: "project-alpha",
+          fallback_title: "Archived alpha",
+          archived_at: 10,
+        }),
+      ])
+      .mockResolvedValueOnce([]);
+    vi.spyOn(exagentClient, "reindexProject").mockResolvedValue([
+      threadRecord({
+        id: "session-archived",
+        project_id: "project-alpha",
+        fallback_title: "Archived alpha",
+        archived_at: null,
+      }),
+    ]);
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-archived",
+        status: "idle",
+        active_turn: null,
+        turns: [
+          {
+            id: "turn-archived",
+            status: "completed",
+            items: [{ type: "assistant_message", text: "Restored transcript" }],
+          },
+        ],
+      },
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-archived",
+      events: [],
+    });
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-alpha",
+          name: "Alpha",
+          path: "/tmp/alpha",
+          active: true,
+        },
+      ],
+      sessions: [],
+      activeProjectId: "project-alpha",
+      activeSessionId: null,
+    });
+
+    render(<App />);
+    await screen.findByText("What should we build in Alpha?");
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("tab", { name: "Archive" }));
+
+    expect(await screen.findByText("Archived alpha")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Open" }));
+
+    expect(unarchiveThread).toHaveBeenCalledWith("session-archived");
+    await waitFor(() => {
+      expect(useWorkbenchStore.getState().activeProjectId).toBe(
+        "project-alpha",
+      );
+      expect(useWorkbenchStore.getState().activeSessionId).toBe(
+        "session-archived",
+      );
+    });
+    expect(useWorkbenchStore.getState().transcript).toEqual([
+      expect.objectContaining({ body: "Restored transcript" }),
+    ]);
+  });
+
+  it("keeps provider connection pages fixed height and exposes OpenAI model setup", async () => {
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Open settings" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Configure OpenAI" }),
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "Connect OpenAI" });
+    expect(dialog).toHaveClass("h-[min(720px,calc(100dvh-64px))]");
+    expect(screen.getByLabelText("Model")).toHaveValue("gpt-5.5");
+    expect(
+      screen.getByRole("button", { name: "Discover models" }),
+    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Save provider" })).toBeEnabled();
+  });
+
+  it("shows runtime configuration in the inspector", async () => {
+    render(<App />);
+
+    await screen.findByText("Session restored");
+
+    expect(
+      screen.getByRole("heading", { name: "Runtime" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("gpt-5.5").length).toBeGreaterThan(0);
+    expect(screen.getByText("default")).toBeInTheDocument();
+    expect(screen.getByText("MCP servers")).toBeInTheDocument();
+    expect(screen.getByText("Skill roots")).toBeInTheDocument();
+  });
+
+  it("keeps lower-priority inspector sections collapsed until requested", async () => {
+    render(<App />);
+
+    await screen.findByText("Session restored");
+
+    const changedFilesToggle = screen.getByRole("button", {
+      name: /Changed Files/,
+    });
+    expect(changedFilesToggle).toHaveAttribute("aria-expanded", "false");
+    expect(
+      screen.queryByText("No changed files reported."),
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(changedFilesToggle);
+
+    expect(changedFilesToggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("No changed files reported.")).toBeInTheDocument();
+  });
+
+  it("renders user messages as right bubbles and assistant replies as left text", async () => {
+    render(<App />);
+
+    await screen.findByText("Session restored");
+
+    expect(screen.getAllByLabelText("User message")[0]).toHaveClass(
+      "justify-end",
+    );
+    expect(screen.getAllByLabelText("Assistant message")[0]).toHaveClass(
+      "max-w-[780px]",
+    );
+  });
+
+  it("renders reasoning messages as collapsible transcript blocks", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(exagentClient, "getWorkbenchSnapshot").mockResolvedValue({
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Volumes/EXEXEX/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-desktop",
+          projectId: "project-exagent",
+          title: "Reasoning session",
+          updatedAt: "now",
+          status: "idle",
+        },
+      ],
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-desktop",
+      transcript: [
+        {
+          id: "reasoning-message",
+          role: "reasoning",
+          title: "Reasoning",
+          body: "Checked the provider response shape.",
+          timestamp: "history",
+          threadId: "session-desktop",
+          turnId: "turn-reasoning",
+        },
+        {
+          id: "assistant-message",
+          role: "assistant",
+          body: "Final answer.",
+          timestamp: "history",
+          threadId: "session-desktop",
+          turnId: "turn-reasoning",
+        },
+      ],
+      events: [],
+      changedFiles: [],
+      cwd: "/Volumes/EXEXEX/ExAgent",
+      policy: "local",
+      tokenUsage: {
+        input: 0,
+        output: 0,
+        limit: 1,
+      },
+      tokenUsageByThreadId: {},
+      runtimeSettings: null,
+      selectedModel: null,
+      selectedThinkingMode: null,
+    });
+    render(<App />);
+
+    const reasoningArticle = await screen.findByLabelText("Reasoning message");
+    const reasoningToggle = within(reasoningArticle).getByRole("button", {
+      name: /Reasoning/,
+    });
+    expect(reasoningToggle).toHaveAttribute("aria-expanded", "false");
+    expect(
+      screen.queryByText("Checked the provider response shape."),
+    ).not.toBeInTheDocument();
+
+    await user.click(reasoningToggle);
+
+    expect(reasoningToggle).toHaveAttribute("aria-expanded", "true");
+    expect(
+      screen.getByText("Checked the provider response shape."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Final answer.")).toBeInTheDocument();
+  });
+
+  it("uses the saved provider for prompts without reloading the workbench", async () => {
+    const user = userEvent.setup();
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-desktop",
+      turn: {
+        id: "turn-provider-switch",
+        status: "in_progress",
+        items: [],
+      },
+    });
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(
+      screen.getByRole("button", { name: "Configure OpenAI Compatible" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save provider" }));
+    await user.keyboard("{Escape}");
+    await user.type(
+      screen.getByLabelText("Message ExAgent"),
+      "Use the new provider",
+    );
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(startTurn).toHaveBeenCalledWith(
+      "project-exagent",
+      "session-desktop",
+      "Use the new provider",
+      {
+        model: {
+          provider_id: "openai_compatible",
+          model_id: "local-model",
+        },
+        thinkingMode: null,
+        clearThinkingMode: false,
+        turnMode: "default",
+      },
+    );
+  });
+
+  it("uses backend model capabilities to omit thinking for prompts", async () => {
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-desktop",
+      turn: {
+        id: "turn-capability",
+        status: "in_progress",
+        items: [],
+      },
+    });
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-desktop",
+      composerValue: "Use backend capabilities",
+      selectedModel: {
+        provider_id: "openai",
+        model_id: "gpt-5-disabled",
+      },
+      selectedThinkingMode: null,
+      runtimeSettings: {
+        default_model: "gpt-4.1",
+        default_thinking_mode: "high",
+        presets: [],
+        mcp_servers: [],
+        skill_roots: [],
+      },
+      providerSettings: {
+        providers: [],
+        active_provider_id: "openai",
+        config: {
+          provider_id: "openai",
+          base_url: "https://api.openai.com/v1",
+          model: "gpt-5-disabled",
+          has_api_key: false,
+          credential_source: "none",
+          auth_required: true,
+        },
+        connected_provider: null,
+        last_connection: null,
+        configured_providers: [],
+        model_options: [
+          {
+            provider_id: "openai",
+            id: "gpt-5-disabled",
+            display_name: "gpt-5-disabled",
+            context_window: null,
+            supports_tools: true,
+            capabilities: {
+              supports_tools: true,
+              thinking: {
+                supported: false,
+                modes: [],
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    await useWorkbenchStore.getState().sendPrompt();
+
+    expect(startTurn).toHaveBeenCalledWith(
+      "project-exagent",
+      "session-desktop",
+      "Use backend capabilities",
+      {
+        model: {
+          provider_id: "openai",
+          model_id: "gpt-5-disabled",
+        },
+        thinkingMode: null,
+        clearThinkingMode: true,
+        turnMode: "default",
+      },
+    );
+  });
+
+  it("omits unsupported runtime default thinking mode for low-only models", async () => {
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-desktop",
+      turn: {
+        id: "turn-low-only",
+        status: "in_progress",
+        items: [],
+      },
+    });
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-desktop",
+      composerValue: "Use low-only model",
+      activeProviderId: "openai",
+      selectedModel: {
+        provider_id: "openai",
+        model_id: "gpt-5-low-only",
+      },
+      selectedThinkingMode: null,
+      runtimeSettings: {
+        default_model: "gpt-4.1",
+        default_thinking_mode: "high",
+        presets: [],
+        mcp_servers: [],
+        skill_roots: [],
+      },
+      providerSettings: {
+        providers: [],
+        active_provider_id: "openai",
+        config: {
+          provider_id: "openai",
+          base_url: "https://api.openai.com/v1",
+          model: "gpt-5-low-only",
+          has_api_key: false,
+          credential_source: "none",
+          auth_required: true,
+        },
+        connected_provider: null,
+        last_connection: null,
+        configured_providers: [],
+        model_options: [
+          {
+            provider_id: "openai",
+            id: "gpt-5-low-only",
+            display_name: "gpt-5-low-only",
+            context_window: null,
+            supports_tools: true,
+            capabilities: {
+              supports_tools: true,
+              thinking: {
+                supported: true,
+                modes: ["low"],
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    await useWorkbenchStore.getState().sendPrompt();
+
+    expect(startTurn).toHaveBeenCalledWith(
+      "project-exagent",
+      "session-desktop",
+      "Use low-only model",
+      {
+        model: {
+          provider_id: "openai",
+          model_id: "gpt-5-low-only",
+        },
+        thinkingMode: null,
+        clearThinkingMode: true,
+        turnMode: "default",
+      },
+    );
+  });
+
+  it("inherits backend thinking defaults when model capabilities are unknown", async () => {
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-desktop",
+      turn: {
+        id: "turn-unknown-capability",
+        status: "in_progress",
+        items: [],
+      },
+    });
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-desktop",
+      composerValue: "Use unknown model",
+      activeProviderId: "openai_compatible",
+      selectedModel: {
+        provider_id: "openai_compatible",
+        model_id: "manual-model",
+      },
+      selectedThinkingMode: "high",
+      runtimeSettings: {
+        default_model: "gpt-4.1",
+        default_thinking_mode: "high",
+        presets: [],
+        mcp_servers: [],
+        skill_roots: [],
+      },
+      providerSettings: {
+        providers: [],
+        active_provider_id: "openai_compatible",
+        config: {
+          provider_id: "openai_compatible",
+          base_url: "http://127.0.0.1:11434/v1",
+          model: "manual-model",
+          has_api_key: false,
+          credential_source: "none",
+          auth_required: false,
+        },
+        connected_provider: null,
+        last_connection: null,
+        configured_providers: [],
+        model_options: [],
+      },
+    });
+
+    await useWorkbenchStore.getState().sendPrompt();
+
+    expect(startTurn).toHaveBeenCalledWith(
+      "project-exagent",
+      "session-desktop",
+      "Use unknown model",
+      {
+        model: {
+          provider_id: "openai_compatible",
+          model_id: "manual-model",
+        },
+        thinkingMode: null,
+        clearThinkingMode: false,
+        turnMode: "default",
+      },
+    );
+    expect(useWorkbenchStore.getState().selectedThinkingMode).toBeNull();
+  });
+
+  it("clears stale unsupported selected thinking mode from store when sending a prompt", async () => {
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-desktop",
+      turn: {
+        id: "turn-stale-thinking",
+        status: "in_progress",
+        items: [],
+      },
+    });
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-desktop",
+      composerValue: "Clear stale thinking",
+      activeProviderId: "openai",
+      selectedModel: {
+        provider_id: "openai",
+        model_id: "gpt-5-low-only",
+      },
+      selectedThinkingMode: "high",
+      runtimeSettings: {
+        default_model: "gpt-4.1",
+        default_thinking_mode: null,
+        presets: [],
+        mcp_servers: [],
+        skill_roots: [],
+      },
+      providerSettings: {
+        providers: [],
+        active_provider_id: "openai",
+        config: {
+          provider_id: "openai",
+          base_url: "https://api.openai.com/v1",
+          model: "gpt-5-low-only",
+          has_api_key: false,
+          credential_source: "none",
+          auth_required: true,
+        },
+        connected_provider: null,
+        last_connection: null,
+        configured_providers: [],
+        model_options: [
+          {
+            provider_id: "openai",
+            id: "gpt-5-low-only",
+            display_name: "gpt-5-low-only",
+            context_window: null,
+            supports_tools: true,
+            capabilities: {
+              supports_tools: true,
+              thinking: {
+                supported: true,
+                modes: ["low"],
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    await useWorkbenchStore.getState().sendPrompt();
+
+    expect(startTurn).toHaveBeenCalledWith(
+      "project-exagent",
+      "session-desktop",
+      "Clear stale thinking",
+      {
+        model: {
+          provider_id: "openai",
+          model_id: "gpt-5-low-only",
+        },
+        thinkingMode: null,
+        clearThinkingMode: true,
+        turnMode: "default",
+      },
+    );
+    expect(useWorkbenchStore.getState().selectedThinkingMode).toBeNull();
+  });
+
+  it("sends valid thinking modes without clearing the backend override", async () => {
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-desktop",
+      turn: {
+        id: "turn-thinking",
+        status: "in_progress",
+        items: [],
+      },
+    });
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-desktop",
+      composerValue: "Use high thinking",
+      activeProviderId: "openai",
+      selectedModel: {
+        provider_id: "openai",
+        model_id: "gpt-5",
+      },
+      selectedThinkingMode: "high",
+      runtimeSettings: {
+        default_model: "gpt-4.1",
+        default_thinking_mode: null,
+        presets: [],
+        mcp_servers: [],
+        skill_roots: [],
+      },
+      providerSettings: {
+        providers: [],
+        active_provider_id: "openai",
+        config: {
+          provider_id: "openai",
+          base_url: "https://api.openai.com/v1",
+          model: "gpt-5",
+          has_api_key: false,
+          credential_source: "none",
+          auth_required: true,
+        },
+        connected_provider: null,
+        last_connection: null,
+        configured_providers: [],
+        model_options: [
+          {
+            provider_id: "openai",
+            id: "gpt-5",
+            display_name: "gpt-5",
+            context_window: null,
+            supports_tools: true,
+            capabilities: {
+              supports_tools: true,
+              thinking: {
+                supported: true,
+                modes: ["low", "high"],
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    await useWorkbenchStore.getState().sendPrompt();
+
+    expect(startTurn).toHaveBeenCalledWith(
+      "project-exagent",
+      "session-desktop",
+      "Use high thinking",
+      {
+        model: {
+          provider_id: "openai",
+          model_id: "gpt-5",
+        },
+        thinkingMode: "high",
+        clearThinkingMode: false,
+        turnMode: "default",
+      },
+    );
+  });
+
+  it("passes turn options through the Tauri turn_start command", async () => {
+    Reflect.set(window, "__TAURI_INTERNALS__", {});
+
+    await exagentClient.startTurn(
+      "project-exagent",
+      "session-desktop",
+      "Clear inherited thinking",
+      {
+        model: {
+          provider_id: "openai",
+          model_id: "gpt-4.1",
+        },
+        clearThinkingMode: true,
+        turnMode: "plan",
+      },
+    );
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("turn_start", {
+      projectId: "project-exagent",
+      threadId: "session-desktop",
+      prompt: "Clear inherited thinking",
+      model: {
+        provider_id: "openai",
+        model_id: "gpt-4.1",
+      },
+      thinkingMode: null,
+      clearThinkingMode: true,
+      turnMode: "plan",
+    });
+  });
+
+  it("opens a draft session without adding a left-sidebar session", async () => {
+    const startThread = vi.spyOn(exagentClient, "startThread");
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-desktop",
+      sessions: [
+        {
+          id: "session-desktop",
+          projectId: "project-exagent",
+          title: "Desktop GUI workbench",
+          updatedAt: "local preview",
+          status: "idle",
+        },
+      ],
+      transcript: [
+        {
+          id: "message-existing",
+          role: "assistant",
+          body: "Existing session",
+          timestamp: "preview",
+        },
+      ],
+      events: [
+        {
+          id: "event-existing",
+          label: "Existing",
+          detail: "Existing event",
+          timestamp: "preview",
+        },
+      ],
+    });
+
+    await useWorkbenchStore.getState().startSession();
+
+    expect(startThread).not.toHaveBeenCalled();
+    expect(useWorkbenchStore.getState()).toMatchObject({
+      activeSessionId: null,
+      transcript: [],
+      events: [],
+      sessions: [
+        {
+          id: "session-desktop",
+          title: "Desktop GUI workbench",
+        },
+      ],
+    });
+  });
+
+  it("can reopen an existing session after entering the draft new-session state", async () => {
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-desktop",
+      sessions: [
+        {
+          id: "session-desktop",
+          projectId: "project-exagent",
+          title: "Desktop GUI workbench",
+          updatedAt: "local preview",
+          status: "idle",
+        },
+      ],
+      transcript: [
+        {
+          id: "message-existing",
+          role: "assistant",
+          body: "Existing session",
+          timestamp: "preview",
+        },
+      ],
+      events: [],
+    });
+
+    await useWorkbenchStore.getState().startSession();
+    expect(useWorkbenchStore.getState()).toMatchObject({
+      activeSessionId: null,
+      transcript: [],
+    });
+
+    await useWorkbenchStore.getState().openSession("session-desktop");
+
+    expect(useWorkbenchStore.getState().activeSessionId).toBe(
+      "session-desktop",
+    );
+    expect(useWorkbenchStore.getState().transcript).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          body: expect.stringContaining("draft start state"),
+        }),
+      ]),
+    );
+  });
+
+  it("creates the real session only when a draft prompt is sent", async () => {
+    const startThread = vi
+      .spyOn(exagentClient, "startThread")
+      .mockResolvedValue({
+        thread: {
+          id: "session-created",
+          status: "idle",
+          active_turn: null,
+          turns: [],
+        },
+      });
+    vi.spyOn(exagentClient, "listThreads").mockResolvedValue([
+      {
+        id: "session-created",
+        project_id: "project-exagent",
+        rollout_path: "",
+        user_title: "New session",
+        fallback_title: "New session",
+        preview: "New session",
+        title_source: "mock",
+        archived_at: null,
+        pinned: false,
+        status: "idle",
+        created_at: Date.now(),
+        updated_at: Date.now(),
+        last_opened_at: null,
+      },
+    ]);
+    const subscribeRuntimeEvents = vi.spyOn(
+      exagentClient,
+      "subscribeRuntimeEvents",
+    );
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-created",
+      turn: {
+        id: "turn-created",
+        status: "in_progress",
+        items: [],
+      },
+    });
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      composerValue: "Build the draft flow",
+      sessions: [],
+      transcript: [],
+      events: [],
+    });
+
+    await useWorkbenchStore.getState().sendPrompt();
+
+    expect(startThread).toHaveBeenCalledWith("project-exagent");
+    expect(subscribeRuntimeEvents).toHaveBeenCalledWith(
+      "project-exagent",
+      "session-created",
+      expect.any(Function),
+    );
+    expect(subscribeRuntimeEvents.mock.invocationCallOrder[0]).toBeLessThan(
+      startTurn.mock.invocationCallOrder[0],
+    );
+    expect(startTurn).toHaveBeenCalledWith(
+      "project-exagent",
+      "session-created",
+      "Build the draft flow",
+      {
+        model: null,
+        thinkingMode: null,
+        clearThinkingMode: false,
+        turnMode: "default",
+      },
+    );
+    expect(useWorkbenchStore.getState()).toMatchObject({
+      activeSessionId: "session-created",
+      composerValue: "",
+      sessions: [
+        {
+          id: "session-created",
+          title: "New session",
+          status: "running",
+        },
+      ],
+    });
+  });
+
+  it("aggregates tool invocation lifecycle events into one rendered tool card", async () => {
+    render(<App />);
+
+    await screen.findByLabelText("Message ExAgent");
+    act(() => {
+      useWorkbenchStore.setState({
+        activeSessionId: "session-desktop",
+        transcript: [],
+        events: [],
+        sessions: [
+          {
+            id: "session-desktop",
+            projectId: "project-exagent",
+            title: "Desktop GUI workbench",
+            updatedAt: "local preview",
+            status: "running",
+          },
+        ],
+        loading: false,
+      });
+    });
+
+    act(() => {
+      const store = useWorkbenchStore.getState();
+      store.applyRuntimeEvent({
+        event_id: "evt-tool-started",
+        thread_id: "session-desktop",
+        turn_id: "turn-tool",
+        kind: {
+          type: "tool_invocation_started",
+          invocation_id: "inv_call_1",
+          tool_call_id: "call_1",
+          tool_name: "run_command",
+          mutating: true,
+        },
+      });
+      store.applyRuntimeEvent({
+        event_id: "evt-tool-delta-1",
+        thread_id: "session-desktop",
+        turn_id: "turn-tool",
+        kind: {
+          type: "tool_invocation_output_delta",
+          invocation_id: "inv_call_1",
+          stream: "stdout",
+          chunk: "stdout: one\n",
+          sequence: 1,
+        },
+      });
+      store.applyRuntimeEvent({
+        event_id: "evt-exec-output",
+        thread_id: "session-desktop",
+        turn_id: "turn-tool",
+        kind: {
+          type: "exec_output",
+          exec_session_id: "exec_1",
+          stream: "stdout",
+          chunk: "legacy exec duplicate",
+          sequence: 1,
+        },
+      });
+      store.applyRuntimeEvent({
+        event_id: "evt-tool-delta-2",
+        thread_id: "session-desktop",
+        turn_id: "turn-tool",
+        kind: {
+          type: "tool_invocation_output_delta",
+          invocation_id: "inv_call_1",
+          stream: "stdout",
+          chunk: "two",
+          sequence: 2,
+        },
+      });
+      store.applyRuntimeEvent({
+        event_id: "evt-tool-completed",
+        thread_id: "session-desktop",
+        turn_id: "turn-tool",
+        kind: {
+          type: "tool_invocation_completed",
+          invocation_id: "inv_call_1",
+          tool_call_id: "call_1",
+          tool_name: "run_command",
+          status: "success",
+        },
+      });
+      store.applyRuntimeEvent({
+        event_id: "evt-tool-result",
+        thread_id: "session-desktop",
+        turn_id: "turn-tool",
+        kind: {
+          type: "tool_result",
+          result: {
+            tool_call_id: "call_1",
+            tool_name: "run_command",
+            content: "stdout: one\ntwo",
+            status: "success",
+          },
+        },
+      });
+    });
+
+    const toolMessages = useWorkbenchStore
+      .getState()
+      .transcript.filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0]).toMatchObject({
+      invocationId: "inv_call_1",
+      toolCallId: "call_1",
+      title: "run_command",
+      body: "stdout: one\ntwo",
+      status: "success",
+      toolStatus: "completed",
+      mutating: true,
+    });
+    expect(
+      useWorkbenchStore.getState().transcript.map((message) => message.body),
+    ).not.toContain("legacy exec duplicate");
+    expect(
+      useWorkbenchStore
+        .getState()
+        .events.some((event) => event.id === "evt-tool-result"),
+    ).toBe(true);
+
+    expect(screen.getAllByText("run_command").length).toBeGreaterThan(0);
+    expect(screen.getByText("Completed")).toBeInTheDocument();
+    expect(screen.getByText("Mutating")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        (_, element) => element?.textContent === "stdout: one\ntwo",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("legacy exec duplicate")).not.toBeInTheDocument();
+  });
+
+  it("streams reasoning and assistant deltas into stable transcript messages", async () => {
+    render(<App />);
+
+    await screen.findByLabelText("Message ExAgent");
+    act(() => {
+      useWorkbenchStore.setState({
+        activeSessionId: "session-desktop",
+        transcript: [],
+        events: [],
+        sessions: [
+          {
+            id: "session-desktop",
+            projectId: "project-exagent",
+            title: "Desktop GUI workbench",
+            updatedAt: "local preview",
+            status: "running",
+          },
+        ],
+        loading: false,
+      });
+    });
+
+    const applyStreamEvent = (event: BackendRuntimeEvent) => {
+      act(() => {
+        useWorkbenchStore.getState().applyRuntimeEvent(event);
+      });
+    };
+
+    applyStreamEvent({
+      event_id: "evt-reasoning-delta-1",
+      thread_id: "session-desktop",
+      turn_id: "turn-stream",
+      kind: {
+        type: "reasoning_delta",
+        delta: "think ",
+      },
+    });
+    applyStreamEvent({
+      event_id: "evt-reasoning-delta-2",
+      thread_id: "session-desktop",
+      turn_id: "turn-stream",
+      kind: {
+        type: "reasoning_delta",
+        delta: "first",
+      },
+    });
+    applyStreamEvent({
+      event_id: "evt-assistant-delta-1",
+      thread_id: "session-desktop",
+      turn_id: "turn-stream",
+      kind: {
+        type: "assistant_text_delta",
+        delta: "hello ",
+      },
+    });
+    applyStreamEvent({
+      event_id: "evt-assistant-delta-2",
+      thread_id: "session-desktop",
+      turn_id: "turn-stream",
+      kind: {
+        type: "assistant_text_delta",
+        delta: "world",
+      },
+    });
+
+    expect(useWorkbenchStore.getState().transcript).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "reasoning",
+          body: "think first",
+          turnId: "turn-stream",
+        }),
+        expect.objectContaining({
+          role: "assistant",
+          body: "hello world",
+          turnId: "turn-stream",
+        }),
+      ]),
+    );
+    expect(screen.getByText("think first")).toBeInTheDocument();
+    expect(screen.getByText("hello world")).toBeInTheDocument();
+
+    act(() => {
+      const store = useWorkbenchStore.getState();
+      store.applyRuntimeEvent({
+        event_id: "evt-reasoning-final",
+        thread_id: "session-desktop",
+        turn_id: "turn-stream",
+        kind: {
+          type: "reasoning",
+          content: ["think first"],
+        },
+      });
+      store.applyRuntimeEvent({
+        event_id: "evt-assistant-final",
+        thread_id: "session-desktop",
+        turn_id: "turn-stream",
+        kind: {
+          type: "assistant_turn",
+          turn: {
+            text: "hello world",
+            tool_calls: [],
+          },
+        },
+      });
+    });
+
+    const reasoningMessages = useWorkbenchStore
+      .getState()
+      .transcript.filter((message) => message.role === "reasoning");
+    const assistantMessages = useWorkbenchStore
+      .getState()
+      .transcript.filter((message) => message.role === "assistant");
+    expect(reasoningMessages).toHaveLength(1);
+    expect(assistantMessages).toHaveLength(1);
+    expect(reasoningMessages[0]).toMatchObject({
+      id: "evt-reasoning-final",
+      body: "think first",
+      turnId: "turn-stream",
+    });
+    expect(assistantMessages[0]).toMatchObject({
+      id: "evt-assistant-final",
+      body: "hello world",
+      turnId: "turn-stream",
+    });
+    expect(screen.getByText("think first")).toBeInTheDocument();
+    expect(screen.getByText("hello world")).toBeInTheDocument();
+  });
+
+  it("opens history with tool invocation and tool result as one transcript card", async () => {
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-desktop",
+        status: "idle",
+        active_turn: null,
+        turns: [
+          {
+            id: "turn-history-tool",
+            status: "completed",
+            items: [
+              {
+                type: "tool_invocation",
+                invocation_id: "inv_history_1",
+                tool_call_id: "call_history_1",
+                tool_name: "run_command",
+                status: "completed",
+                mutating: true,
+                output_preview: "history output",
+              },
+              {
+                type: "tool_result",
+                name: "run_command",
+              },
+            ],
+          },
+        ],
+      },
+    });
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-desktop",
+      events: [],
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      transcript: [],
+      events: [],
+    });
+
+    await useWorkbenchStore.getState().openSession("session-desktop");
+
+    const toolMessages = useWorkbenchStore
+      .getState()
+      .transcript.filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0]).toMatchObject({
+      invocationId: "inv_history_1",
+      toolCallId: "call_history_1",
+      title: "run_command",
+      body: "history output",
+      toolStatus: "completed",
+    });
+  });
+
+  it("keeps user prompts when rebuilding a transcript from thread history", async () => {
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-desktop",
+        status: "idle",
+        active_turn: null,
+        turns: [
+          {
+            id: "turn-history-chat",
+            status: "completed",
+            items: [
+              {
+                type: "user_message",
+                text: "hi 介绍一下你自己吧",
+              },
+              {
+                type: "assistant_message",
+                event_id: "evt-history-assistant",
+                text: "你好，我是 ExAgent。",
+              },
+            ],
+          },
+        ],
+      },
+    });
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-desktop",
+      events: [],
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      transcript: [],
+      events: [],
+    });
+
+    await useWorkbenchStore.getState().openSession("session-desktop");
+
+    expect(useWorkbenchStore.getState().transcript).toEqual([
+      expect.objectContaining({
+        role: "user",
+        body: "hi 介绍一下你自己吧",
+        turnId: "turn-history-chat",
+      }),
+      expect.objectContaining({
+        role: "assistant",
+        body: "你好，我是 ExAgent。",
+        turnId: "turn-history-chat",
+      }),
+    ]);
+  });
+
+  it("keeps reasoning as a separate transcript item when rebuilding from thread history", async () => {
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-desktop",
+        status: "idle",
+        active_turn: null,
+        turns: [
+          {
+            id: "turn-history-reasoning",
+            status: "completed",
+            items: [
+              {
+                type: "reasoning",
+                event_id: "evt-history-reasoning",
+                summary: ["Checked the provider response shape."],
+                content: ["raw provider reasoning"],
+              },
+              {
+                type: "assistant_message",
+                event_id: "evt-history-answer",
+                text: "Final answer.",
+              },
+            ],
+          },
+        ],
+      },
+    });
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-desktop",
+      events: [],
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      transcript: [],
+      events: [],
+    });
+
+    await useWorkbenchStore.getState().openSession("session-desktop");
+
+    expect(useWorkbenchStore.getState().transcript).toEqual([
+      expect.objectContaining({
+        role: "reasoning",
+        title: "Reasoning",
+        body: "Checked the provider response shape.\n\nraw provider reasoning",
+        turnId: "turn-history-reasoning",
+      }),
+      expect.objectContaining({
+        role: "assistant",
+        body: "Final answer.",
+        turnId: "turn-history-reasoning",
+      }),
+    ]);
+  });
+
+  it("rebuilds historical reasoning when empty arrays were omitted by the backend", async () => {
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-desktop",
+        status: "idle",
+        active_turn: null,
+        turns: [
+          {
+            id: "turn-history-reasoning-omitted",
+            status: "completed",
+            items: [
+              {
+                type: "reasoning",
+                event_id: "evt-history-reasoning-omitted",
+                content: ["provider reasoning without summary"],
+              },
+              {
+                type: "assistant_message",
+                event_id: "evt-history-answer-omitted",
+                text: "Final answer.",
+              },
+            ],
+          },
+        ],
+      },
+    });
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-desktop",
+      events: [],
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      transcript: [],
+      events: [],
+    });
+
+    await useWorkbenchStore.getState().openSession("session-desktop");
+
+    expect(useWorkbenchStore.getState().error).toBeNull();
+    expect(useWorkbenchStore.getState().transcript).toEqual([
+      expect.objectContaining({
+        role: "reasoning",
+        body: "provider reasoning without summary",
+        turnId: "turn-history-reasoning-omitted",
+      }),
+      expect.objectContaining({
+        role: "assistant",
+        body: "Final answer.",
+        turnId: "turn-history-reasoning-omitted",
+      }),
+    ]);
+  });
+
+  it("renders bare history tool results when a turn has no tool invocation", async () => {
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-desktop",
+        status: "idle",
+        active_turn: null,
+        turns: [
+          {
+            id: "turn-bare-tool-result",
+            status: "completed",
+            items: [
+              {
+                type: "tool_result",
+                name: "legacy_tool",
+              },
+            ],
+          },
+          {
+            id: "turn-tool-invocation-result",
+            status: "completed",
+            items: [
+              {
+                type: "tool_invocation",
+                invocation_id: "inv_history_with_result",
+                tool_call_id: "call_history_with_result",
+                tool_name: "run_command",
+                status: "completed",
+                output_preview: "history output",
+              },
+              {
+                type: "tool_result",
+                name: "run_command",
+              },
+            ],
+          },
+        ],
+      },
+    });
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-desktop",
+      events: [],
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      transcript: [],
+      events: [],
+    });
+
+    await useWorkbenchStore.getState().openSession("session-desktop");
+
+    const toolMessages = useWorkbenchStore
+      .getState()
+      .transcript.filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(2);
+    expect(toolMessages).toContainEqual(
+      expect.objectContaining({
+        title: "legacy_tool",
+        body: "Tool completed.",
+        turnId: "turn-bare-tool-result",
+      }),
+    );
+    expect(
+      toolMessages.filter(
+        (message) => message.turnId === "turn-tool-invocation-result",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("keeps the mock open session path usable without runtime subscriptions", async () => {
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      transcript: [],
+      events: [],
+    });
+
+    await useWorkbenchStore.getState().openSession("session-desktop");
+
+    expect(useWorkbenchStore.getState()).toMatchObject({
+      activeSessionId: "session-desktop",
+      error: null,
+      events: [],
+    });
+    expect(useWorkbenchStore.getState().transcript).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          body: expect.stringContaining("collapsible reveal"),
+        }),
+      ]),
+    );
+  });
+
+  it("subscribes before replay and buffers live events while opening a session", async () => {
+    const callOrder: string[] = [];
+    let resolveReplay: (value: {
+      thread_id: string;
+      events: [];
+    }) => void = () => {};
+    const replayPromise = new Promise<{ thread_id: string; events: [] }>(
+      (resolve) => {
+        resolveReplay = resolve;
+      },
+    );
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockImplementation(
+      async (_projectId, _threadId, onEvent) => {
+        callOrder.push("subscribe");
+        onEvent({
+          event_id: "evt-buffered-tool-started",
+          thread_id: "session-desktop",
+          turn_id: "turn-buffered",
+          kind: {
+            type: "tool_invocation_started",
+            invocation_id: "inv_buffered_1",
+            tool_call_id: "call_buffered_1",
+            tool_name: "run_command",
+            mutating: false,
+          },
+        });
+        return vi.fn();
+      },
+    );
+    vi.spyOn(exagentClient, "resumeThread").mockImplementation(async () => {
+      callOrder.push("resume");
+      return {
+        thread: {
+          id: "session-desktop",
+          status: "running",
+          active_turn: null,
+          turns: [],
+        },
+      };
+    });
+    vi.spyOn(exagentClient, "replayEvents").mockImplementation(async () => {
+      callOrder.push("replay");
+      return replayPromise;
+    });
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      transcript: [],
+      events: [],
+    });
+
+    const openPromise = useWorkbenchStore
+      .getState()
+      .openSession("session-desktop");
+    await Promise.resolve();
+    resolveReplay({
+      thread_id: "session-desktop",
+      events: [],
+    });
+    await openPromise;
+
+    expect(callOrder.indexOf("subscribe")).toBeLessThan(
+      callOrder.indexOf("replay"),
+    );
+    expect(useWorkbenchStore.getState().transcript).toContainEqual(
+      expect.objectContaining({
+        invocationId: "inv_buffered_1",
+        toolCallId: "call_buffered_1",
+        title: "run_command",
+        toolStatus: "running",
+      }),
+    );
+  });
+
+  it("shows resumed transcript even when event subscription is slow", async () => {
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockImplementation(
+      () => new Promise(() => undefined),
+    );
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-slow-subscribe",
+        status: "idle",
+        active_turn: null,
+        turns: [
+          {
+            id: "turn-slow-subscribe",
+            status: "completed",
+            items: [
+              { type: "assistant_message", text: "slow subscribe transcript" },
+            ],
+          },
+        ],
+      },
+    });
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-slow-subscribe",
+      events: [],
+    });
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-desktop",
+      transcript: [
+        {
+          id: "old-message",
+          role: "assistant",
+          body: "old transcript",
+          timestamp: "history",
+          threadId: "session-desktop",
+        },
+      ],
+      events: [],
+    });
+
+    void useWorkbenchStore.getState().openSession("session-slow-subscribe");
+    await waitFor(() => {
+      expect(
+        useWorkbenchStore.getState().transcript.map((message) => message.body),
+      ).toEqual(["slow subscribe transcript"]);
+    });
+
+    expect(useWorkbenchStore.getState().activeSessionId).toBe(
+      "session-slow-subscribe",
+    );
+    expect(
+      useWorkbenchStore.getState().transcript.map((message) => message.body),
+    ).not.toContain("old transcript");
+  });
+
+  it("keeps session switches loading until the resumed transcript arrives", async () => {
+    let resolveResume: (
+      value: Awaited<ReturnType<typeof exagentClient.resumeThread>>,
+    ) => void = () => {};
+    const resume = new Promise<
+      Awaited<ReturnType<typeof exagentClient.resumeThread>>
+    >((resolve) => {
+      resolveResume = resolve;
+    });
+    vi.spyOn(exagentClient, "resumeThread").mockReturnValue(resume);
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-loading",
+      events: [],
+    });
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-old",
+      loading: false,
+      transcript: [
+        {
+          id: "old-message",
+          role: "assistant",
+          body: "old transcript",
+          timestamp: "history",
+          threadId: "session-old",
+        },
+      ],
+      events: [],
+    });
+
+    const open = useWorkbenchStore.getState().openSession("session-loading");
+    await Promise.resolve();
+
+    expect(useWorkbenchStore.getState().loading).toBe(true);
+    expect(useWorkbenchStore.getState().transcript).toEqual([]);
+
+    resolveResume({
+      thread: {
+        id: "session-loading",
+        status: "idle",
+        active_turn: null,
+        turns: [
+          {
+            id: "turn-loading",
+            status: "completed",
+            items: [{ type: "assistant_message", text: "loaded transcript" }],
+          },
+        ],
+      },
+    });
+    await open;
+
+    expect(useWorkbenchStore.getState().loading).toBe(false);
+    expect(
+      useWorkbenchStore.getState().transcript.map((message) => message.body),
+    ).toEqual(["loaded transcript"]);
+  });
+
+  it("keeps overlapping openSession results scoped to the latest request", async () => {
+    let resolveA: (
+      value: Awaited<ReturnType<typeof exagentClient.resumeThread>>,
+    ) => void = () => {};
+    let resolveB: (
+      value: Awaited<ReturnType<typeof exagentClient.resumeThread>>,
+    ) => void = () => {};
+    const readA = new Promise<
+      Awaited<ReturnType<typeof exagentClient.resumeThread>>
+    >((resolve) => {
+      resolveA = resolve;
+    });
+    const readB = new Promise<
+      Awaited<ReturnType<typeof exagentClient.resumeThread>>
+    >((resolve) => {
+      resolveB = resolve;
+    });
+    const unlistenA = vi.fn();
+    const unlistenB = vi.fn();
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockImplementation(
+      async (_projectId, threadId) => {
+        return threadId === "session-a" ? unlistenA : unlistenB;
+      },
+    );
+    vi.spyOn(exagentClient, "resumeThread").mockImplementation(
+      async (_projectId, threadId) => {
+        return threadId === "session-a" ? readA : readB;
+      },
+    );
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-desktop",
+      events: [],
+    });
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      transcript: [],
+      events: [],
+    });
+
+    const openA = useWorkbenchStore.getState().openSession("session-a");
+    await Promise.resolve();
+    const openB = useWorkbenchStore.getState().openSession("session-b");
+    await Promise.resolve();
+
+    resolveB({
+      thread: {
+        id: "session-b",
+        status: "idle",
+        active_turn: null,
+        turns: [
+          {
+            id: "turn-b",
+            status: "completed",
+            items: [{ type: "assistant_message", text: "B transcript" }],
+          },
+        ],
+      },
+    });
+    await openB;
+
+    resolveA({
+      thread: {
+        id: "session-a",
+        status: "idle",
+        active_turn: null,
+        turns: [
+          {
+            id: "turn-a",
+            status: "completed",
+            items: [{ type: "assistant_message", text: "A transcript" }],
+          },
+        ],
+      },
+    });
+    await openA;
+
+    expect(useWorkbenchStore.getState().activeSessionId).toBe("session-b");
+    expect(
+      useWorkbenchStore.getState().transcript.map((message) => message.body),
+    ).toEqual(["B transcript"]);
+    expect(unlistenA).not.toHaveBeenCalled();
+    expect(unlistenB).not.toHaveBeenCalled();
+    useWorkbenchStore.getState().eventUnlisten?.();
+    expect(unlistenB).toHaveBeenCalledTimes(1);
+  });
+
+  it("cleans up a new subscription when resume or replay fails during openSession", async () => {
+    for (const failure of ["resume", "replay"] as const) {
+      const unlisten = vi.fn();
+      vi.restoreAllMocks();
+      vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(
+        unlisten,
+      );
+      vi.spyOn(exagentClient, "resumeThread").mockImplementation(async () => {
+        if (failure === "resume") {
+          throw new Error("resume failed");
+        }
+        return {
+          thread: {
+            id: `session-${failure}`,
+            status: "idle",
+            active_turn: null,
+            turns: [],
+          },
+        };
+      });
+      vi.spyOn(exagentClient, "replayEvents").mockImplementation(async () => {
+        if (failure === "replay") {
+          throw new Error("replay failed");
+        }
+        return {
+          thread_id: `session-${failure}`,
+          events: [],
+        };
+      });
+      useWorkbenchStore.setState({
+        ...useWorkbenchStore.getInitialState(),
+        activeProjectId: "project-exagent",
+        activeSessionId: null,
+        transcript: [],
+        events: [],
+      });
+
+      await useWorkbenchStore.getState().openSession(`session-${failure}`);
+
+      expect(unlisten).toHaveBeenCalledTimes(failure === "resume" ? 0 : 1);
+      expect(useWorkbenchStore.getState().eventUnlisten).toBeNull();
+      expect(useWorkbenchStore.getState().loading).toBe(false);
+      expect(useWorkbenchStore.getState().error).toBe(`${failure} failed`);
+    }
+  });
+
+  it("renders open session errors in the chat surface", () => {
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Volumes/EXEXEX/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-error",
+          projectId: "project-exagent",
+          title: "Broken session",
+          updatedAt: "now",
+          status: "idle",
+        },
+      ],
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-error",
+      transcript: [],
+      loading: false,
+      error: "thread resume failed",
+    });
+
+    render(<App />);
+
+    expect(screen.getByText("thread resume failed")).toBeInTheDocument();
+  });
+
+  it("cleans up the Tauri listener when runtime subscription command fails", async () => {
+    const unlisten = vi.fn();
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    tauriMocks.listen.mockResolvedValue(unlisten);
+    tauriMocks.invoke.mockRejectedValue(new Error("subscribe failed"));
+
+    await expect(
+      exagentClient.subscribeRuntimeEvents(
+        "project-exagent",
+        "session-desktop",
+        vi.fn(),
+      ),
+    ).rejects.toThrow("subscribe failed");
+
+    expect(unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends a backend unsubscribe when runtime event cleanup runs", async () => {
+    const unlisten = vi.fn();
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    tauriMocks.listen.mockResolvedValue(unlisten);
+    tauriMocks.invoke.mockResolvedValue({});
+
+    const cleanup = await exagentClient.subscribeRuntimeEvents(
+      "project-exagent",
+      "session-desktop",
+      vi.fn(),
+    );
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("events_subscribe", {
+      projectId: "project-exagent",
+      threadId: "session-desktop",
+      afterEventId: null,
+    });
+
+    cleanup?.();
+
+    await waitFor(() => {
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("events_unsubscribe", {
+        projectId: "project-exagent",
+        threadId: "session-desktop",
+      });
+    });
+    expect(unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps buffered transcript events even when replay returns the same event id", async () => {
+    const bufferedEvent = {
+      event_id: "evt-buffered-replayed-tool-started",
+      thread_id: "session-desktop",
+      turn_id: "turn-buffered",
+      kind: {
+        type: "tool_invocation_started" as const,
+        invocation_id: "inv_buffered_replayed_1",
+        tool_call_id: "call_buffered_replayed_1",
+        tool_name: "run_command",
+        mutating: false,
+      },
+    };
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockImplementation(
+      async (_projectId, _threadId, onEvent) => {
+        onEvent(bufferedEvent);
+        return vi.fn();
+      },
+    );
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-desktop",
+        status: "running",
+        active_turn: null,
+        turns: [],
+      },
+    });
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-desktop",
+      events: [bufferedEvent],
+    });
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      transcript: [],
+      events: [],
+    });
+
+    await useWorkbenchStore.getState().openSession("session-desktop");
+
+    expect(useWorkbenchStore.getState().transcript).toContainEqual(
+      expect.objectContaining({
+        invocationId: "inv_buffered_replayed_1",
+        toolCallId: "call_buffered_replayed_1",
+        title: "run_command",
+        toolStatus: "running",
+      }),
+    );
+    expect(
+      useWorkbenchStore
+        .getState()
+        .events.filter((event) => event.id === bufferedEvent.event_id),
+    ).toHaveLength(1);
+  });
+
+  it("does not duplicate buffered assistant events already represented by the resumed thread view", async () => {
+    const bufferedEvent = {
+      event_id: "evt-buffered-replayed-assistant",
+      thread_id: "session-desktop",
+      turn_id: "turn-buffered-assistant",
+      kind: {
+        type: "assistant_turn" as const,
+        turn: {
+          text: "Buffered assistant answer",
+          tool_calls: [],
+        },
+      },
+    };
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockImplementation(
+      async (_projectId, _threadId, onEvent) => {
+        onEvent(bufferedEvent);
+        return vi.fn();
+      },
+    );
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-desktop",
+        status: "idle",
+        active_turn: null,
+        turns: [
+          {
+            id: "turn-buffered-assistant",
+            status: "completed",
+            items: [
+              {
+                type: "assistant_message",
+                event_id: "evt-buffered-replayed-assistant",
+                text: "Buffered assistant answer",
+              },
+            ],
+          },
+        ],
+      },
+    });
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-desktop",
+      events: [bufferedEvent],
+    });
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      transcript: [],
+      events: [],
+    });
+
+    await useWorkbenchStore.getState().openSession("session-desktop");
+
+    const assistantMessages = useWorkbenchStore
+      .getState()
+      .transcript.filter(
+        (message) =>
+          message.role === "assistant" &&
+          message.body === "Buffered assistant answer",
+      );
+    expect(assistantMessages).toHaveLength(1);
+    expect(
+      useWorkbenchStore
+        .getState()
+        .events.filter((event) => event.id === bufferedEvent.event_id),
+    ).toHaveLength(1);
+  });
+
+  it("updates a waiting approval tool invocation when an approval decision arrives", () => {
+    useWorkbenchStore.setState({
+      activeSessionId: "session-desktop",
+      transcript: [],
+      events: [],
+      sessions: [
+        {
+          id: "session-desktop",
+          projectId: "project-exagent",
+          title: "Desktop GUI workbench",
+          updatedAt: "local preview",
+          status: "awaiting_approval",
+        },
+      ],
+      loading: false,
+    });
+
+    const store = useWorkbenchStore.getState();
+    store.applyRuntimeEvent({
+      event_id: "evt-waiting-approval",
+      thread_id: "session-desktop",
+      turn_id: "turn-approval",
+      kind: {
+        type: "tool_invocation_waiting_approval",
+        invocation_id: "inv_needs_approval",
+        approval_id: "approval_1",
+        reason: "Needs permission",
+      },
+    });
+    store.applyRuntimeEvent({
+      event_id: "evt-approval-decision",
+      thread_id: "session-desktop",
+      turn_id: "turn-approval",
+      kind: {
+        type: "approval_decision",
+        approval_id: "approval_1",
+        status: "approved",
+        note: "desktop approved",
+      },
+    });
+
+    const approvalMessages = useWorkbenchStore
+      .getState()
+      .transcript.filter((message) => message.approvalId === "approval_1");
+    expect(approvalMessages).toHaveLength(1);
+    expect(approvalMessages[0]).toMatchObject({
+      invocationId: "inv_needs_approval",
+      approvalId: "approval_1",
+      title: "Approval approved",
+      body: "desktop approved",
+      status: "success",
+      toolStatus: "completed",
+    });
+  });
+
+  it("returns a denied approval session to idle after the synthetic failed invocation", () => {
+    useWorkbenchStore.setState({
+      activeSessionId: "session-desktop",
+      transcript: [],
+      events: [],
+      sessions: [
+        {
+          id: "session-desktop",
+          projectId: "project-exagent",
+          title: "Desktop GUI workbench",
+          updatedAt: "local preview",
+          status: "awaiting_approval",
+        },
+      ],
+      loading: false,
+    });
+
+    const store = useWorkbenchStore.getState();
+    store.applyRuntimeEvent({
+      event_id: "evt-deny-waiting-approval",
+      thread_id: "session-desktop",
+      turn_id: "turn-deny-approval",
+      kind: {
+        type: "tool_invocation_waiting_approval",
+        invocation_id: "inv_deny_approval",
+        approval_id: "approval_deny",
+        reason: "Needs permission",
+      },
+    });
+    store.applyRuntimeEvent({
+      event_id: "evt-deny-failed-invocation",
+      thread_id: "session-desktop",
+      turn_id: "turn-deny-approval",
+      kind: {
+        type: "tool_invocation_failed",
+        invocation_id: "inv_approval_decision",
+        tool_call_id: "approval_decision_approval_deny",
+        tool_name: "run_command",
+        message: "Approval denied",
+      },
+    });
+    store.applyRuntimeEvent({
+      event_id: "evt-deny-approval-decision",
+      thread_id: "session-desktop",
+      turn_id: "turn-deny-approval",
+      kind: {
+        type: "approval_decision",
+        approval_id: "approval_deny",
+        status: "denied",
+        note: "desktop denied",
+      },
+    });
+
+    expect(
+      useWorkbenchStore
+        .getState()
+        .sessions.find((session) => session.id === "session-desktop")?.status,
+    ).toBe("idle");
+  });
+
+  it("does not merge matching tool call ids across different turns", () => {
+    useWorkbenchStore.setState({
+      activeSessionId: "session-desktop",
+      transcript: [],
+      events: [],
+      loading: false,
+    });
+
+    const store = useWorkbenchStore.getState();
+    store.applyRuntimeEvent({
+      event_id: "evt-same-call-turn-1",
+      thread_id: "session-desktop",
+      turn_id: "turn-1",
+      kind: {
+        type: "tool_invocation_started",
+        invocation_id: "inv_turn_1",
+        tool_call_id: "call_1",
+        tool_name: "run_command",
+        mutating: false,
+      },
+    });
+    store.applyRuntimeEvent({
+      event_id: "evt-same-call-turn-2",
+      thread_id: "session-desktop",
+      turn_id: "turn-2",
+      kind: {
+        type: "tool_invocation_started",
+        invocation_id: "inv_turn_2",
+        tool_call_id: "call_1",
+        tool_name: "run_command",
+        mutating: false,
+      },
+    });
+
+    const toolMessages = useWorkbenchStore
+      .getState()
+      .transcript.filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(2);
+    expect(toolMessages.map((message) => message.turnId)).toEqual([
+      "turn-1",
+      "turn-2",
+    ]);
+  });
+
+  it("keeps review-required tool results waiting until approval decision arrives", () => {
+    useWorkbenchStore.setState({
+      activeSessionId: "session-desktop",
+      transcript: [],
+      events: [],
+      loading: false,
+    });
+
+    const store = useWorkbenchStore.getState();
+    store.applyRuntimeEvent({
+      event_id: "evt-review-started",
+      thread_id: "session-desktop",
+      turn_id: "turn-review-required",
+      kind: {
+        type: "tool_invocation_started",
+        invocation_id: "inv_review_required",
+        tool_call_id: "call_review_required",
+        tool_name: "run_command",
+        mutating: true,
+      },
+    });
+    store.applyRuntimeEvent({
+      event_id: "evt-review-waiting-approval",
+      thread_id: "session-desktop",
+      turn_id: "turn-review-required",
+      kind: {
+        type: "tool_invocation_waiting_approval",
+        invocation_id: "inv_review_required",
+        approval_id: "approval_review_required",
+        reason: "Needs permission",
+      },
+    });
+    store.applyRuntimeEvent({
+      event_id: "evt-review-required-result",
+      thread_id: "session-desktop",
+      turn_id: "turn-review-required",
+      kind: {
+        type: "tool_result",
+        result: {
+          tool_call_id: "call_review_required",
+          tool_name: "run_command",
+          content: "Awaiting approval.",
+          status: "review_required",
+        },
+      },
+    });
+
+    expect(
+      useWorkbenchStore
+        .getState()
+        .transcript.find(
+          (message) => message.invocationId === "inv_review_required",
+        ),
+    ).toMatchObject({
+      approvalId: "approval_review_required",
+      title: "Waiting for approval",
+      body: "Needs permission",
+      status: "warning",
+      toolStatus: "waiting_approval",
+    });
+
+    store.applyRuntimeEvent({
+      event_id: "evt-review-required-denied",
+      thread_id: "session-desktop",
+      turn_id: "turn-review-required",
+      kind: {
+        type: "approval_decision",
+        approval_id: "approval_review_required",
+        status: "denied",
+        note: "desktop denied",
+      },
+    });
+
+    expect(
+      useWorkbenchStore
+        .getState()
+        .transcript.find(
+          (message) => message.invocationId === "inv_review_required",
+        ),
+    ).toMatchObject({
+      approvalId: "approval_review_required",
+      title: "Approval denied",
+      body: "desktop denied",
+      status: "danger",
+      toolStatus: "cancelled",
+    });
+  });
+
+  it("lets waiting approval update a review-required placeholder in the same turn", () => {
+    useWorkbenchStore.setState({
+      activeSessionId: "session-desktop",
+      transcript: [],
+      events: [],
+      loading: false,
+    });
+
+    const store = useWorkbenchStore.getState();
+    store.applyRuntimeEvent({
+      event_id: "evt-review-required-first",
+      thread_id: "session-desktop",
+      turn_id: "turn-review-before-approval",
+      kind: {
+        type: "tool_result",
+        result: {
+          tool_call_id: "call_review_before_approval",
+          tool_name: "run_command",
+          content: "Awaiting approval.",
+          status: "review_required",
+        },
+      },
+    });
+    store.applyRuntimeEvent({
+      event_id: "evt-waiting-after-review-required",
+      thread_id: "session-desktop",
+      turn_id: "turn-review-before-approval",
+      kind: {
+        type: "tool_invocation_waiting_approval",
+        invocation_id: "inv_review_before_approval",
+        approval_id: "approval_review_before_approval",
+        reason: "Needs permission",
+      },
+    });
+
+    expect(useWorkbenchStore.getState().transcript).toHaveLength(1);
+    expect(useWorkbenchStore.getState().transcript[0]).toMatchObject({
+      invocationId: "inv_review_before_approval",
+      approvalId: "approval_review_before_approval",
+      toolCallId: "call_review_before_approval",
+      title: "Waiting for approval",
+      body: "Needs permission",
+      status: "warning",
+      toolStatus: "waiting_approval",
+    });
+  });
+});

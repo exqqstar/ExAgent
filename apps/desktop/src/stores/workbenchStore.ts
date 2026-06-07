@@ -1,0 +1,2404 @@
+import { create } from "zustand";
+import { exagentClient } from "@/api/exagentClient";
+import {
+  agentForestFromTreeResponse,
+  agentRecordsFromThreadView,
+  applyAgentEvent,
+  buildAgentForest,
+  flattenAgentForest
+} from "@/lib/agentTree";
+import type {
+  AgentNode,
+  AgentRunStatus,
+  AgentThreadView,
+  BackendRuntimeEvent,
+  ModelRef,
+  ProviderSettingsResponse,
+  ProjectSummary,
+  RuntimeEvent,
+  RuntimeSettingsSaveRequest,
+  SessionSummary,
+  ThreadGoal,
+  ThreadGoalStatus,
+  ThinkingMode,
+  ThreadItem,
+  ThreadTokenUsage,
+  ThreadView,
+  ToolInvocationTranscriptStatus,
+  TranscriptMessage,
+  WorkbenchSnapshot
+} from "@/types";
+
+type Unlisten = () => void;
+const DEFAULT_PROVIDER_ID = "openai";
+let openSessionRequestSequence = 0;
+let openAgentThreadRequestSequence = 0;
+
+type WorkbenchState = WorkbenchSnapshot & {
+  loading: boolean;
+  error: string | null;
+  agents: AgentNode[];
+  composerValue: string;
+  currentGoal: ThreadGoal | null;
+  goalEditorOpen: boolean;
+  search: string;
+  activeProviderId: string | null;
+  providerSettings: ProviderSettingsResponse | null;
+  eventUnlisten: Unlisten | null;
+  appliedRuntimeEventIds: Set<string>;
+  selectedAgentThreadId: string | null;
+  selectedAgentView: AgentThreadView | null;
+  selectedAgentUnlisten: Unlisten | null;
+  selectedAgentAppliedEventIds: Set<string>;
+  loadWorkbench: () => Promise<void>;
+  addProject: () => Promise<void>;
+  renameProject: (projectId: string, name: string) => Promise<void>;
+  pinProject: (projectId: string, pinned: boolean) => Promise<void>;
+  archiveProject: (projectId: string) => Promise<void>;
+  removeProject: (projectId: string) => Promise<void>;
+  archiveProjectConversations: (projectId: string) => Promise<void>;
+  createProjectWorktree: (projectId: string) => Promise<void>;
+  selectProject: (projectId: string, sessionId?: string) => Promise<void>;
+  openSession: (sessionId: string) => Promise<void>;
+  startSession: (projectId?: string) => Promise<string | null>;
+  sendPrompt: () => Promise<void>;
+  interruptActiveTurn: () => Promise<void>;
+  openThreadGoalEditor: () => void;
+  closeThreadGoalEditor: () => void;
+  saveThreadGoal: (objective: string, tokenBudget?: number | null) => Promise<void>;
+  setThreadGoalStatus: (status: Extract<ThreadGoalStatus, "active" | "paused" | "blocked" | "complete">) => Promise<void>;
+  clearThreadGoal: () => Promise<void>;
+  refreshAgentTree: () => Promise<void>;
+  submitApproval: (message: TranscriptMessage, decision: "approved" | "denied") => Promise<void>;
+  renameSession: (sessionId: string, title: string) => Promise<void>;
+  archiveSession: (sessionId: string) => Promise<void>;
+  unarchiveSession: (projectId: string, sessionId: string) => Promise<void>;
+  openArchivedSession: (projectId: string, sessionId: string) => Promise<void>;
+  pinSession: (sessionId: string, pinned: boolean) => Promise<void>;
+  setComposerValue: (composerValue: string) => void;
+  composerPlanMode: boolean;
+  setComposerPlanMode: (enabled: boolean) => void;
+  setSelectedModel: (model: string | ModelRef | null) => void;
+  setSelectedThinkingMode: (thinkingMode: ThinkingMode | null) => void;
+  applyProviderSettings: (settings: ProviderSettingsResponse) => void;
+  applyRuntimePreset: (presetId: string) => void;
+  saveRuntimeSettings: (settings: RuntimeSettingsSaveRequest) => Promise<void>;
+  setSearch: (search: string) => Promise<void>;
+  applyRuntimeEvent: (event: BackendRuntimeEvent) => void;
+  applyRuntimeEvents: (events: BackendRuntimeEvent[]) => void;
+  openAgentThread: (threadId: string) => Promise<void>;
+  closeAgentThread: () => void;
+  applySelectedAgentRuntimeEvents: (events: BackendRuntimeEvent[]) => void;
+};
+
+const emptySnapshot: WorkbenchSnapshot = {
+  projects: [],
+  sessions: [],
+  activeProjectId: null,
+  activeSessionId: null,
+  transcript: [],
+  events: [],
+  changedFiles: [],
+  cwd: "No project selected",
+  policy: "local",
+  tokenUsage: {
+    input: 0,
+    output: 0,
+    limit: 1
+  },
+  tokenUsageByThreadId: {},
+  runtimeSettings: null,
+  selectedModel: null,
+  selectedThinkingMode: null
+};
+
+export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
+  ...emptySnapshot,
+  loading: true,
+  error: null,
+  agents: [],
+  composerValue: "",
+  composerPlanMode: false,
+  currentGoal: null,
+  goalEditorOpen: false,
+  search: "",
+  activeProviderId: DEFAULT_PROVIDER_ID,
+  providerSettings: null,
+  eventUnlisten: null,
+  appliedRuntimeEventIds: new Set(),
+  selectedAgentThreadId: null,
+  selectedAgentView: null,
+  selectedAgentUnlisten: null,
+  selectedAgentAppliedEventIds: new Set(),
+
+  async loadWorkbench() {
+    resetSelectedAgentThread(get, set);
+    set({ loading: true, error: null });
+    try {
+      const snapshot = await exagentClient.getWorkbenchSnapshot();
+      const [runtimeSettings, providerSettings] = await Promise.all([
+        exagentClient.getRuntimeSettings(),
+        exagentClient.getProviderSettings()
+      ]);
+      const normalized = normalizeWorkbenchSelection({
+        providerSettings,
+        runtimeSettings,
+        selectedModel: providerConfigModelRef(providerSettings),
+        selectedThinkingMode: runtimeSettings.default_thinking_mode
+      });
+      set({
+        ...snapshot,
+        runtimeSettings,
+        providerSettings,
+        selectedModel: normalized.selectedModel,
+        selectedThinkingMode: normalized.selectedThinkingMode,
+        activeProviderId: normalized.activeProviderId,
+        appliedRuntimeEventIds: new Set(),
+        loading: false,
+        error: null
+      });
+      if (snapshot.activeSessionId && exagentClient.isDesktopRuntime()) {
+        await get().openSession(snapshot.activeSessionId);
+      } else if (snapshot.activeSessionId) {
+        // Browser preview: no live runtime, so seed a sample agent tree.
+        set({ agents: agentForestFromTreeResponse(exagentClient.mockAgentTree(snapshot.activeSessionId)) });
+      }
+    } catch (error) {
+      set({
+        ...emptySnapshot,
+        activeProviderId: DEFAULT_PROVIDER_ID,
+        providerSettings: null,
+        appliedRuntimeEventIds: new Set(),
+        loading: false,
+        error: errorMessage(error)
+      });
+    }
+  },
+
+  async addProject() {
+    resetSelectedAgentThread(get, set);
+    set({ error: null });
+    try {
+      const project = await exagentClient.pickAndAddProject();
+      if (!project) {
+        return;
+      }
+      const projects = await exagentClient.listProjects();
+      const sessions = get().search
+        ? await exagentClient.listThreads(project.id, false, get().search)
+        : await exagentClient.reindexProject(project.id);
+      set({
+        projects: projects.map((item) => projectRecordToSummary(item, item.id === project.id)),
+        sessions: sessions.map(exagentClient.threadRecordToSession),
+        activeProjectId: project.id,
+        activeSessionId: sessions[0]?.id ?? null,
+        transcript: [],
+        events: [],
+        cwd: project.path
+      });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async renameProject(projectId: string, name: string) {
+    const nextName = name.trim();
+    if (!nextName) {
+      return;
+    }
+    try {
+      const project = await exagentClient.renameProject(projectId, nextName);
+      set({
+        projects: get().projects.map((item) =>
+          item.id === projectId
+            ? { ...item, name: project.name, pinned: project.pinned, archived: project.archived_at !== null }
+            : item
+        ),
+        cwd: get().activeProjectId === projectId ? project.path : get().cwd,
+        error: null
+      });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async pinProject(projectId: string, pinned: boolean) {
+    try {
+      await exagentClient.pinProject(projectId, pinned);
+      await refreshProjectSelection(get, set, get().activeProjectId);
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async archiveProject(projectId: string) {
+    try {
+      await exagentClient.archiveProject(projectId);
+      await refreshProjectSelection(get, set, get().activeProjectId);
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async removeProject(projectId: string) {
+    try {
+      await exagentClient.removeProject(projectId);
+      await refreshProjectSelection(get, set, get().activeProjectId);
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async archiveProjectConversations(projectId: string) {
+    try {
+      await exagentClient.archiveProjectConversations(projectId);
+      if (projectId !== get().activeProjectId) {
+        set({ error: null });
+        return;
+      }
+      resetSelectedAgentThread(get, set);
+      const threads = await exagentClient.listThreads(projectId, false, get().search || null);
+      set({
+        sessions: threads.map(exagentClient.threadRecordToSession),
+        activeSessionId: null,
+        transcript: [],
+        events: [],
+        changedFiles: [],
+        appliedRuntimeEventIds: new Set(),
+        error: null
+      });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async createProjectWorktree(projectId: string) {
+    try {
+      const project = await exagentClient.createProjectWorktree(projectId);
+      await refreshProjectSelection(get, set, project.id);
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async selectProject(projectId: string, sessionId?: string) {
+    const project = get().projects.find((item) => item.id === projectId);
+    if (!project) {
+      return;
+    }
+    resetSelectedAgentThread(get, set);
+    set({ loading: true, error: null });
+    try {
+      const threads = get().search
+        ? await exagentClient.listThreads(projectId, false, get().search)
+        : await exagentClient.reindexProject(projectId);
+      const targetSessionId =
+        sessionId && threads.some((thread) => thread.id === sessionId)
+          ? sessionId
+          : threads[0]?.id ?? null;
+      set({
+        projects: get().projects.map((item) => ({ ...item, active: item.id === projectId })),
+        sessions: threads.map(exagentClient.threadRecordToSession),
+        activeProjectId: projectId,
+        activeSessionId: targetSessionId,
+        transcript: [],
+        events: [],
+        changedFiles: [],
+        cwd: project.path,
+        appliedRuntimeEventIds: new Set(),
+        loading: false
+      });
+      if (targetSessionId) {
+        await get().openSession(targetSessionId);
+      }
+    } catch (error) {
+      set({ loading: false, error: errorMessage(error) });
+    }
+  },
+
+  async openSession(sessionId: string) {
+    const projectId = get().activeProjectId;
+    if (!projectId) {
+      return;
+    }
+    const requestId = ++openSessionRequestSequence;
+    resetSelectedAgentThread(get, set);
+    get().eventUnlisten?.();
+    set({
+      activeSessionId: sessionId,
+      loading: true,
+      error: null,
+      eventUnlisten: null,
+      transcript: [],
+      events: [],
+      agents: [],
+      appliedRuntimeEventIds: new Set()
+    });
+
+    const isCurrentOpen = () =>
+      openSessionRequestSequence === requestId && get().activeSessionId === sessionId;
+    const liveEventBatcher = createRuntimeEventBatcher((events) => {
+      if (!isCurrentOpen()) {
+        return;
+      }
+      get().applyRuntimeEvents(events.filter((event) => event.thread_id === sessionId));
+    });
+    let unlisten: Unlisten | null = null;
+    let unlistenCalled = false;
+    const cleanupUnlisten = () => {
+      liveEventBatcher.cancel();
+      if (!unlisten || unlistenCalled) {
+        return;
+      }
+      unlistenCalled = true;
+      unlisten();
+    };
+
+    try {
+      const read = await exagentClient.resumeThread(projectId, sessionId);
+      if (!isCurrentOpen()) {
+        cleanupUnlisten();
+        return;
+      }
+      const representedEventIds = threadViewEventIds(read.thread);
+      const readStatus = sessionStatusFromThreadStatus(read.thread.status);
+      set({
+        sessions: updateSessionStatus(get().sessions, sessionId, readStatus),
+        transcript: threadViewToTranscript(read.thread),
+        currentGoal: read.thread.goal ?? null,
+        agents: buildAgentForest(sessionId, rootAgentStatus(readStatus), agentRecordsFromThreadView(read.thread)),
+        appliedRuntimeEventIds: representedEventIds,
+        loading: false
+      });
+
+      const bufferedEvents: BackendRuntimeEvent[] = [];
+      const bufferedEventIds = new Set<string>();
+      let replayComplete = false;
+      unlisten = await exagentClient.subscribeRuntimeEvents(projectId, sessionId, (event) => {
+        if (!isCurrentOpen()) {
+          return;
+        }
+        if (event.thread_id !== sessionId) {
+          return;
+        }
+        if (!replayComplete) {
+          if (!bufferedEventIds.has(event.event_id)) {
+            bufferedEventIds.add(event.event_id);
+            bufferedEvents.push(event);
+          }
+          return;
+        }
+        if (isCurrentOpen()) {
+          liveEventBatcher.push(event);
+        }
+      });
+      if (!isCurrentOpen()) {
+        cleanupUnlisten();
+        return;
+      }
+      set({ eventUnlisten: unlisten ? cleanupUnlisten : null });
+
+      const replay = await exagentClient.replayEvents(projectId, sessionId, null);
+      if (!isCurrentOpen()) {
+        cleanupUnlisten();
+        return;
+      }
+
+      const replayEventIds = new Set(replay.events.map((event) => event.event_id));
+      const inspectorLiveEvents = bufferedEvents.filter((event) => !replayEventIds.has(event.event_id));
+      const appliedRuntimeEventIds = new Set([
+        ...representedEventIds,
+        ...bufferedEvents.map((event) => event.event_id),
+        ...replay.events.map((event) => event.event_id)
+      ]);
+      replayComplete = true;
+      let agentRecords = agentRecordsFromThreadView(read.thread);
+      let sessionStatus = sessionStatusFromThreadStatus(read.thread.status);
+      for (const event of replay.events) {
+        agentRecords = applyAgentEvent(agentRecords, event);
+        if (event.thread_id === sessionId) {
+          sessionStatus = statusFromEvent(event, sessionStatus);
+        }
+      }
+      for (const event of inspectorLiveEvents) {
+        agentRecords = applyAgentEvent(agentRecords, event);
+        if (event.thread_id === sessionId) {
+          sessionStatus = statusFromEvent(event, sessionStatus);
+        }
+      }
+      const sessions = updateSessionStatus(get().sessions, sessionId, sessionStatus);
+      let agents = buildAgentForest(sessionId, rootAgentStatus(sessionStatus), agentRecords);
+      const currentGoal = applyGoalRuntimeEvents(read.thread.goal ?? null, [
+        ...replay.events,
+        ...inspectorLiveEvents
+      ]);
+      const tokenUsageByThreadId = applyTokenUsageEvents(get().tokenUsageByThreadId, [
+        ...replay.events,
+        ...inspectorLiveEvents
+      ]);
+      try {
+        agents = agentForestFromTreeResponse(await exagentClient.agentTree(projectId, sessionId));
+        if (!isCurrentOpen()) {
+          cleanupUnlisten();
+          return;
+        }
+      } catch {
+        // Keep the event-derived fallback when the app-server tree endpoint is unavailable.
+      }
+      if (!isCurrentOpen()) {
+        cleanupUnlisten();
+        return;
+      }
+
+      set({
+        transcript: applyTranscriptEvents(threadViewToTranscript(read.thread), bufferedEvents, representedEventIds),
+        currentGoal: applyGoalRuntimeEvents(currentGoal, bufferedEvents),
+        sessions,
+        events: [
+          ...runtimeEventsToInspector(inspectorLiveEvents).reverse(),
+          ...runtimeEventsToInspector(replay.events)
+        ].slice(0, 80),
+        agents,
+        appliedRuntimeEventIds,
+        eventUnlisten: unlisten ? cleanupUnlisten : null,
+        tokenUsageByThreadId,
+        loading: false
+      });
+    } catch (error) {
+      cleanupUnlisten();
+      if (isCurrentOpen()) {
+        set({ error: errorMessage(error), eventUnlisten: null, loading: false });
+      }
+    }
+  },
+
+  async startSession(projectId?: string) {
+    const targetProjectId = projectId ?? get().activeProjectId;
+    if (!targetProjectId) {
+      return null;
+    }
+    const targetIsActiveProject = targetProjectId === get().activeProjectId;
+    const project = get().projects.find((item) => item.id === targetProjectId);
+    if (!project && !targetIsActiveProject) {
+      return null;
+    }
+    openSessionRequestSequence += 1;
+    resetSelectedAgentThread(get, set);
+    get().eventUnlisten?.();
+
+    if (!targetIsActiveProject) {
+      set({
+        loading: true,
+        error: null,
+        eventUnlisten: null,
+        transcript: [],
+        events: [],
+        changedFiles: [],
+        composerValue: "",
+        composerPlanMode: false,
+        currentGoal: null,
+        goalEditorOpen: false,
+        appliedRuntimeEventIds: new Set()
+      });
+      try {
+        const threads = get().search
+          ? await exagentClient.listThreads(targetProjectId, false, get().search)
+          : await exagentClient.reindexProject(targetProjectId);
+        set({
+          projects: get().projects.map((item) => ({ ...item, active: item.id === targetProjectId })),
+          sessions: threads.map(exagentClient.threadRecordToSession),
+          activeProjectId: targetProjectId,
+          activeSessionId: null,
+          transcript: [],
+          currentGoal: null,
+          goalEditorOpen: false,
+          events: [],
+          changedFiles: [],
+          cwd: project?.path ?? get().cwd,
+          eventUnlisten: null,
+          appliedRuntimeEventIds: new Set(),
+          loading: false,
+          error: null
+        });
+      } catch (error) {
+        set({ loading: false, error: errorMessage(error) });
+      }
+      return null;
+    }
+
+    set({
+      activeSessionId: null,
+      transcript: [],
+      currentGoal: null,
+      goalEditorOpen: false,
+      events: [],
+      changedFiles: [],
+      composerValue: "",
+      composerPlanMode: false,
+      eventUnlisten: null,
+      appliedRuntimeEventIds: new Set(),
+      error: null
+    });
+    return null;
+  },
+
+  async sendPrompt() {
+    const prompt = get().composerValue.trim();
+    if (!prompt) {
+      return;
+    }
+    const planMode = get().composerPlanMode;
+    const projectId = get().activeProjectId;
+    if (!projectId) {
+      set({ error: "Choose a project folder first." });
+      return;
+    }
+    let threadId = get().activeSessionId;
+    if (!threadId) {
+      try {
+        const started = await exagentClient.startThread(projectId);
+        const threads = await exagentClient.listThreads(projectId, false, get().search || null);
+        threadId = started.thread.id;
+        set({
+          sessions: threads.map(exagentClient.threadRecordToSession),
+          activeSessionId: threadId,
+          events: [],
+          changedFiles: [],
+          appliedRuntimeEventIds: new Set()
+        });
+        await get().openSession(threadId);
+      } catch (error) {
+        set({ error: errorMessage(error) });
+        return;
+      }
+    }
+    if (!threadId) {
+      return;
+    }
+
+    const optimisticMessage: TranscriptMessage = {
+      id: `user-${Date.now()}`,
+      role: "user",
+      body: prompt,
+      timestamp: "now",
+      threadId
+    };
+    set({
+      composerValue: "",
+      composerPlanMode: false,
+      transcript: [...get().transcript, optimisticMessage],
+      sessions: get().sessions.map((session) =>
+        session.id === threadId ? { ...session, status: "running" } : session
+      )
+    });
+
+    try {
+      const normalized = normalizeWorkbenchSelection(get());
+      const thinkingOverride = turnThinkingOverride(get(), normalized);
+      set({
+        activeProviderId: normalized.activeProviderId,
+        selectedModel: normalized.selectedModel,
+        selectedThinkingMode: normalized.selectedThinkingMode
+      });
+      await exagentClient.startTurn(
+        projectId,
+        threadId,
+        prompt,
+        {
+          model: normalized.selectedModel,
+          thinkingMode: thinkingOverride.thinkingMode,
+          clearThinkingMode: thinkingOverride.clearThinkingMode,
+          turnMode: planMode ? "plan" : "default"
+        }
+      );
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async interruptActiveTurn() {
+    const projectId = get().activeProjectId;
+    const threadId = get().activeSessionId;
+    if (!projectId || !threadId) {
+      return;
+    }
+    try {
+      await exagentClient.interruptTurn(projectId, threadId);
+      markSessionStatus(set, get, threadId, "idle");
+      await get().refreshAgentTree();
+    } catch (error) {
+      if (isNoActiveTurnError(error)) {
+        markSessionStatus(set, get, threadId, "idle");
+        await get().refreshAgentTree();
+        set({ error: null });
+        return;
+      }
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  openThreadGoalEditor() {
+    set({ goalEditorOpen: true });
+  },
+
+  closeThreadGoalEditor() {
+    set({ goalEditorOpen: false });
+  },
+
+  async saveThreadGoal(objective: string, tokenBudget?: number | null) {
+    const projectId = get().activeProjectId;
+    const threadId = get().activeSessionId;
+    const trimmedObjective = objective.trim();
+    if (!projectId || !threadId) {
+      set({ error: "Open a thread before starting a goal." });
+      return;
+    }
+    if (!trimmedObjective) {
+      set({ error: "Goal objective cannot be empty." });
+      return;
+    }
+    try {
+      const response = await exagentClient.setThreadGoal(projectId, threadId, {
+        objective: trimmedObjective,
+        status: "active",
+        tokenBudget: tokenBudget ?? null,
+        clearTokenBudget: tokenBudget === null
+      });
+      set({ currentGoal: response.goal, goalEditorOpen: false, error: null });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async setThreadGoalStatus(status) {
+    const projectId = get().activeProjectId;
+    const threadId = get().activeSessionId;
+    if (!projectId || !threadId) {
+      return;
+    }
+    try {
+      const response = await exagentClient.setThreadGoal(projectId, threadId, { status });
+      set({ currentGoal: response.goal, error: null });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async clearThreadGoal() {
+    const projectId = get().activeProjectId;
+    const threadId = get().activeSessionId;
+    if (!projectId || !threadId) {
+      return;
+    }
+    try {
+      await exagentClient.clearThreadGoal(projectId, threadId);
+      set({ currentGoal: null, goalEditorOpen: false, error: null });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async refreshAgentTree() {
+    const projectId = get().activeProjectId;
+    const threadId = get().activeSessionId;
+    if (!projectId || !threadId) {
+      return;
+    }
+    try {
+      const agents = agentForestFromTreeResponse(await exagentClient.agentTree(projectId, threadId));
+      if (get().activeProjectId === projectId && get().activeSessionId === threadId) {
+        set({ agents });
+      }
+    } catch {
+      // Keep the local event-derived tree when the app-server projection is unavailable.
+    }
+  },
+
+  async submitApproval(message: TranscriptMessage, decision: "approved" | "denied") {
+    const projectId = get().activeProjectId;
+    const threadId = message.threadId ?? get().activeSessionId;
+    if (!projectId || !threadId || !message.approvalId) {
+      return;
+    }
+    try {
+      await exagentClient.submitApprovalDecision(
+        projectId,
+        threadId,
+        message.turnId,
+        message.approvalId,
+        decision,
+        decision === "approved" ? "desktop approved" : "desktop denied"
+      );
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async renameSession(sessionId: string, title: string) {
+    const nextTitle = title.trim();
+    if (!nextTitle) {
+      return;
+    }
+    try {
+      await exagentClient.renameThread(sessionId, nextTitle);
+      set({
+        sessions: get().sessions.map((session) =>
+          session.id === sessionId ? { ...session, title: nextTitle } : session
+        )
+      });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async archiveSession(sessionId: string) {
+    try {
+      await exagentClient.archiveThread(sessionId);
+      const active = get().activeSessionId === sessionId;
+      if (active) {
+        resetSelectedAgentThread(get, set);
+      }
+      set({
+        sessions: get().sessions.filter((session) => session.id !== sessionId),
+        activeSessionId: active ? null : get().activeSessionId,
+        transcript: active ? [] : get().transcript,
+        events: active ? [] : get().events,
+        changedFiles: active ? [] : get().changedFiles,
+        appliedRuntimeEventIds: active ? new Set() : get().appliedRuntimeEventIds
+      });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async unarchiveSession(projectId: string, sessionId: string) {
+    try {
+      await exagentClient.unarchiveThread(sessionId);
+      if (projectId !== get().activeProjectId) {
+        set({ error: null });
+        return;
+      }
+      const threads = await exagentClient.listThreads(projectId, false, get().search || null);
+      set({
+        sessions: threads.map(exagentClient.threadRecordToSession),
+        error: null
+      });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async openArchivedSession(projectId: string, sessionId: string) {
+    try {
+      await exagentClient.unarchiveThread(sessionId);
+      await get().selectProject(projectId, sessionId);
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async pinSession(sessionId: string, pinned: boolean) {
+    try {
+      await exagentClient.pinThread(sessionId, pinned);
+      set({
+        sessions: get().sessions.map((session) =>
+          session.id === sessionId ? { ...session, pinned } : session
+        )
+      });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  setComposerValue(composerValue: string) {
+    set({ composerValue });
+  },
+
+  setComposerPlanMode(composerPlanMode: boolean) {
+    set({ composerPlanMode });
+  },
+
+  setSelectedModel(model) {
+    const normalized = normalizeWorkbenchSelection({
+      ...get(),
+      selectedModel: normalizeModelRef(model, get().activeProviderId)
+    });
+    set({
+      activeProviderId: normalized.activeProviderId,
+      selectedModel: normalized.selectedModel,
+      selectedThinkingMode: normalized.selectedThinkingMode
+    });
+  },
+
+  setSelectedThinkingMode(selectedThinkingMode) {
+    const normalized = normalizeWorkbenchSelection({
+      ...get(),
+      selectedThinkingMode
+    });
+    set({ selectedThinkingMode: normalized.selectedThinkingMode });
+  },
+
+  applyProviderSettings(settings) {
+    const normalized = normalizeWorkbenchSelection({
+      ...get(),
+      providerSettings: settings,
+      selectedModel: providerConfigModelRef(settings)
+    });
+    set({
+      activeProviderId: normalized.activeProviderId,
+      providerSettings: settings,
+      selectedModel: normalized.selectedModel,
+      selectedThinkingMode: normalized.selectedThinkingMode
+    });
+  },
+
+  applyRuntimePreset(presetId) {
+    const preset = get().runtimeSettings?.presets.find((item) => item.id === presetId);
+    if (!preset) {
+      return;
+    }
+    const normalized = normalizeWorkbenchSelection({
+      ...get(),
+      selectedModel: modelRefFromString(preset.model, get().activeProviderId),
+      selectedThinkingMode: preset.thinking_mode
+    });
+    set({
+      activeProviderId: normalized.activeProviderId,
+      selectedModel: normalized.selectedModel,
+      selectedThinkingMode: normalized.selectedThinkingMode
+    });
+  },
+
+  async saveRuntimeSettings(settings) {
+    try {
+      const runtimeSettings = await exagentClient.saveRuntimeSettings(settings);
+      const normalized = normalizeWorkbenchSelection({
+        ...get(),
+        runtimeSettings,
+        selectedThinkingMode: runtimeSettings.default_thinking_mode
+      });
+      set({
+        runtimeSettings,
+        activeProviderId: normalized.activeProviderId,
+        selectedModel: normalized.selectedModel,
+        selectedThinkingMode: normalized.selectedThinkingMode,
+        error: null
+      });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  async setSearch(search: string) {
+    set({ search });
+    const projectId = get().activeProjectId;
+    if (!projectId) {
+      return;
+    }
+    const threads = await exagentClient.listThreads(projectId, false, search || null);
+    set({ sessions: threads.map(exagentClient.threadRecordToSession) });
+  },
+
+  applyRuntimeEvent(event: BackendRuntimeEvent) {
+    get().applyRuntimeEvents([event]);
+  },
+
+  applyRuntimeEvents(events: BackendRuntimeEvent[]) {
+    if (events.length === 0) {
+      return;
+    }
+    const current = get();
+    const activeThreadId = current.activeSessionId;
+    const appliedRuntimeEventIds = new Set(current.appliedRuntimeEventIds);
+    let transcript = current.transcript;
+    let currentGoal = current.currentGoal;
+    let inspectorEvents = current.events;
+    let sessions = current.sessions;
+    let agentRecords = flattenAgentForest(current.agents);
+    let tokenUsageByThreadId = current.tokenUsageByThreadId;
+    let agentRecordsChanged = false;
+    let changed = false;
+
+    for (const event of events) {
+      if (appliedRuntimeEventIds.has(event.event_id)) {
+        continue;
+      }
+      appliedRuntimeEventIds.add(event.event_id);
+      changed = true;
+      tokenUsageByThreadId = applyTokenUsageEvents(tokenUsageByThreadId, [event]);
+
+      sessions = sessions.map((session) => {
+        if (session.id !== event.thread_id) {
+          return session;
+        }
+        const nextStatus = statusFromEvent(event, session.status);
+        return nextStatus === session.status ? session : { ...session, status: nextStatus };
+      });
+
+      if (event.thread_id === activeThreadId) {
+        transcript = applyTranscriptEvent(transcript, event);
+        currentGoal = applyGoalRuntimeEvent(currentGoal, event);
+        const nextAgentRecords = applyAgentEvent(agentRecords, event);
+        if (nextAgentRecords !== agentRecords) {
+          agentRecords = nextAgentRecords;
+          agentRecordsChanged = true;
+        }
+      }
+      if (shouldShowInspectorEvent(event)) {
+        inspectorEvents = [
+          runtimeEventToInspector(event),
+          ...inspectorEvents.filter((item) => item.id !== event.event_id)
+        ].slice(0, 80);
+      }
+    }
+
+    if (!changed) {
+      return;
+    }
+
+    let agents = current.agents;
+    if (activeThreadId) {
+      const rootStatus = rootAgentStatus(
+        sessions.find((session) => session.id === activeThreadId)?.status
+      );
+      const rootStatusChanged = current.agents[0]?.status !== rootStatus;
+      if (agentRecordsChanged || rootStatusChanged || current.agents.length === 0) {
+        agents = buildAgentForest(activeThreadId, rootStatus, agentRecords);
+      }
+    }
+
+    set({
+      transcript,
+      currentGoal,
+      events: inspectorEvents,
+      agents,
+      appliedRuntimeEventIds,
+      tokenUsageByThreadId,
+      sessions
+    });
+    if (events.some(shouldRefreshAgentTreeAfterEvent)) {
+      void get().refreshAgentTree();
+    }
+  },
+
+  async openAgentThread(threadId: string) {
+    const projectId = get().activeProjectId;
+    const activeThreadId = get().activeSessionId;
+    if (!projectId || !activeThreadId || threadId === activeThreadId) {
+      return;
+    }
+
+    const requestId = ++openAgentThreadRequestSequence;
+    get().selectedAgentUnlisten?.();
+    const selectedNode = findAgentNode(get().agents, threadId);
+    set({
+      selectedAgentThreadId: threadId,
+      selectedAgentView: {
+        threadId,
+        transcript: [],
+        events: [],
+        loading: true,
+        error: null
+      },
+      selectedAgentUnlisten: null,
+      selectedAgentAppliedEventIds: new Set()
+    });
+
+    const isCurrentOpen = () =>
+      openAgentThreadRequestSequence === requestId && get().selectedAgentThreadId === threadId;
+    const liveEventBatcher = createRuntimeEventBatcher((events) => {
+      if (!isCurrentOpen()) {
+        return;
+      }
+      get().applySelectedAgentRuntimeEvents(events.filter((event) => event.thread_id === threadId));
+    });
+    let unlisten: Unlisten | null = null;
+    let unlistenCalled = false;
+    const cleanupUnlisten = () => {
+      liveEventBatcher.cancel();
+      if (!unlisten || unlistenCalled) {
+        return;
+      }
+      unlistenCalled = true;
+      unlisten();
+    };
+
+    try {
+      const read = await exagentClient.readThread(projectId, threadId);
+      if (!isCurrentOpen()) {
+        cleanupUnlisten();
+        return;
+      }
+
+      const representedEventIds = threadViewEventIds(read.thread);
+      const baseTranscript = threadViewToTranscript(read.thread);
+      const bufferedEvents: BackendRuntimeEvent[] = [];
+      const bufferedEventIds = new Set<string>();
+      let replayComplete = false;
+
+      if (selectedNode?.status !== "done" && selectedNode?.status !== "failed") {
+        unlisten = await exagentClient.subscribeRuntimeEvents(projectId, threadId, (event) => {
+          if (!isCurrentOpen() || event.thread_id !== threadId) {
+            return;
+          }
+          if (!replayComplete) {
+            if (!bufferedEventIds.has(event.event_id)) {
+              bufferedEventIds.add(event.event_id);
+              bufferedEvents.push(event);
+            }
+            return;
+          }
+          liveEventBatcher.push(event);
+        });
+        if (!isCurrentOpen()) {
+          cleanupUnlisten();
+          return;
+        }
+        set({ selectedAgentUnlisten: unlisten ? cleanupUnlisten : null });
+      }
+
+      const replay = await exagentClient.replayEvents(projectId, threadId, null);
+      if (!isCurrentOpen()) {
+        cleanupUnlisten();
+        return;
+      }
+
+      const replayEventIds = new Set(replay.events.map((event) => event.event_id));
+      const bufferedLiveEvents = bufferedEvents.filter((event) => !replayEventIds.has(event.event_id));
+      const appliedEventIds = new Set([
+        ...representedEventIds,
+        ...replay.events.map((event) => event.event_id),
+        ...bufferedLiveEvents.map((event) => event.event_id)
+      ]);
+      replayComplete = true;
+      const tokenUsageByThreadId = applyTokenUsageEvents(get().tokenUsageByThreadId, [
+        ...replay.events,
+        ...bufferedLiveEvents
+      ]);
+
+      set({
+        selectedAgentView: {
+          threadId,
+          transcript: applyTranscriptEvents(
+            baseTranscript,
+            [...replay.events, ...bufferedLiveEvents],
+            representedEventIds
+          ),
+          events: [
+            ...runtimeEventsToInspector(bufferedLiveEvents).reverse(),
+            ...runtimeEventsToInspector(replay.events)
+          ].slice(0, 50),
+          loading: false,
+          error: null
+        },
+        selectedAgentAppliedEventIds: appliedEventIds,
+        tokenUsageByThreadId,
+        selectedAgentUnlisten: unlisten ? cleanupUnlisten : null
+      });
+      if (threadViewHasFailedTurn(read.thread) || replay.events.some((event) => event.kind.type === "runtime_error")) {
+        void get().refreshAgentTree();
+      }
+    } catch (error) {
+      cleanupUnlisten();
+      if (isCurrentOpen()) {
+        set({
+          selectedAgentView: {
+            threadId,
+            transcript: get().selectedAgentView?.transcript ?? [],
+            events: get().selectedAgentView?.events ?? [],
+            loading: false,
+            error: errorMessage(error)
+          },
+          selectedAgentUnlisten: null
+        });
+      }
+    }
+  },
+
+  closeAgentThread() {
+    resetSelectedAgentThread(get, set);
+  },
+
+  applySelectedAgentRuntimeEvents(events: BackendRuntimeEvent[]) {
+    if (events.length === 0) {
+      return;
+    }
+
+    const current = get();
+    const threadId = current.selectedAgentThreadId;
+    const currentView = current.selectedAgentView;
+    if (!threadId || !currentView) {
+      return;
+    }
+
+    const appliedEventIds = new Set(current.selectedAgentAppliedEventIds);
+    let transcript = currentView.transcript;
+    let inspectorEvents = currentView.events;
+    let tokenUsageByThreadId = current.tokenUsageByThreadId;
+    let changed = false;
+
+    for (const event of events) {
+      if (event.thread_id !== threadId || appliedEventIds.has(event.event_id)) {
+        continue;
+      }
+      appliedEventIds.add(event.event_id);
+      changed = true;
+      tokenUsageByThreadId = applyTokenUsageEvents(tokenUsageByThreadId, [event]);
+      transcript = applyTranscriptEvent(transcript, event);
+      if (shouldShowInspectorEvent(event)) {
+        inspectorEvents = [
+          runtimeEventToInspector(event),
+          ...inspectorEvents.filter((item) => item.id !== event.event_id)
+        ].slice(0, 50);
+      }
+    }
+
+    if (!changed) {
+      return;
+    }
+
+    set({
+      selectedAgentView: {
+        ...currentView,
+        transcript,
+        events: inspectorEvents,
+        loading: false,
+        error: null
+      },
+      tokenUsageByThreadId,
+      selectedAgentAppliedEventIds: appliedEventIds
+    });
+    if (events.some((event) => event.kind.type === "runtime_error")) {
+      void get().refreshAgentTree();
+    }
+  }
+}));
+
+export function getWorkbenchState() {
+  return useWorkbenchStore.getState();
+}
+
+export const loadWorkbench = () => useWorkbenchStore.getState().loadWorkbench();
+export const setComposerValue = (composerValue: string) =>
+  useWorkbenchStore.getState().setComposerValue(composerValue);
+export const setComposerPlanMode = (enabled: boolean) =>
+  useWorkbenchStore.getState().setComposerPlanMode(enabled);
+export const setSelectedModel = (model: string | ModelRef | null) =>
+  useWorkbenchStore.getState().setSelectedModel(model);
+export const setSelectedThinkingMode = (thinkingMode: ThinkingMode | null) =>
+  useWorkbenchStore.getState().setSelectedThinkingMode(thinkingMode);
+export const applyProviderSettings = (settings: ProviderSettingsResponse) =>
+  useWorkbenchStore.getState().applyProviderSettings(settings);
+export const applyRuntimePreset = (presetId: string) =>
+  useWorkbenchStore.getState().applyRuntimePreset(presetId);
+export const sendPrompt = () => useWorkbenchStore.getState().sendPrompt();
+export const interruptActiveTurn = () => useWorkbenchStore.getState().interruptActiveTurn();
+export const openThreadGoalEditor = () => useWorkbenchStore.getState().openThreadGoalEditor();
+export const closeThreadGoalEditor = () => useWorkbenchStore.getState().closeThreadGoalEditor();
+export const saveThreadGoal = (objective: string, tokenBudget?: number | null) =>
+  useWorkbenchStore.getState().saveThreadGoal(objective, tokenBudget);
+export const setThreadGoalStatus = (
+  status: Extract<ThreadGoalStatus, "active" | "paused" | "blocked" | "complete">
+) => useWorkbenchStore.getState().setThreadGoalStatus(status);
+export const clearThreadGoal = () => useWorkbenchStore.getState().clearThreadGoal();
+export const submitApproval = (message: TranscriptMessage, decision: "approved" | "denied") =>
+  useWorkbenchStore.getState().submitApproval(message, decision);
+
+function createRuntimeEventBatcher(apply: (events: BackendRuntimeEvent[]) => void) {
+  let queued: BackendRuntimeEvent[] = [];
+  let frameId: number | null = null;
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  const flush = () => {
+    frameId = null;
+    timeoutId = null;
+    const events = queued;
+    queued = [];
+    apply(events);
+  };
+
+  const schedule = () => {
+    if (frameId !== null || timeoutId !== null) {
+      return;
+    }
+    if (typeof globalThis.requestAnimationFrame === "function") {
+      frameId = globalThis.requestAnimationFrame(flush);
+      return;
+    }
+    timeoutId = setTimeout(flush, 16);
+  };
+
+  return {
+    push(event: BackendRuntimeEvent) {
+      queued.push(event);
+      schedule();
+    },
+    cancel() {
+      queued = [];
+      if (frameId !== null && typeof globalThis.cancelAnimationFrame === "function") {
+        globalThis.cancelAnimationFrame(frameId);
+      }
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
+      frameId = null;
+      timeoutId = null;
+    }
+  };
+}
+
+function resetSelectedAgentThread(
+  get: () => WorkbenchState,
+  set: (partial: Partial<WorkbenchState>) => void
+) {
+  openAgentThreadRequestSequence += 1;
+  get().selectedAgentUnlisten?.();
+  set({
+    selectedAgentThreadId: null,
+    selectedAgentView: null,
+    selectedAgentUnlisten: null,
+    selectedAgentAppliedEventIds: new Set()
+  });
+}
+
+function findAgentNode(nodes: AgentNode[], threadId: string): AgentNode | null {
+  for (const node of nodes) {
+    if (node.threadId === threadId) {
+      return node;
+    }
+    const child = findAgentNode(node.children, threadId);
+    if (child) {
+      return child;
+    }
+  }
+  return null;
+}
+
+function normalizeModelRef(model: string | ModelRef | null, providerId?: string | null): ModelRef | null {
+  if (typeof model === "string" || model === null) {
+    return modelRefFromString(model, providerId);
+  }
+
+  const normalizedProviderId = model.provider_id.trim();
+  const normalizedModelId = model.model_id.trim();
+  if (!normalizedProviderId || !normalizedModelId) {
+    return null;
+  }
+  return {
+    provider_id: normalizedProviderId,
+    model_id: normalizedModelId
+  };
+}
+
+function modelRefFromString(model: string | null | undefined, providerId?: string | null): ModelRef | null {
+  const modelId = model?.trim();
+  if (!modelId) {
+    return null;
+  }
+  return {
+    provider_id: providerId?.trim() || DEFAULT_PROVIDER_ID,
+    model_id: modelId
+  };
+}
+
+async function refreshProjectSelection(
+  get: () => WorkbenchState,
+  set: (partial: Partial<WorkbenchState>) => void,
+  preferredProjectId?: string | null
+) {
+  openSessionRequestSequence += 1;
+  resetSelectedAgentThread(get, set);
+  get().eventUnlisten?.();
+  const projects = await exagentClient.listProjects();
+  const targetProject =
+    (preferredProjectId ? projects.find((project) => project.id === preferredProjectId) : null) ??
+    projects[0] ??
+    null;
+
+  if (!targetProject) {
+    set({
+      projects: [],
+      sessions: [],
+      activeProjectId: null,
+      activeSessionId: null,
+      transcript: [],
+      currentGoal: null,
+      goalEditorOpen: false,
+      events: [],
+      changedFiles: [],
+      cwd: "No project selected",
+      eventUnlisten: null,
+      appliedRuntimeEventIds: new Set(),
+      loading: false,
+      error: null
+    });
+    return;
+  }
+
+  const threads = get().search
+    ? await exagentClient.listThreads(targetProject.id, false, get().search)
+    : await exagentClient.reindexProject(targetProject.id);
+  const targetSessionId = threads[0]?.id ?? null;
+  set({
+    projects: projects.map((project) => projectRecordToSummary(project, project.id === targetProject.id)),
+    sessions: threads.map(exagentClient.threadRecordToSession),
+    activeProjectId: targetProject.id,
+    activeSessionId: targetSessionId,
+    transcript: [],
+    currentGoal: null,
+    goalEditorOpen: false,
+    events: [],
+    changedFiles: [],
+    cwd: targetProject.path,
+    eventUnlisten: null,
+    appliedRuntimeEventIds: new Set(),
+    loading: false,
+    error: null
+  });
+
+  if (targetSessionId) {
+    await get().openSession(targetSessionId);
+  }
+}
+
+function projectRecordToSummary(
+  project: { id: string; name: string; path: string; archived_at?: number | null; pinned?: boolean },
+  active: boolean
+): ProjectSummary {
+  return {
+    id: project.id,
+    name: project.name,
+    path: project.path,
+    active,
+    pinned: project.pinned ?? false,
+    archived: project.archived_at !== null && project.archived_at !== undefined
+  };
+}
+
+function threadViewToTranscript(thread: ThreadView): TranscriptMessage[] {
+  return thread.turns.flatMap((turn) => turnItemsToTranscript(thread.id, turn));
+}
+
+function threadViewEventIds(thread: ThreadView): Set<string> {
+  const ids = new Set<string>();
+  thread.turns.forEach((turn) => {
+    turn.items.forEach((item) => {
+      const eventId = threadItemEventId(item);
+      if (eventId) {
+        ids.add(eventId);
+      }
+    });
+  });
+  return ids;
+}
+
+function threadViewHasFailedTurn(thread: ThreadView): boolean {
+  return thread.turns.some((turn) => turn.status === "failed");
+}
+
+function threadItemEventId(item: ThreadItem): string | null {
+  switch (item.type) {
+    case "assistant_message":
+    case "reasoning":
+    case "tool_result":
+    case "exec_output":
+    case "approval_requested":
+    case "approval_decision":
+    case "runtime_error":
+      return item.event_id ?? null;
+    default:
+      return null;
+  }
+}
+
+function turnItemsToTranscript(threadId: string, turn: ThreadView["turns"][number]): TranscriptMessage[] {
+  const hasToolInvocation = turn.items.some((item) => item.type === "tool_invocation");
+  return turn.items.reduce<TranscriptMessage[]>((messages, item, index) => {
+    const message = threadItemToTranscript(threadId, turn.id, item, index, hasToolInvocation);
+    return message ? appendTranscriptMessage(messages, message) : messages;
+  }, []);
+}
+
+function threadItemToTranscript(
+  threadId: string,
+  turnId: string,
+  item: ThreadItem,
+  index: number,
+  turnHasToolInvocation: boolean
+): TranscriptMessage | null {
+  const id = threadItemEventId(item) ?? `${threadId}-${turnId}-${item.type}-${index}`;
+  switch (item.type) {
+    case "user_message":
+      return {
+        id,
+        role: "user",
+        body: item.text,
+        timestamp: "history",
+        threadId,
+        turnId
+      };
+    case "assistant_message":
+      return {
+        id,
+        role: "assistant",
+        body: item.text ?? "",
+        timestamp: "history",
+        threadId,
+        turnId
+      };
+    case "reasoning":
+      return {
+        id,
+        role: "reasoning",
+        title: "Reasoning",
+        body: reasoningBody(item.summary, item.content),
+        timestamp: "history",
+        threadId,
+        turnId
+      };
+    case "tool_result":
+      if (turnHasToolInvocation) {
+        return null;
+      }
+      return {
+        id,
+        role: "tool",
+        title: item.name,
+        body: "Tool completed.",
+        timestamp: "history",
+        status: "info",
+        threadId,
+        turnId,
+        toolName: item.name,
+        toolStatus: "completed"
+      };
+    case "tool_invocation":
+      return {
+        id: `tool-${item.invocation_id}`,
+        role: "tool",
+        title: toolInvocationTitle(item),
+        body: toolInvocationBody(item),
+        timestamp: "history",
+        status: toolInvocationTone(item),
+        threadId,
+        turnId,
+        invocationId: item.invocation_id,
+        toolCallId: item.tool_call_id ?? undefined,
+        toolName: item.tool_name ?? undefined,
+        approvalId: item.approval_id ?? undefined,
+        toolStatus: normalizeToolInvocationStatus(item.status),
+        mutating: item.mutating ?? undefined
+      };
+    case "exec_output":
+      return null;
+    case "approval_requested":
+      return {
+        id,
+        role: "approval",
+        title: "Approval requested",
+        body: item.reason,
+        timestamp: "history",
+        status: "warning",
+        threadId,
+        turnId,
+        approvalId: item.approval_id,
+        toolName: item.tool_name
+      };
+    case "approval_decision":
+      return {
+        id,
+        role: "tool",
+        title: `Approval ${item.status}`,
+        body: item.note ?? item.status,
+        timestamp: "history",
+        status: item.status === "approved" ? "success" : "danger",
+        threadId,
+        turnId,
+        approvalId: item.approval_id ?? undefined
+      };
+    case "runtime_error":
+      return {
+        id,
+        role: "system",
+        title: "Runtime error",
+        body: item.message,
+        timestamp: "history",
+        status: "danger",
+        threadId,
+        turnId
+      };
+    case "subagent_spawn":
+    case "subagent_close":
+    case "inter_agent_message":
+    case "compaction_written":
+      return null;
+  }
+}
+
+function normalizeToolInvocationStatus(status: string): ToolInvocationTranscriptStatus {
+  switch (status) {
+    case "waiting_approval":
+      return "waiting_approval";
+    case "completed":
+    case "approved":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "cancelled":
+    case "denied":
+      return "cancelled";
+    case "started":
+    case "running":
+    default:
+      return "running";
+  }
+}
+
+function toolInvocationTitle(item: Extract<ThreadItem, { type: "tool_invocation" }>) {
+  if (item.status === "waiting_approval") {
+    return "Waiting for approval";
+  }
+  if (item.status === "approved") {
+    return item.tool_name ?? "Approval approved";
+  }
+  if (item.status === "denied") {
+    return item.tool_name ?? "Approval denied";
+  }
+  return item.tool_name ?? "Tool";
+}
+
+function toolInvocationBody(item: Extract<ThreadItem, { type: "tool_invocation" }>) {
+  if (item.output_preview) {
+    return item.output_preview;
+  }
+  if (item.message) {
+    return item.message;
+  }
+  if (item.reason) {
+    return item.reason;
+  }
+  if (item.status === "completed") {
+    return "Tool completed.";
+  }
+  if (item.status === "approved") {
+    return "Approval approved.";
+  }
+  if (item.status === "denied") {
+    return "Approval denied.";
+  }
+  if (item.status === "failed") {
+    return "Tool failed.";
+  }
+  if (item.status === "cancelled") {
+    return "Tool cancelled.";
+  }
+  return "Tool started.";
+}
+
+function toolInvocationTone(item: Extract<ThreadItem, { type: "tool_invocation" }>): TranscriptMessage["status"] {
+  switch (item.status) {
+    case "waiting_approval":
+    case "cancelled":
+      return "warning";
+    case "completed":
+    case "approved":
+      return "success";
+    case "failed":
+    case "denied":
+      return "danger";
+    default:
+      return "info";
+  }
+}
+
+function applyTranscriptEvents(
+  transcript: TranscriptMessage[],
+  events: BackendRuntimeEvent[],
+  representedEventIds = new Set<string>()
+): TranscriptMessage[] {
+  return events.reduce(
+    (messages, event) => applyTranscriptEvent(messages, event, representedEventIds),
+    transcript
+  );
+}
+
+function applyGoalRuntimeEvents(goal: ThreadGoal | null, events: BackendRuntimeEvent[]): ThreadGoal | null {
+  return events.reduce((currentGoal, event) => applyGoalRuntimeEvent(currentGoal, event), goal);
+}
+
+function applyTokenUsageEvents(
+  current: Record<string, ThreadTokenUsage>,
+  events: BackendRuntimeEvent[]
+): Record<string, ThreadTokenUsage> {
+  let next = current;
+
+  for (const event of events) {
+    if (event.kind.type !== "token_count" || !event.kind.info) {
+      continue;
+    }
+    if (next === current) {
+      next = { ...current };
+    }
+    next[event.thread_id] = {
+      threadId: event.thread_id,
+      total: event.kind.info.total_token_usage,
+      last: event.kind.info.last_token_usage,
+      modelContextWindow: event.kind.info.model_context_window ?? null
+    };
+  }
+
+  return next;
+}
+
+function applyGoalRuntimeEvent(goal: ThreadGoal | null, event: BackendRuntimeEvent): ThreadGoal | null {
+  switch (event.kind.type) {
+    case "thread_goal_updated":
+      return event.kind.goal;
+    case "thread_goal_cleared":
+      return null;
+    default:
+      return goal;
+  }
+}
+
+function applyTranscriptEvent(
+  transcript: TranscriptMessage[],
+  event: BackendRuntimeEvent,
+  representedEventIds?: Set<string>
+): TranscriptMessage[] {
+  if (representedEventIds?.has(event.event_id)) {
+    return transcript;
+  }
+  const streamingTranscript = applyStreamingTranscriptEvent(transcript, event);
+  if (streamingTranscript) {
+    return streamingTranscript;
+  }
+  const toolMessage = runtimeEventToToolInvocationTranscript(event);
+  if (toolMessage) {
+    return upsertToolInvocationMessage(transcript, toolMessage);
+  }
+
+  const transcriptMessage = runtimeEventToTranscript(event);
+  if (!transcriptMessage) {
+    return transcript;
+  }
+  const finalizedStreamingTranscript = finalizeStreamingTranscriptMessage(transcript, transcriptMessage);
+  if (finalizedStreamingTranscript) {
+    return finalizedStreamingTranscript;
+  }
+  if (transcript.some((message) => message.id === transcriptMessage.id)) {
+    return transcript;
+  }
+  return [...transcript, transcriptMessage];
+}
+
+function applyStreamingTranscriptEvent(
+  transcript: TranscriptMessage[],
+  event: BackendRuntimeEvent
+): TranscriptMessage[] | null {
+  switch (event.kind.type) {
+    case "assistant_text_delta":
+      return upsertStreamingTranscriptMessage(transcript, event, "assistant", event.kind.delta);
+    case "reasoning_delta":
+      return upsertStreamingTranscriptMessage(transcript, event, "reasoning", event.kind.delta);
+    default:
+      return null;
+  }
+}
+
+function upsertStreamingTranscriptMessage(
+  transcript: TranscriptMessage[],
+  event: BackendRuntimeEvent,
+  role: Extract<TranscriptMessage["role"], "assistant" | "reasoning">,
+  delta: string
+): TranscriptMessage[] {
+  if (!delta) {
+    return transcript;
+  }
+
+  const index = findStreamingTranscriptIndex(transcript, event.thread_id, event.turn_id ?? undefined, role);
+  if (index === -1) {
+    return [
+      ...transcript,
+      {
+        id: streamingTranscriptId(event, role),
+        role,
+        title: role === "reasoning" ? "Reasoning" : undefined,
+        body: delta,
+        timestamp: "now",
+        threadId: event.thread_id,
+        turnId: event.turn_id ?? undefined
+      }
+    ];
+  }
+
+  const next = [...transcript];
+  const current = next[index];
+  next[index] = {
+    ...current,
+    body: `${current.body}${delta}`,
+    timestamp: "now"
+  };
+  return next;
+}
+
+function finalizeStreamingTranscriptMessage(
+  transcript: TranscriptMessage[],
+  finalized: TranscriptMessage
+): TranscriptMessage[] | null {
+  if (finalized.role !== "assistant" && finalized.role !== "reasoning") {
+    return null;
+  }
+  const index = findStreamingTranscriptIndex(transcript, finalized.threadId, finalized.turnId, finalized.role);
+  if (index === -1) {
+    return null;
+  }
+  const next = [...transcript];
+  next[index] = finalized;
+  return next;
+}
+
+function findStreamingTranscriptIndex(
+  transcript: TranscriptMessage[],
+  threadId: string | undefined,
+  turnId: string | undefined,
+  role: Extract<TranscriptMessage["role"], "assistant" | "reasoning">
+) {
+  const prefix = streamingTranscriptPrefix(role);
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    const message = transcript[index];
+    if (
+      message.id.startsWith(prefix) &&
+      message.role === role &&
+      message.threadId === threadId &&
+      message.turnId === turnId
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function streamingTranscriptId(
+  event: BackendRuntimeEvent,
+  role: Extract<TranscriptMessage["role"], "assistant" | "reasoning">
+) {
+  return `${streamingTranscriptPrefix(role)}${event.thread_id}-${event.turn_id ?? "unscoped"}`;
+}
+
+function streamingTranscriptPrefix(role: Extract<TranscriptMessage["role"], "assistant" | "reasoning">) {
+  return `stream-${role}-`;
+}
+
+function runtimeEventToTranscript(event: BackendRuntimeEvent): TranscriptMessage | null {
+  const base = {
+    id: event.event_id,
+    timestamp: "now",
+    threadId: event.thread_id,
+    turnId: event.turn_id ?? undefined
+  };
+
+  switch (event.kind.type) {
+    case "assistant_turn":
+      if (!event.kind.turn.text) {
+        return null;
+      }
+      return {
+        ...base,
+        role: "assistant",
+        body: event.kind.turn.text
+      };
+    case "reasoning":
+      return {
+        ...base,
+        role: "reasoning",
+        title: "Reasoning",
+        body: reasoningBody(event.kind.summary ?? [], event.kind.content ?? [])
+      };
+    case "exec_output":
+      return null;
+    case "approval_requested":
+      return {
+        ...base,
+        role: "approval",
+        title: "Approval requested",
+        body: event.kind.reason,
+        status: "warning",
+        approvalId: event.kind.approval_id,
+        toolName: event.kind.tool_name
+      };
+    case "approval_decision":
+      return {
+        ...base,
+        role: "tool",
+        title: `Approval ${event.kind.status}`,
+        body: event.kind.note ?? event.kind.status,
+        status: event.kind.status === "approved" ? "success" : "danger"
+      };
+    case "runtime_error":
+      return {
+        ...base,
+        role: "system",
+        title: "Runtime error",
+        body: event.kind.message,
+        status: "danger"
+      };
+    default:
+      return null;
+  }
+}
+
+function reasoningBody(summary?: string[] | null, content?: string[] | null): string {
+  return [...(summary ?? []), ...(content ?? [])]
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function runtimeEventToToolInvocationTranscript(event: BackendRuntimeEvent): TranscriptMessage | null {
+  const base = {
+    id: `tool-${toolInvocationId(event)}`,
+    role: "tool" as const,
+    timestamp: "now",
+    threadId: event.thread_id,
+    turnId: event.turn_id ?? undefined
+  };
+
+  switch (event.kind.type) {
+    case "tool_result":
+      if (isReviewRequiredToolResult(event.kind.result.status)) {
+        return {
+          ...base,
+          title: "Waiting for approval",
+          body: event.kind.result.content || toolResultFallbackBody(event.kind.result.status),
+          status: "warning",
+          toolCallId: event.kind.result.tool_call_id,
+          toolStatus: "waiting_approval"
+        };
+      }
+      return {
+        ...base,
+        title: event.kind.result.tool_name,
+        body: event.kind.result.content || toolResultFallbackBody(event.kind.result.status),
+        status: toolResultTone(event.kind.result.status),
+        toolCallId: event.kind.result.tool_call_id,
+        toolName: event.kind.result.tool_name,
+        toolStatus: toolResultTranscriptStatus(event.kind.result.status)
+      };
+    case "tool_invocation_started":
+      return {
+        ...base,
+        title: event.kind.tool_name,
+        body: "Tool started.",
+        status: "info",
+        invocationId: event.kind.invocation_id,
+        toolCallId: event.kind.tool_call_id,
+        toolName: event.kind.tool_name,
+        toolStatus: "running",
+        mutating: event.kind.mutating
+      };
+    case "tool_invocation_waiting_approval":
+      return {
+        ...base,
+        title: "Waiting for approval",
+        body: event.kind.reason,
+        status: "warning",
+        invocationId: event.kind.invocation_id,
+        approvalId: event.kind.approval_id,
+        toolStatus: "waiting_approval"
+      };
+    case "tool_invocation_output_delta":
+      return {
+        ...base,
+        title: event.kind.stream,
+        body: event.kind.chunk,
+        status: event.kind.stream === "stderr" ? "warning" : "info",
+        invocationId: event.kind.invocation_id,
+        toolStatus: "running"
+      };
+    case "tool_invocation_completed":
+      return {
+        ...base,
+        title: event.kind.tool_name,
+        body: `Tool completed with ${event.kind.status}.`,
+        status: event.kind.status === "success" ? "success" : "info",
+        invocationId: event.kind.invocation_id,
+        toolCallId: event.kind.tool_call_id,
+        toolName: event.kind.tool_name,
+        toolStatus: "completed"
+      };
+    case "tool_invocation_failed":
+      return {
+        ...base,
+        title: event.kind.tool_name,
+        body: event.kind.message,
+        status: "danger",
+        invocationId: event.kind.invocation_id,
+        toolCallId: event.kind.tool_call_id,
+        toolName: event.kind.tool_name,
+        toolStatus: "failed"
+      };
+    case "tool_invocation_cancelled":
+      return {
+        ...base,
+        title: event.kind.tool_name,
+        body: event.kind.reason,
+        status: "warning",
+        invocationId: event.kind.invocation_id,
+        toolCallId: event.kind.tool_call_id,
+        toolName: event.kind.tool_name,
+        toolStatus: "cancelled"
+      };
+    case "approval_decision":
+      return {
+        ...base,
+        title: `Approval ${event.kind.status}`,
+        body: event.kind.note ?? `Approval ${event.kind.status}.`,
+        status: event.kind.status === "approved" ? "success" : "danger",
+        approvalId: event.kind.approval_id,
+        toolStatus: event.kind.status === "approved" ? "completed" : "cancelled"
+      };
+    default:
+      return null;
+  }
+}
+
+function upsertToolInvocationMessage(
+  transcript: TranscriptMessage[],
+  update: TranscriptMessage
+): TranscriptMessage[] {
+  if (!update.invocationId && !update.toolCallId && !update.approvalId) {
+    return [...transcript, update];
+  }
+
+  const existingIndex = matchingToolMessageIndex(transcript, update);
+  if (existingIndex === -1) {
+    return [...transcript, update];
+  }
+
+  const next = [...transcript];
+  const current = next[existingIndex];
+  next[existingIndex] = mergeToolInvocationMessage(current, update);
+  return next;
+}
+
+function appendTranscriptMessage(
+  transcript: TranscriptMessage[],
+  message: TranscriptMessage
+): TranscriptMessage[] {
+  if (message.invocationId) {
+    return upsertToolInvocationMessage(transcript, message);
+  }
+  return [...transcript, message];
+}
+
+function mergeToolInvocationMessage(
+  current: TranscriptMessage,
+  update: TranscriptMessage
+): TranscriptMessage {
+  const isDelta = update.toolStatus === "running" && !update.toolName && Boolean(update.body);
+  const keepTerminalStatus = isTerminalToolStatus(current.toolStatus) && update.toolStatus === "running";
+  const body = isDelta ? appendOutputChunk(current.body, update.body) : mergedToolBody(current, update);
+  const toolStatus = strongestToolStatus(current.toolStatus, update.toolStatus);
+
+  return {
+    ...current,
+    ...update,
+    title: mergedToolTitle(current, update),
+    body,
+    status: keepTerminalStatus ? current.status : update.status ?? current.status,
+    toolStatus,
+    toolCallId: update.toolCallId ?? current.toolCallId,
+    toolName: update.toolName ?? current.toolName,
+    approvalId: update.approvalId ?? current.approvalId,
+    mutating: update.mutating ?? current.mutating
+  };
+}
+
+function matchingToolMessageIndex(transcript: TranscriptMessage[], update: TranscriptMessage) {
+  const matchers = [
+    update.invocationId
+      ? (message: TranscriptMessage) => message.invocationId === update.invocationId
+      : null,
+    update.toolCallId
+      ? (message: TranscriptMessage) => message.toolCallId === update.toolCallId
+      : null,
+    update.approvalId
+      ? (message: TranscriptMessage) => message.approvalId === update.approvalId
+      : null,
+    update.toolStatus === "waiting_approval" && update.approvalId
+      ? (message: TranscriptMessage) =>
+          message.toolStatus === "waiting_approval" && !message.approvalId && !message.invocationId
+      : null
+  ].filter((matcher): matcher is (message: TranscriptMessage) => boolean => Boolean(matcher));
+
+  for (const matcher of matchers) {
+    const index = transcript.findIndex((message) => transcriptMessageInScope(message, update) && matcher(message));
+    if (index !== -1) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function transcriptMessageInScope(message: TranscriptMessage, update: TranscriptMessage) {
+  if (update.threadId && message.threadId !== update.threadId) {
+    return false;
+  }
+  if (update.turnId && message.turnId !== update.turnId) {
+    return false;
+  }
+  return true;
+}
+
+function isTerminalToolStatus(status: ToolInvocationTranscriptStatus | undefined) {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+function mergedToolTitle(current: TranscriptMessage, update: TranscriptMessage) {
+  if (update.toolStatus === "waiting_approval") {
+    return update.title ?? current.title;
+  }
+  if (update.approvalId && update.toolStatus) {
+    return update.title ?? current.title;
+  }
+  return update.toolName ?? current.toolName ?? update.title ?? current.title;
+}
+
+function mergedToolBody(current: TranscriptMessage, update: TranscriptMessage) {
+  if (current.toolStatus === "waiting_approval" && update.toolStatus === "waiting_approval") {
+    if (update.approvalId || update.invocationId) {
+      return update.body || current.body;
+    }
+    return current.body || update.body;
+  }
+  if (
+    update.approvalId &&
+    update.toolStatus &&
+    update.toolStatus !== "waiting_approval"
+  ) {
+    return update.body || current.body;
+  }
+  if (
+    update.toolStatus === "completed" &&
+    current.body &&
+    current.body !== "Tool started." &&
+    !current.body.startsWith("Tool completed")
+  ) {
+    return current.body;
+  }
+  return update.body || current.body;
+}
+
+function appendOutputChunk(currentBody: string, chunk: string) {
+  if (!currentBody || currentBody === "Tool started.") {
+    return chunk;
+  }
+  return `${currentBody}${chunk}`;
+}
+
+function strongestToolStatus(
+  current: ToolInvocationTranscriptStatus | undefined,
+  update: ToolInvocationTranscriptStatus | undefined
+): ToolInvocationTranscriptStatus | undefined {
+  if (!current) {
+    return update;
+  }
+  if (!update) {
+    return current;
+  }
+  const order: Record<ToolInvocationTranscriptStatus, number> = {
+    running: 0,
+    waiting_approval: 1,
+    completed: 2,
+    cancelled: 3,
+    failed: 4
+  };
+  return order[update] >= order[current] ? update : current;
+}
+
+function toolResultTranscriptStatus(status: string): ToolInvocationTranscriptStatus {
+  if (isReviewRequiredToolResult(status)) {
+    return "waiting_approval";
+  }
+  if (status === "error" || status === "failed" || status === "failure") {
+    return "failed";
+  }
+  return "completed";
+}
+
+function toolResultTone(status: string): TranscriptMessage["status"] {
+  if (isReviewRequiredToolResult(status)) {
+    return "warning";
+  }
+  return toolResultTranscriptStatus(status) === "failed" ? "danger" : "success";
+}
+
+function toolResultFallbackBody(status: string) {
+  if (isReviewRequiredToolResult(status)) {
+    return "Waiting for approval.";
+  }
+  return toolResultTranscriptStatus(status) === "failed" ? "Tool failed." : "Tool completed.";
+}
+
+function isReviewRequiredToolResult(status: string) {
+  return status === "review_required";
+}
+
+function toolInvocationId(event: BackendRuntimeEvent) {
+  switch (event.kind.type) {
+    case "tool_invocation_started":
+    case "tool_invocation_waiting_approval":
+    case "tool_invocation_output_delta":
+    case "tool_invocation_completed":
+    case "tool_invocation_failed":
+    case "tool_invocation_cancelled":
+      return event.kind.invocation_id;
+    default:
+      return event.event_id;
+  }
+}
+
+function runtimeEventToInspector(event: BackendRuntimeEvent): RuntimeEvent {
+  return {
+    id: event.event_id,
+    label: event.kind.type.replaceAll("_", " "),
+    detail: eventDetail(event),
+    timestamp: "now",
+    tone: eventTone(event)
+  };
+}
+
+function runtimeEventsToInspector(events: BackendRuntimeEvent[]): RuntimeEvent[] {
+  return events.filter(shouldShowInspectorEvent).map(runtimeEventToInspector);
+}
+
+function shouldShowInspectorEvent(event: BackendRuntimeEvent) {
+  switch (event.kind.type) {
+    case "assistant_text_delta":
+    case "reasoning_delta":
+    case "subagent_spawned":
+    case "subagent_closed":
+    case "inter_agent_message_sent":
+      return false;
+    default:
+      return true;
+  }
+}
+
+function eventDetail(event: BackendRuntimeEvent) {
+  switch (event.kind.type) {
+    case "assistant_turn":
+      return event.kind.turn.text ?? "Assistant turn";
+    case "tool_result":
+      return event.kind.result.tool_name;
+    case "tool_invocation_started":
+      return event.kind.tool_name;
+    case "tool_invocation_waiting_approval":
+      return event.kind.reason;
+    case "tool_invocation_output_delta":
+      return `${event.kind.stream} #${event.kind.sequence}`;
+    case "tool_invocation_completed":
+      return `${event.kind.tool_name}: ${event.kind.status}`;
+    case "tool_invocation_failed":
+      return event.kind.message;
+    case "tool_invocation_cancelled":
+      return event.kind.reason;
+    case "approval_requested":
+      return event.kind.reason;
+    case "approval_decision":
+      return event.kind.note ?? event.kind.status;
+    case "runtime_error":
+      return event.kind.message;
+    default:
+      return event.thread_id;
+  }
+}
+
+function eventTone(event: BackendRuntimeEvent): RuntimeEvent["tone"] {
+  switch (event.kind.type) {
+    case "runtime_error":
+      return "danger";
+    case "approval_requested":
+    case "tool_invocation_waiting_approval":
+      return "warning";
+    case "approval_decision":
+      return event.kind.status === "approved" ? "success" : "danger";
+    case "tool_invocation_completed":
+      return "success";
+    case "tool_invocation_failed":
+      return "danger";
+    case "tool_invocation_cancelled":
+      return "warning";
+    case "turn_completed":
+      return "success";
+    default:
+      return "info";
+  }
+}
+
+function rootAgentStatus(status: SessionSummary["status"] | undefined): AgentRunStatus {
+  return status === "running" || status === "awaiting_approval" ? "running" : "idle";
+}
+
+function sessionStatusFromThreadStatus(status: string | undefined): SessionSummary["status"] {
+  switch (status) {
+    case "running":
+    case "idle":
+    case "failed":
+      return status;
+    case "waiting_approval":
+      return "awaiting_approval";
+    default:
+      return "idle";
+  }
+}
+
+function updateSessionStatus(
+  sessions: SessionSummary[],
+  threadId: string,
+  status: SessionSummary["status"]
+): SessionSummary[] {
+  return sessions.map((session) =>
+    session.id === threadId && session.status !== status ? { ...session, status } : session
+  );
+}
+
+function markSessionStatus(
+  set: (partial: Partial<WorkbenchState>) => void,
+  get: () => WorkbenchState,
+  threadId: string,
+  status: SessionSummary["status"]
+) {
+  const current = get();
+  const sessions = updateSessionStatus(current.sessions, threadId, status);
+  const agents =
+    current.activeSessionId === threadId
+      ? buildAgentForest(threadId, rootAgentStatus(status), flattenAgentForest(current.agents))
+      : current.agents;
+  set({ sessions, agents });
+}
+
+function isNoActiveTurnError(error: unknown) {
+  return errorMessage(error).toLowerCase().includes("no active turn");
+}
+
+function shouldRefreshAgentTreeAfterEvent(event: BackendRuntimeEvent) {
+  switch (event.kind.type) {
+    case "subagent_spawned":
+    case "subagent_closed":
+    case "inter_agent_message_sent":
+    case "turn_completed":
+    case "turn_interrupted":
+    case "runtime_error":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function statusFromEvent(event: BackendRuntimeEvent, current: SessionSummary["status"]) {
+  switch (event.kind.type) {
+    case "turn_started":
+      return "running";
+    case "approval_requested":
+    case "tool_invocation_waiting_approval":
+      return "awaiting_approval";
+    case "tool_invocation_failed":
+    case "runtime_error":
+      return "failed";
+    case "approval_decision":
+    case "turn_completed":
+    case "turn_interrupted":
+      return "idle";
+    default:
+      return current;
+  }
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+type SelectionState = Pick<
+  WorkbenchState,
+  "providerSettings" | "runtimeSettings" | "activeProviderId" | "selectedModel" | "selectedThinkingMode"
+>;
+
+function normalizeWorkbenchSelection(state: Partial<SelectionState>) {
+  const activeProviderId = activeProviderIdFromSettings(state.providerSettings, state.activeProviderId);
+  const selectedModel =
+    normalizeModelRef(state.selectedModel ?? null, activeProviderId) ??
+    providerConfigModelRef(state.providerSettings) ??
+    modelRefFromString(state.runtimeSettings?.default_model, activeProviderId);
+  const selectedThinkingMode = normalizeThinkingModeForModel(
+    state.selectedThinkingMode ?? null,
+    selectedModel,
+    state.providerSettings
+  );
+
+  return {
+    activeProviderId,
+    selectedModel,
+    selectedThinkingMode
+  };
+}
+
+function activeProviderIdFromSettings(settings?: ProviderSettingsResponse | null, fallback?: string | null) {
+  return settings?.config.provider_id?.trim() || settings?.active_provider_id?.trim() || fallback?.trim() || DEFAULT_PROVIDER_ID;
+}
+
+function providerConfigModelRef(settings?: ProviderSettingsResponse | null): ModelRef | null {
+  if (!settings) {
+    return null;
+  }
+  return modelRefFromString(settings.config.model, activeProviderIdFromSettings(settings, null));
+}
+
+function normalizeThinkingModeForModel(
+  mode: ThinkingMode | null,
+  model: ModelRef | null,
+  settings?: ProviderSettingsResponse | null
+): Exclude<ThinkingMode, "auto"> | null {
+  const normalizedMode = mode === "auto" ? null : mode;
+  if (normalizedMode === null || !model) {
+    return null;
+  }
+
+  const thinking = settings?.model_options.find(
+    (option) => option.provider_id === model.provider_id && option.id === model.model_id
+  )?.capabilities.thinking;
+  if (!thinking?.supported) {
+    return null;
+  }
+
+  return thinking.modes.includes(normalizedMode) ? normalizedMode : null;
+}
+
+function turnThinkingOverride(state: SelectionState, normalized: ReturnType<typeof normalizeWorkbenchSelection>) {
+  const requestedMode = state.selectedThinkingMode === "auto" ? null : state.selectedThinkingMode ?? null;
+  const thinkingMode = normalized.selectedThinkingMode;
+  const thinking = selectedModelThinkingCapability(normalized, state);
+  const defaultMode = state.runtimeSettings?.default_thinking_mode === "auto" ? null : state.runtimeSettings?.default_thinking_mode ?? null;
+  const explicitModeWasRejected = requestedMode !== null && thinkingMode === null && thinking !== null;
+  const inheritedDefaultIsUnsupported =
+    requestedMode === null && thinking !== null && defaultMode !== null && !thinking.modes.includes(defaultMode);
+  const clearThinkingMode = explicitModeWasRejected || inheritedDefaultIsUnsupported;
+
+  return {
+    thinkingMode,
+    clearThinkingMode
+  };
+}
+
+function selectedModelThinkingCapability(normalized: ReturnType<typeof normalizeWorkbenchSelection>, state: SelectionState) {
+  const model = normalized.selectedModel;
+  if (!model) {
+    return null;
+  }
+  return (
+    state.providerSettings?.model_options.find(
+      (option) => option.provider_id === model.provider_id && option.id === model.model_id
+    )?.capabilities.thinking ?? null
+  );
+}

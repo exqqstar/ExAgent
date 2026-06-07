@@ -1,0 +1,38 @@
+name: Bug report
+description: Report a reproducible problem in ExAgent.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction Steps
+      description: Include commands, API requests, or UI actions.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Rust version, Node version, ExAgent commit, and provider used.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or Output
+      description: Redact API keys, OAuth tokens, rollout contents, and private paths.
+      render: text
+    validations:
+      required: false

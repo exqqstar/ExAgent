@@ -45,7 +45,7 @@
     "@testing-library/jest-dom": "^6.8.0",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.6.1",
-    "@types/node": "^22.17.2",
+    "@types/node": "^25.9.2",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
     "@tauri-apps/cli": "^2.8.0",

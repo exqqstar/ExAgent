@@ -68,5 +68,5 @@ pub fn run() {
             commands::provider_models_list,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running ExAgent Desktop");
+        .expect("error while running ExAgent");
 }

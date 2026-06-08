@@ -36,7 +36,7 @@ pub use crate::provider_auth::{
 };
 pub use exagent::provider::{ProviderAuthMode, ProviderProtocol};
 
-const SECRET_SERVICE: &str = "dev.exagent.desktop";
+const SECRET_SERVICE: &str = "io.github.exqqstar.exagent";
 const DEFAULT_PROVIDER_ID: &str = "openai";
 const DEFAULT_CREDENTIAL_ID: &str = "key-1";
 

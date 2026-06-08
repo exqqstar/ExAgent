@@ -123,7 +123,7 @@ const localeStorageKey = "exagent.locale";
 const translations: Record<Locale, Record<TranslationKey, string>> = {
   en: {
     "settings.title": "Settings",
-    "settings.description": "Configure ExAgent Desktop runtime behavior.",
+    "settings.description": "Configure ExAgent runtime behavior.",
     "settings.sections.general": "General",
     "settings.sections.providers": "Providers",
     "settings.sections.mcp": "MCP",
@@ -233,7 +233,7 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
   },
   zh: {
     "settings.title": "设置",
-    "settings.description": "配置 ExAgent Desktop 的运行行为。",
+    "settings.description": "配置 ExAgent 的运行行为。",
     "settings.sections.general": "通用",
     "settings.sections.providers": "模型提供方",
     "settings.sections.mcp": "MCP",

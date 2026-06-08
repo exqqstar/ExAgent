@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ExAgent Desktop",
+  "productName": "ExAgent",
   "version": "0.1.0",
-  "identifier": "dev.exagent.desktop",
+  "identifier": "io.github.exqqstar.exagent",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",

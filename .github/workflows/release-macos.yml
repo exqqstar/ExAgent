@@ -74,7 +74,7 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
         with:
           projectPath: apps/desktop
-          tauriScript: npm run tauri --
+          tauriScript: npm run tauri
           args: --target universal-apple-darwin
           tagName: ${{ github.ref_name }}
           releaseName: ExAgent ${{ github.ref_name }}

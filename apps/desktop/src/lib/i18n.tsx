@@ -3,6 +3,11 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 export type Locale = "en" | "zh";
 
 export type TranslationKey =
+  | "composer.actions.addPhotosAndFiles"
+  | "composer.actions.attachChrome"
+  | "composer.actions.planMode"
+  | "composer.actions.goal"
+  | "composer.actions.plugins"
   | "settings.title"
   | "settings.description"
   | "settings.sections.general"
@@ -122,6 +127,11 @@ const localeStorageKey = "exagent.locale";
 
 const translations: Record<Locale, Record<TranslationKey, string>> = {
   en: {
+    "composer.actions.addPhotosAndFiles": "Add photos and files",
+    "composer.actions.attachChrome": "Attach Google Chrome",
+    "composer.actions.planMode": "Plan mode",
+    "composer.actions.goal": "Goal",
+    "composer.actions.plugins": "Plugins",
     "settings.title": "Settings",
     "settings.description": "Configure ExAgent runtime behavior.",
     "settings.sections.general": "General",
@@ -232,6 +242,11 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "common.close": "Close"
   },
   zh: {
+    "composer.actions.addPhotosAndFiles": "添加照片和文件",
+    "composer.actions.attachChrome": "附加 Google Chrome",
+    "composer.actions.planMode": "计划模式",
+    "composer.actions.goal": "追求目标",
+    "composer.actions.plugins": "插件",
     "settings.title": "设置",
     "settings.description": "配置 ExAgent 的运行行为。",
     "settings.sections.general": "通用",

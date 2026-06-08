@@ -11,6 +11,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "@/App";
 import { exagentClient } from "@/api/exagentClient";
+import { I18nProvider } from "@/lib/i18n";
 import { useWorkbenchStore } from "@/stores/workbenchStore";
 import type {
   BackendRuntimeEvent,
@@ -1828,7 +1829,7 @@ describe("AppShell", () => {
     expect(useWorkbenchStore.getState().selectedThinkingMode).toBe("x_high");
   });
 
-  it("opens composer context actions from the plus menu", async () => {
+  it("opens localized composer context actions from the plus menu", async () => {
     const user = userEvent.setup();
     const setThreadGoal = vi
       .spyOn(exagentClient, "setThreadGoal")
@@ -1849,16 +1850,19 @@ describe("AppShell", () => {
     await user.click(actionButton);
 
     expect(
-      screen.getByRole("menuitem", { name: "添加照片和文件" }),
+      screen.getByRole("menuitem", { name: "Add photos and files" }),
     ).toHaveAttribute("aria-disabled", "true");
     expect(
-      screen.getByRole("menuitem", { name: "附加 Google Chrome" }),
+      screen.getByRole("menuitem", { name: "Attach Google Chrome" }),
     ).toHaveAttribute("aria-disabled", "true");
+    expect(
+      screen.queryByRole("menuitem", { name: "添加照片和文件" }),
+    ).not.toBeInTheDocument();
     const planModeItem = screen.getByRole("menuitemcheckbox", {
-      name: /计划模式/,
+      name: /Plan mode/,
     });
     expect(planModeItem).toHaveAttribute("aria-checked", "false");
-    await user.click(screen.getByRole("menuitem", { name: /追求目标/ }));
+    await user.click(screen.getByRole("menuitem", { name: /Goal/ }));
     await user.type(
       screen.getByLabelText("Goal objective"),
       "Ship goal mode from menu",
@@ -1878,19 +1882,89 @@ describe("AppShell", () => {
     expect(screen.getByText("Ship goal mode from menu")).toBeInTheDocument();
 
     await user.click(actionButton);
-    expect(screen.getByRole("menuitem", { name: /插件/ })).toHaveAttribute(
+    expect(screen.getByRole("menuitem", { name: /Plugins/ })).toHaveAttribute(
       "aria-disabled",
       "true",
     );
 
     const reopenedPlanModeItem = screen.getByRole("menuitemcheckbox", {
-      name: /计划模式/,
+      name: /Plan mode/,
     });
     await user.click(reopenedPlanModeItem);
 
     expect(
       screen.getByRole("button", { name: "Plan mode enabled" }),
     ).toBeInTheDocument();
+  });
+
+  it("uses Chinese labels for composer actions when Chinese is selected", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem("exagent.locale", "zh");
+    render(
+      <I18nProvider>
+        <App />
+      </I18nProvider>,
+    );
+
+    await screen.findByText("Session restored");
+    await user.click(
+      screen.getByRole("button", { name: "Open composer actions" }),
+    );
+
+    expect(
+      screen.getByRole("menuitem", { name: "添加照片和文件" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: "附加 Google Chrome" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitemcheckbox", { name: /计划模式/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: /追求目标/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /插件/ })).toBeInTheDocument();
+  });
+
+  it("sends the composer with Enter and keeps Shift+Enter as a newline", async () => {
+    const user = userEvent.setup();
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-desktop",
+      turn: {
+        id: "turn-enter-submit",
+        status: "in_progress",
+        items: [],
+      },
+    });
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    const composer = screen.getByLabelText("Message ExAgent");
+    await user.type(composer, "Line one");
+    await user.keyboard("{Shift>}{Enter}{/Shift}");
+    await user.type(composer, "Line two");
+
+    expect(composer).toHaveValue("Line one\nLine two");
+    expect(startTurn).not.toHaveBeenCalled();
+
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => {
+      expect(startTurn).toHaveBeenCalledWith(
+        "project-exagent",
+        "session-desktop",
+        "Line one\nLine two",
+        {
+          model: {
+            provider_id: "openai",
+            model_id: "gpt-5.5",
+          },
+          thinkingMode: null,
+          clearThinkingMode: false,
+          turnMode: "default",
+        },
+      );
+    });
   });
 
   it("sends plan mode with the next prompt and clears the composer toggle", async () => {
@@ -1910,7 +1984,7 @@ describe("AppShell", () => {
       screen.getByRole("button", { name: "Open composer actions" }),
     );
     await user.click(
-      screen.getByRole("menuitemcheckbox", { name: /计划模式/ }),
+      screen.getByRole("menuitemcheckbox", { name: /Plan mode/ }),
     );
     expect(
       screen.getByRole("button", { name: "Plan mode enabled" }),

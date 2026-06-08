@@ -41,6 +41,7 @@ import {
 } from "@/stores/workbenchStore";
 import type { getWorkbenchState } from "@/stores/workbenchStore";
 import type { ModelCapabilities, ModelRef, ProviderModelView, ThinkingMode } from "@/types";
+import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 type WorkbenchState = ReturnType<typeof getWorkbenchState>;
@@ -110,6 +111,17 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
         className={variant === "hero" ? "min-h-[96px] border-transparent bg-transparent px-2 py-1 focus:border-transparent focus:ring-0" : undefined}
         value={state.composerValue}
         onChange={(event) => setComposerValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
+            return;
+          }
+          event.preventDefault();
+          if (busy) {
+            void interruptActiveTurn();
+          } else {
+            void sendPrompt();
+          }
+        }}
         placeholder={variant === "hero" ? "Ask ExAgent to build, fix, or explain..." : "Message ExAgent"}
         aria-label="Message ExAgent"
       />
@@ -263,6 +275,8 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
 }
 
 function ComposerActionsMenu({ planMode, canUseGoal }: { planMode: boolean; canUseGoal: boolean }) {
+  const { t } = useI18n();
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -271,8 +285,14 @@ function ComposerActionsMenu({ planMode, canUseGoal }: { planMode: boolean; canU
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side="top" className="w-72 p-1.5">
-        <PlannedActionItem icon={ImagePlus} label="添加照片和文件" />
-        <PlannedActionItem icon={Chrome} label="附加 Google Chrome" />
+        <PlannedActionItem
+          icon={ImagePlus}
+          label={t("composer.actions.addPhotosAndFiles")}
+        />
+        <PlannedActionItem
+          icon={Chrome}
+          label={t("composer.actions.attachChrome")}
+        />
         <DropdownMenuSeparator />
         <DropdownMenuCheckboxItem
           checked={planMode}
@@ -280,7 +300,9 @@ function ComposerActionsMenu({ planMode, canUseGoal }: { planMode: boolean; canU
           className="min-h-10 gap-3 px-2.5 py-2"
         >
           <ListChecks className="h-4 w-4 shrink-0 text-muted" />
-          <span className="type-label-md min-w-0 flex-1 truncate text-ink">计划模式</span>
+          <span className="type-label-md min-w-0 flex-1 truncate text-ink">
+            {t("composer.actions.planMode")}
+          </span>
         </DropdownMenuCheckboxItem>
         <DropdownMenuItem
           disabled={!canUseGoal}
@@ -288,10 +310,16 @@ function ComposerActionsMenu({ planMode, canUseGoal }: { planMode: boolean; canU
           onSelect={() => openThreadGoalEditor()}
         >
           <Target className="h-4 w-4 shrink-0 text-muted" />
-          <span className="type-label-md min-w-0 flex-1 truncate text-ink">追求目标</span>
+          <span className="type-label-md min-w-0 flex-1 truncate text-ink">
+            {t("composer.actions.goal")}
+          </span>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <PlannedActionItem icon={Plug} label="插件" trailing={<ChevronRight className="h-4 w-4 text-subtle" />} />
+        <PlannedActionItem
+          icon={Plug}
+          label={t("composer.actions.plugins")}
+          trailing={<ChevronRight className="h-4 w-4 text-subtle" />}
+        />
       </DropdownMenuContent>
     </DropdownMenu>
   );

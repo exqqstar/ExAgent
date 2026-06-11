@@ -408,7 +408,78 @@ async fn openai_compatible_client_streams_deepseek_reasoning_and_text() {
         .clone()
         .expect("request body should be captured");
     assert_eq!(body["stream"], true);
+    assert_eq!(body["stream_options"], json!({ "include_usage": true }));
     assert_eq!(body["thinking"], json!({ "type": "enabled" }));
+}
+
+#[tokio::test]
+async fn openai_compatible_client_streams_choice_token_usage() {
+    let captured_body = Arc::new(Mutex::new(None::<Value>));
+    let app_captured_body = captured_body.clone();
+    let app = Router::new().route(
+        "/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let app_captured_body = app_captured_body.clone();
+            async move {
+                *app_captured_body.lock().unwrap() = Some(body);
+                let body = concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",",
+                    "\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":4,\"total_tokens\":12}}]}\n\n",
+                    "data: [DONE]\n\n"
+                );
+                ([(CONTENT_TYPE, "text/event-stream")], body).into_response()
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let llm =
+        OpenAiCompatibleLlm::from_parts("kimi-k2.6", format!("http://{addr}"), None::<String>)
+            .unwrap();
+    let mut sink = RecordingStreamSink::default();
+
+    let completion = llm
+        .stream(
+            &[ConversationMessage::user("hello")],
+            &[],
+            &LlmRequestOptions::default(),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(completion.turn.text.as_deref(), Some("hello"));
+    assert_eq!(
+        completion.token_usage,
+        Some(TokenUsage {
+            input_tokens: 8,
+            cached_input_tokens: 0,
+            output_tokens: 4,
+            reasoning_output_tokens: 0,
+            total_tokens: 12,
+        })
+    );
+    assert_eq!(
+        sink.events,
+        vec![
+            LlmStreamEvent::AssistantTextDelta("hello".to_string()),
+            LlmStreamEvent::Completed(completion),
+        ]
+    );
+
+    let body = captured_body
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("request body should be captured");
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["stream_options"], json!({ "include_usage": true }));
 }
 
 #[tokio::test]

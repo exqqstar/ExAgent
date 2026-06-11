@@ -1506,6 +1506,23 @@ describe("AppShell", () => {
     expect(within(dialog).getByLabelText("Base URL")).toHaveValue(
       "https://api.moonshot.ai/v1",
     );
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Base URL presets" }),
+    );
+    await userEvent.click(
+      screen.getByRole("menuitem", { name: /Mainland China/ }),
+    );
+    expect(within(dialog).getByLabelText("Base URL")).toHaveValue(
+      "https://api.moonshot.cn/v1",
+    );
+    await userEvent.clear(within(dialog).getByLabelText("Base URL"));
+    await userEvent.type(
+      within(dialog).getByLabelText("Base URL"),
+      "https://moonshot.example/v1",
+    );
+    expect(within(dialog).getByLabelText("Base URL")).toHaveValue(
+      "https://moonshot.example/v1",
+    );
     expect(within(dialog).getByLabelText("Model")).toHaveValue("kimi-k2.6");
 
     await userEvent.click(

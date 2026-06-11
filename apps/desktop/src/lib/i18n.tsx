@@ -67,6 +67,10 @@ export type TranslationKey =
   | "settings.connection.compatibleDescription"
   | "settings.connection.apiKeyDescription"
   | "settings.connection.baseUrl"
+  | "settings.connection.baseUrlPresets"
+  | "settings.connection.baseUrlPresetsAria"
+  | "settings.connection.baseUrlPresetInternational"
+  | "settings.connection.baseUrlPresetMainlandChina"
   | "settings.connection.model"
   | "settings.connection.discovering"
   | "settings.connection.discoverModels"
@@ -196,6 +200,10 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "settings.connection.compatibleDescription": "Enter the OpenAI-compatible endpoint for this provider, with an optional API key.",
     "settings.connection.apiKeyDescription": "Enter your API key to connect this provider.",
     "settings.connection.baseUrl": "Base URL",
+    "settings.connection.baseUrlPresets": "Presets",
+    "settings.connection.baseUrlPresetsAria": "Base URL presets",
+    "settings.connection.baseUrlPresetInternational": "International",
+    "settings.connection.baseUrlPresetMainlandChina": "Mainland China",
     "settings.connection.model": "Model",
     "settings.connection.discovering": "Discovering",
     "settings.connection.discoverModels": "Discover models",
@@ -316,6 +324,10 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "settings.connection.compatibleDescription": "输入此提供方的 OpenAI-compatible endpoint，可选择提供 API 密钥。",
     "settings.connection.apiKeyDescription": "输入你的 API 密钥以连接此提供方。",
     "settings.connection.baseUrl": "Base URL",
+    "settings.connection.baseUrlPresets": "预设",
+    "settings.connection.baseUrlPresetsAria": "Base URL 预设",
+    "settings.connection.baseUrlPresetInternational": "国际平台",
+    "settings.connection.baseUrlPresetMainlandChina": "国内平台",
     "settings.connection.model": "模型",
     "settings.connection.discovering": "正在发现",
     "settings.connection.discoverModels": "发现模型",

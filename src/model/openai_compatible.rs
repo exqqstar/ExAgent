@@ -191,6 +191,7 @@ pub(crate) fn build_openai_chat_completion_request_value(
     apply_openai_reasoning(&mut request, reasoning_capabilities, options.thinking_mode);
     if stream {
         request["stream"] = Value::Bool(true);
+        request["stream_options"] = json!({ "include_usage": true });
     }
     Ok(request)
 }
@@ -346,8 +347,16 @@ impl ChatCompletionStreamParser {
             }
 
             for choice in chunk.choices {
-                self.apply_delta(choice.delta, sink).await?;
-                if choice.finish_reason.is_some() {
+                let ChatCompletionStreamChoice {
+                    delta,
+                    finish_reason,
+                    usage,
+                } = choice;
+                if let Some(usage) = usage {
+                    self.token_usage = Some(TokenUsage::from(usage));
+                }
+                self.apply_delta(delta, sink).await?;
+                if finish_reason.is_some() {
                     self.done = true;
                 }
             }
@@ -468,6 +477,7 @@ struct ChatCompletionStreamChoice {
     #[serde(default)]
     delta: ChatCompletionDelta,
     finish_reason: Option<Value>,
+    usage: Option<ChatUsage>,
 }
 
 #[derive(Debug, Default, Deserialize)]

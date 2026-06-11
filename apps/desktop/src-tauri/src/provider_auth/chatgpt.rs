@@ -25,7 +25,7 @@ pub struct PkcePair {
 impl PkcePair {
     pub fn generate() -> Self {
         let mut bytes = [0_u8; 64];
-        rand::thread_rng().fill_bytes(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         let verifier = URL_SAFE_NO_PAD.encode(bytes);
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
         Self {

@@ -5,7 +5,9 @@ use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::session::{ApprovalId, ApprovalStatus};
 use crate::state::fork_history::FORK_CONTEXT_TURN_ID;
 use crate::state::rollout::ResponseItem;
-use crate::types::{ConversationMessage, MessageRole, ThreadId, TurnId};
+use crate::types::{
+    ConversationContentPart, ConversationMessage, MessageRole, ThreadId, TurnId, UserInput,
+};
 
 pub(in crate::app_server) fn latest_turn_state(events: &[RuntimeEvent]) -> Option<TurnState> {
     events.iter().rev().find_map(|event| {
@@ -176,7 +178,7 @@ fn build_turn_views(events: Vec<RuntimeEvent>) -> Vec<TurnView> {
 
 #[derive(Default)]
 struct ProjectedTurnMessages {
-    user: Option<String>,
+    user: Option<ConversationMessage>,
     assistants: Vec<ConversationMessage>,
 }
 
@@ -209,7 +211,7 @@ fn insert_response_items(turns: &mut Vec<TurnView>, response_items: &[ResponseIt
                         return projected;
                     }
                     match message.role {
-                        MessageRole::User => projected.user = Some(message.content.clone()),
+                        MessageRole::User => projected.user = Some(message.clone()),
                         MessageRole::Assistant => projected.assistants.push(message.clone()),
                         MessageRole::System | MessageRole::Tool => {}
                     }
@@ -222,12 +224,14 @@ fn insert_response_items(turns: &mut Vec<TurnView>, response_items: &[ResponseIt
 
 fn insert_projected_turn_messages(turn: &mut TurnView, projected: ProjectedTurnMessages) {
     if let Some(user) = projected.user {
+        let text = user.content.clone();
+        let input = projected_user_input(&user);
         if !turn
             .items
             .iter()
-            .any(|item| matches!(item, ThreadItem::UserMessage { text } if text == &user))
+            .any(|item| matches!(item, ThreadItem::UserMessage { text: existing, .. } if existing == &text))
         {
-            turn.items.insert(0, ThreadItem::UserMessage { text: user });
+            turn.items.insert(0, ThreadItem::UserMessage { text, input });
         }
     }
 
@@ -274,8 +278,34 @@ fn is_projectable_message(message: &ConversationMessage) -> bool {
         return true;
     }
 
+    if matches!(message.role, MessageRole::User)
+        && message.parts.iter().any(ConversationContentPart::is_image)
+    {
+        return true;
+    }
+
     matches!(message.role, MessageRole::Assistant)
         && (!message.reasoning.is_empty() || !message.tool_calls.is_empty())
+}
+
+fn projected_user_input(message: &ConversationMessage) -> Vec<UserInput> {
+    let parts = message.effective_parts();
+    if !parts.iter().any(ConversationContentPart::is_image) {
+        return vec![];
+    }
+
+    parts
+        .into_iter()
+        .map(|part| match part {
+            ConversationContentPart::Text { text } => UserInput::Text { text },
+            ConversationContentPart::LocalImage { path, detail } => {
+                UserInput::LocalImage { path, detail }
+            }
+            ConversationContentPart::ImageUrl { url, detail } => {
+                UserInput::ImageUrl { url, detail }
+            }
+        })
+        .collect()
 }
 
 fn displayable_reasoning_content(message: &ConversationMessage) -> Vec<String> {
@@ -815,7 +845,8 @@ mod tests {
             view.turns[0].items,
             vec![
                 ThreadItem::UserMessage {
-                    text: "你真的没有在思考吗".to_string()
+                    text: "你真的没有在思考吗".to_string(),
+                    input: vec![],
                 },
                 ThreadItem::Reasoning {
                     event_id: None,
@@ -851,13 +882,52 @@ mod tests {
             view.turns[0].items,
             vec![
                 ThreadItem::UserMessage {
-                    text: "hi".to_string()
+                    text: "hi".to_string(),
+                    input: vec![],
                 },
                 ThreadItem::AssistantMessage {
                     event_id: None,
                     text: Some("hello".to_string())
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn thread_view_projects_user_image_input() {
+        let thread_id = ThreadId::new("thread_response_item_with_image");
+        let turn_id = TurnId::new("turn_response_item_with_image");
+        let image_path = std::path::PathBuf::from("/tmp/exagent-input.png");
+        let response_items = vec![ResponseItem::for_turn(
+            turn_id.clone(),
+            ConversationMessage::user_parts(vec![
+                UserInput::Text {
+                    text: "Use this screenshot".to_string(),
+                },
+                UserInput::LocalImage {
+                    path: image_path.clone(),
+                    detail: Some(crate::types::ImageDetail::High),
+                },
+            ]),
+        )];
+
+        let view = build_thread_view(thread_id, ThreadStatus::Idle, None, vec![], &response_items);
+
+        assert_eq!(view.turns.len(), 1);
+        assert_eq!(
+            view.turns[0].items,
+            vec![ThreadItem::UserMessage {
+                text: "Use this screenshot".to_string(),
+                input: vec![
+                    UserInput::Text {
+                        text: "Use this screenshot".to_string()
+                    },
+                    UserInput::LocalImage {
+                        path: image_path,
+                        detail: Some(crate::types::ImageDetail::High)
+                    }
+                ],
+            }]
         );
     }
 
@@ -919,7 +989,8 @@ mod tests {
         assert_eq!(
             view.turns[0].items.first(),
             Some(&ThreadItem::UserMessage {
-                text: "hi 介绍一下你自己吧".to_string()
+                text: "hi 介绍一下你自己吧".to_string(),
+                input: vec![],
             })
         );
         assert_eq!(
@@ -962,7 +1033,8 @@ mod tests {
         assert_eq!(
             view.turns[0].items,
             vec![ThreadItem::UserMessage {
-                text: "visible user message".to_string()
+                text: "visible user message".to_string(),
+                input: vec![],
             }]
         );
     }
@@ -1098,7 +1170,8 @@ mod tests {
             view.turns[0].items,
             vec![
                 ThreadItem::UserMessage {
-                    text: "question A".to_string()
+                    text: "question A".to_string(),
+                    input: vec![],
                 },
                 ThreadItem::AssistantMessage {
                     event_id: None,
@@ -1110,7 +1183,8 @@ mod tests {
             view.turns[1].items,
             vec![
                 ThreadItem::UserMessage {
-                    text: "question B".to_string()
+                    text: "question B".to_string(),
+                    input: vec![],
                 },
                 ThreadItem::AssistantMessage {
                     event_id: None,

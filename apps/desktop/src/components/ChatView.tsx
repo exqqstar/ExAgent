@@ -1,5 +1,6 @@
-import { Blocks, Bug, CircleAlert, FileText } from "lucide-react";
+import { Blocks, Bug, CircleAlert, FileText, FolderPlus } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Button } from "@/components/ui/button";
 import { Composer } from "@/components/Composer";
 import { Inspector } from "@/components/Inspector";
 import { GoalControl } from "@/components/GoalControl";
@@ -64,7 +65,10 @@ function ChatError({ message }: { message: string }) {
 
 function NewSessionState({ state }: { state: WorkbenchState }) {
   const project = state.projects.find((item) => item.id === state.activeProjectId);
-  const projectName = project?.name ?? "ExAgent";
+  if (!project) {
+    return <NoProjectState state={state} />;
+  }
+  const projectName = project.name;
 
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center px-4 py-8">
@@ -97,6 +101,28 @@ function NewSessionState({ state }: { state: WorkbenchState }) {
               <div className="type-body-sm mt-1 text-muted">{prompt.description}</div>
             </button>
           ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NoProjectState({ state }: { state: WorkbenchState }) {
+  return (
+    <div className="flex min-h-0 flex-1 items-center justify-center px-4 py-8">
+      <div className="w-full max-w-[520px] text-center">
+        <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-surface-1 text-muted">
+          <FolderPlus className="h-5 w-5" />
+        </div>
+        <h2 className="type-empty-title mt-5 text-ink">Add a project</h2>
+        <p className="type-body-md mx-auto mt-2 max-w-[360px] text-muted">
+          Choose a folder before starting a session.
+        </p>
+        <div className="mt-5 flex justify-center">
+          <Button type="button" onClick={() => void state.addProject()}>
+            <FolderPlus className="h-4 w-4" />
+            <span>Add project</span>
+          </Button>
         </div>
       </div>
     </div>

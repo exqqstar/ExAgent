@@ -135,6 +135,7 @@ async fn approval_decision_clears_waiting_approval() {
         .turn_start(TurnStartParams {
             thread_id: thread.id.clone(),
             prompt: "try risky command".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -217,6 +218,7 @@ async fn approval_decision_denies_cold_pending_approval_after_restart() {
         .turn_start(TurnStartParams {
             thread_id: thread.id.clone(),
             prompt: "try risky command".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -309,6 +311,7 @@ async fn approval_decision_denies_loaded_cold_pending_approval_after_resume() {
         .turn_start(TurnStartParams {
             thread_id: thread.id.clone(),
             prompt: "try risky command".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -423,6 +426,7 @@ async fn cold_approval_restore_uses_latest_matching_tool_call_id() {
         .turn_start(TurnStartParams {
             thread_id: thread.id.clone(),
             prompt: "first risky command".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -448,6 +452,7 @@ async fn cold_approval_restore_uses_latest_matching_tool_call_id() {
         .turn_start(TurnStartParams {
             thread_id: thread.id.clone(),
             prompt: "second risky command".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -558,6 +563,7 @@ async fn cold_approval_restore_preserves_turn_context_cwd() {
         .turn_start(TurnStartParams {
             thread_id: thread.id.clone(),
             prompt: "try turn cwd command".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: Some(TurnContextOverrides {
@@ -653,6 +659,7 @@ async fn approval_decision_does_not_write_synthetic_tool_message_to_rollout_cont
         .turn_start(TurnStartParams {
             thread_id: thread.id.clone(),
             prompt: "try risky command".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -749,6 +756,7 @@ async fn approved_persistent_command_emits_lifecycle_and_live_output() {
         .turn_start(TurnStartParams {
             thread_id: thread.id.clone(),
             prompt: "try persistent risky command".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,

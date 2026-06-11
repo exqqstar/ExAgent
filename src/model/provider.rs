@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ThinkingMode;
 use crate::model::reasoning::{ReasoningCapabilities, ReasoningProtocol};
+use crate::types::InputModality;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderProfile {
@@ -52,6 +53,21 @@ impl ProviderProfile {
         }
 
         self.default_reasoning_capabilities()
+    }
+
+    pub fn input_modalities_for_model(&self, model_id: &str) -> Vec<InputModality> {
+        if self.is_known_text_only_model(model_id) {
+            vec![InputModality::Text]
+        } else {
+            vec![InputModality::Text, InputModality::Image]
+        }
+    }
+
+    fn is_known_text_only_model(&self, model_id: &str) -> bool {
+        let model_id = model_id.to_ascii_lowercase();
+        self.id == "deepseek"
+            || model_id.starts_with("text-embedding")
+            || model_id.contains("embedding")
     }
 
     fn default_reasoning_capabilities(&self) -> ReasoningCapabilities {
@@ -277,8 +293,8 @@ const PROVIDER_PROFILES: &[ProviderProfile] = &[
         protocol: ProviderProtocol::CopilotOAuth,
         auth_mode: ProviderAuthMode::OAuthRequired,
         default_base_url: "https://api.githubcopilot.com",
-        default_model: "gpt-5.1-copilot",
-        supports_model_discovery: false,
+        default_model: "gpt-5.5",
+        supports_model_discovery: true,
         supports_tools: true,
         supported: true,
         unsupported_reason: None,
@@ -294,4 +310,35 @@ pub fn provider_profile_by_id(provider_id: &str) -> Option<&'static ProviderProf
     PROVIDER_PROFILES
         .iter()
         .find(|profile| profile.id == provider_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::InputModality;
+
+    #[test]
+    fn unknown_models_default_to_text_and_image_input() {
+        let profile = provider_profile_by_id("openai_compatible").unwrap();
+
+        assert_eq!(
+            profile.input_modalities_for_model("local-vision-ish"),
+            vec![InputModality::Text, InputModality::Image]
+        );
+    }
+
+    #[test]
+    fn known_text_only_models_resolve_to_text_input_only() {
+        let deepseek = provider_profile_by_id("deepseek").unwrap();
+        let openai = provider_profile_by_id("openai").unwrap();
+
+        assert_eq!(
+            deepseek.input_modalities_for_model("deepseek-v4-pro"),
+            vec![InputModality::Text]
+        );
+        assert_eq!(
+            openai.input_modalities_for_model("text-embedding-3-small"),
+            vec![InputModality::Text]
+        );
+    }
 }

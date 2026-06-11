@@ -36,6 +36,7 @@ pub async fn execute_cli_command(
                 .turn_start(TurnStartParams {
                     thread_id: thread.thread.id.clone(),
                     prompt,
+                    input: vec![],
                     workspace_root: None,
                     turn_mode: Default::default(),
                     turn_context: None,
@@ -65,6 +66,7 @@ pub async fn execute_cli_command(
                 .turn_start(TurnStartParams {
                     thread_id: resumed.thread.id.clone(),
                     prompt,
+                    input: vec![],
                     workspace_root: None,
                     turn_mode: Default::default(),
                     turn_context: None,

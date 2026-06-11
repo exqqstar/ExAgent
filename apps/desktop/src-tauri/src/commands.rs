@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose, Engine as _};
 use exagent::app_server::desktop_facade::NewProjectRequest;
 use exagent::app_server::protocol::{
     AgentTreeParams, AgentTreeResponse, ApprovalDecisionParams, ApprovalDecisionResponse,
@@ -13,13 +14,17 @@ use exagent::events::{
     redact_runtime_event_for_public_boundary, redact_runtime_events_for_public_boundary,
 };
 use exagent::index_db::{ProjectRecord, ThreadListFilter, ThreadRecord};
+use exagent::model::image_input::{validate_image_bytes_for_prompt, MAX_IMAGE_SOURCE_BYTES};
 use exagent::runtime::turn_mode::TurnMode;
 use exagent::session::ApprovalId;
 use exagent::types::{EventId, ThreadId, TurnId};
 use reqwest::Url;
+use serde::Deserialize;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tauri::{Emitter, State, Window};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 use crate::settings::{
     ChatGptDeviceCode, GitHubCopilotDeviceCode, ProviderConnectionTestRequest,
@@ -30,6 +35,277 @@ use crate::settings::{
 use crate::state::DesktopState;
 
 type CommandResult<T> = Result<T, String>;
+
+const MAX_IMAGE_ATTACHMENT_BYTES: usize = MAX_IMAGE_SOURCE_BYTES;
+
+#[tauri::command]
+pub async fn image_attachments_import(
+    app: AppHandle,
+    paths: Vec<String>,
+) -> CommandResult<Vec<String>> {
+    let cache_root = attachment_cache_root(&app)?;
+    let mut imported = Vec::with_capacity(paths.len());
+
+    for raw_path in paths {
+        let trimmed = raw_path.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let source = PathBuf::from(trimmed);
+        let file_name = attachment_file_name(
+            source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("image"),
+            None,
+        );
+        let source_label = source.display().to_string();
+        let metadata = tokio::fs::metadata(&source)
+            .await
+            .map_err(|err| format!("Could not read selected image `{source_label}`: {err}"))?;
+        validate_attachment_file_size(metadata.len(), &source_label)?;
+        let bytes = tokio::fs::read(&source)
+            .await
+            .map_err(|err| format!("Could not read selected image `{source_label}`: {err}"))?;
+        let cached_path =
+            cache_image_attachment_bytes(&cache_root, file_name, bytes, &source_label).await?;
+        imported.push(cached_path);
+    }
+
+    Ok(imported)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAttachmentBytesImport {
+    file_name: String,
+    mime_type: Option<String>,
+    bytes_base64: String,
+}
+
+#[tauri::command]
+pub async fn image_attachments_import_bytes(
+    app: AppHandle,
+    items: Vec<ImageAttachmentBytesImport>,
+) -> CommandResult<Vec<String>> {
+    let cache_root = attachment_cache_root(&app)?;
+    let mut imported = Vec::with_capacity(items.len());
+
+    for item in items {
+        let mime_type = item.mime_type.as_deref().or(Some("image/png"));
+        let file_name = attachment_file_name(&item.file_name, mime_type);
+        let source_label = if item.file_name.trim().is_empty() {
+            file_name.clone()
+        } else {
+            item.file_name.clone()
+        };
+        let encoded = item.bytes_base64.trim();
+        validate_attachment_base64_size(encoded, &source_label)?;
+        let bytes = general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|err| format!("Could not decode pasted image `{source_label}`: {err}"))?;
+        let cached_path =
+            cache_image_attachment_bytes(&cache_root, file_name, bytes, &source_label).await?;
+        imported.push(cached_path);
+    }
+
+    Ok(imported)
+}
+
+fn attachment_cache_root(app: &AppHandle) -> CommandResult<PathBuf> {
+    Ok(app
+        .path()
+        .app_cache_dir()
+        .map_err(|err| err.to_string())?
+        .join("attachments"))
+}
+
+async fn cache_image_attachment_bytes(
+    cache_root: &Path,
+    file_name: String,
+    bytes: Vec<u8>,
+    source_label: &str,
+) -> CommandResult<String> {
+    validate_attachment_size(bytes.len(), source_label)?;
+    validate_supported_image_attachment(&bytes, source_label)?;
+
+    let hash = attachment_content_hash(&bytes);
+    let target_dir = cache_root.join(format!("{hash:016x}"));
+    tokio::fs::create_dir_all(&target_dir)
+        .await
+        .map_err(|err| {
+            format!(
+                "Could not prepare image attachment cache `{}`: {err}",
+                target_dir.display()
+            )
+        })?;
+
+    let target = target_dir.join(file_name);
+    tokio::fs::write(&target, bytes)
+        .await
+        .map_err(|err| format!("Could not cache selected image `{source_label}`: {err}"))?;
+    Ok(target.to_string_lossy().into_owned())
+}
+
+fn validate_attachment_size(len: usize, source_label: &str) -> CommandResult<()> {
+    validate_attachment_size_bytes(len as u64, source_label)
+}
+
+fn validate_attachment_file_size(len: u64, source_label: &str) -> CommandResult<()> {
+    validate_attachment_size_bytes(len, source_label)
+}
+
+fn validate_attachment_size_bytes(len: u64, source_label: &str) -> CommandResult<()> {
+    if len == 0 {
+        return Err(format!(
+            "Could not cache image `{source_label}`: file is empty"
+        ));
+    }
+    if len > MAX_IMAGE_ATTACHMENT_BYTES as u64 {
+        return Err(format!(
+            "Could not cache image `{source_label}`: {len} bytes exceeds the {MAX_IMAGE_ATTACHMENT_BYTES} byte limit"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_attachment_base64_size(encoded: &str, source_label: &str) -> CommandResult<()> {
+    let decoded_len_upper_bound =
+        base64_decoded_len_upper_bound(encoded.len(), attachment_base64_padding_len(encoded));
+    validate_attachment_base64_decoded_upper_bound(decoded_len_upper_bound, source_label)
+}
+
+fn validate_attachment_base64_decoded_upper_bound(
+    decoded_len_upper_bound: usize,
+    source_label: &str,
+) -> CommandResult<()> {
+    if decoded_len_upper_bound > MAX_IMAGE_ATTACHMENT_BYTES {
+        return Err(format!(
+            "Could not decode pasted image `{source_label}`: encoded payload exceeds the {MAX_IMAGE_ATTACHMENT_BYTES} byte decoded limit"
+        ));
+    }
+    Ok(())
+}
+
+fn attachment_base64_padding_len(encoded: &str) -> usize {
+    encoded
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'=')
+        .take(2)
+        .count()
+}
+
+fn base64_decoded_len_upper_bound(encoded_len: usize, padding_len: usize) -> usize {
+    let remainder = match encoded_len % 4 {
+        0 => 0,
+        2 => 1,
+        3 => 2,
+        _ => 3,
+    };
+    (encoded_len / 4)
+        .saturating_mul(3)
+        .saturating_add(remainder)
+        .saturating_sub(padding_len.min(2))
+}
+
+fn validate_supported_image_attachment(bytes: &[u8], source_label: &str) -> CommandResult<()> {
+    validate_image_bytes_for_prompt(Path::new(source_label), bytes).map_err(|err| {
+        format!(
+            "Could not cache image `{source_label}`: unsupported or invalid image format; expected PNG, JPEG, WebP, or GIF ({err})"
+        )
+    })
+}
+
+fn attachment_content_hash(bytes: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn attachment_file_name(raw_file_name: &str, mime_type: Option<&str>) -> String {
+    let safe = safe_attachment_file_name(raw_file_name);
+
+    if safe.is_empty() {
+        return format!("image.{}", attachment_extension_for_mime(mime_type));
+    }
+
+    let file_name = if Path::new(&safe).extension().is_some() || mime_type.is_none() {
+        safe
+    } else {
+        format!("{safe}.{}", attachment_extension_for_mime(mime_type))
+    };
+
+    avoid_reserved_attachment_file_name(file_name)
+}
+
+fn attachment_extension_for_mime(mime_type: Option<&str>) -> &'static str {
+    let normalized = mime_type.unwrap_or_default().trim().to_ascii_lowercase();
+    let subtype = normalized.strip_prefix("image/").unwrap_or(&normalized);
+    match subtype {
+        "jpeg" | "jpg" => "jpg",
+        "webp" => "webp",
+        "gif" => "gif",
+        _ => "png",
+    }
+}
+
+fn safe_attachment_file_name(file_name: &str) -> String {
+    file_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches(['.', ' ', '_'])
+        .to_string()
+}
+
+fn avoid_reserved_attachment_file_name(file_name: String) -> String {
+    if is_reserved_windows_attachment_name(&file_name) {
+        format!("image_{file_name}")
+    } else {
+        file_name
+    }
+}
+
+fn is_reserved_windows_attachment_name(file_name: &str) -> bool {
+    let stem = file_name
+        .split_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(file_name)
+        .to_ascii_uppercase();
+    matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
 
 #[tauri::command]
 pub async fn project_add(
@@ -402,6 +678,7 @@ pub async fn turn_start(
     project_id: String,
     thread_id: String,
     prompt: String,
+    input: Option<Vec<exagent::types::UserInput>>,
     model: Option<exagent::resolved::ModelRef>,
     thinking_mode: Option<ThinkingMode>,
     clear_thinking_mode: bool,
@@ -435,6 +712,7 @@ pub async fn turn_start(
             TurnStartParams {
                 thread_id: ThreadId::new(thread_id),
                 prompt,
+                input: input.unwrap_or_default(),
                 workspace_root: None,
                 turn_mode: turn_mode.unwrap_or_default(),
                 turn_context,
@@ -786,7 +1064,95 @@ fn error_string(error: anyhow::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_external_http_url;
+    use super::*;
+
+    fn valid_png_attachment_bytes() -> Vec<u8> {
+        general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGPgEpH7DwABpAE8k4sOtwAAAABJRU5ErkJggg==")
+            .unwrap()
+    }
+
+    #[test]
+    fn appends_extension_from_mime_for_byte_imports() {
+        assert_eq!(
+            attachment_file_name("clipboard", Some("image/jpeg")),
+            "clipboard.jpg"
+        );
+        assert_eq!(
+            attachment_file_name("clipboard", Some("image/png")),
+            "clipboard.png"
+        );
+        assert_eq!(attachment_file_name("", Some("image/webp")), "image.webp");
+        assert_eq!(
+            attachment_file_name("shot.png", Some("image/png")),
+            "shot.png"
+        );
+    }
+
+    #[test]
+    fn keeps_path_import_names_unchanged() {
+        assert_eq!(attachment_file_name("photo", None), "photo");
+        assert_eq!(attachment_file_name("photo.jpeg", None), "photo.jpeg");
+    }
+
+    #[test]
+    fn sanitizes_attachment_file_names_strictly() {
+        let sanitized = attachment_file_name("..\\evil:name?", Some("image/png"));
+        assert_eq!(sanitized, "evil_name.png");
+        assert!(!sanitized.contains(['/', '\\', ':']));
+        assert_eq!(
+            attachment_file_name(" \t:/", Some("image/gif")),
+            "image.gif"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_and_oversize_attachments() {
+        assert!(validate_attachment_size(0, "empty.png").is_err());
+        assert!(validate_attachment_size(MAX_IMAGE_ATTACHMENT_BYTES + 1, "huge.png").is_err());
+        assert!(validate_attachment_size(1024, "ok.png").is_ok());
+    }
+
+    #[test]
+    fn rejects_oversized_base64_before_decode() {
+        assert_eq!(base64_decoded_len_upper_bound(4, 0), 3);
+        assert_eq!(base64_decoded_len_upper_bound(4, 1), 2);
+        assert_eq!(base64_decoded_len_upper_bound(4, 2), 1);
+        assert!(validate_attachment_base64_decoded_upper_bound(
+            MAX_IMAGE_ATTACHMENT_BYTES + 1,
+            "huge.png"
+        )
+        .is_err());
+        assert!(validate_attachment_base64_decoded_upper_bound(
+            MAX_IMAGE_ATTACHMENT_BYTES,
+            "ok.png"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validates_supported_image_attachment() {
+        assert!(
+            validate_supported_image_attachment(&valid_png_attachment_bytes(), "image.png").is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_corrupt_image_with_valid_signature() {
+        let error = validate_supported_image_attachment(b"\x89PNG\r\n\x1a\nnot-png", "image.png")
+            .unwrap_err();
+
+        assert!(
+            error.contains("unsupported or invalid image format"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_image_payloads() {
+        assert!(validate_supported_image_attachment(b"not really an image", "image.png").is_err());
+        assert!(validate_supported_image_attachment(b"II*\0rest", "image.tiff").is_err());
+    }
 
     #[test]
     fn external_url_validation_allows_http_and_https() {

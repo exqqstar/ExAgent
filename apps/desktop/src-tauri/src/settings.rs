@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::model_catalog::{capabilities_for_model, catalog_models_for_provider, CatalogReasoning};
 use crate::model_metadata::{self, ModelsDevModelMetadata};
@@ -19,6 +19,9 @@ use exagent::config::{
 use exagent::llm::OpenAiCompatibleLlm;
 use exagent::mcp::config::McpServerConfig;
 use exagent::model::chatgpt_codex::{ChatGptCodexTokenRefreshSink, ChatGptCodexTokenUpdate};
+use exagent::model::github_copilot::{
+    models_endpoint as copilot_models_endpoint, CopilotRequestBuilderExt,
+};
 use exagent::model::reasoning::ReasoningCapabilities;
 use exagent::provider::{provider_profile_by_id, provider_profiles, ProviderProfile};
 use exagent::resolved::{ModelRef, ResolvedModelConfig};
@@ -560,7 +563,17 @@ impl DesktopSettingsStore {
     }
 
     pub async fn load_provider_settings(&self) -> Result<ProviderSettingsResponse> {
-        let file = self.load_file().await?;
+        let mut file = self.load_file().await?;
+        if should_refresh_provider_model_options_on_load(&file, "github_copilot") {
+            if let Ok(Ok(true)) = tokio::time::timeout(
+                Duration::from_secs(5),
+                self.refresh_provider_model_options("github_copilot"),
+            )
+            .await
+            {
+                file = self.load_file().await?;
+            }
+        }
         let credentials = self.provider_credentials_for_file(&file, &file.provider_id)?;
         let active_credential_id = active_credential_id_for_file(&file, &file.provider_id)
             .filter(|credential_id| {
@@ -787,14 +800,101 @@ impl DesktopSettingsStore {
         let tokens = GitHubCopilotOAuthClient::default()
             .complete_device_code(device)
             .await?;
-        self.save_oauth_credential(
-            "github_copilot",
-            "copilot-1",
-            "GitHub Copilot",
-            CredentialAuthMethod::GitHubCopilotOAuth,
-            tokens,
-        )
-        .await
+        let response = self
+            .save_oauth_credential(
+                "github_copilot",
+                "copilot-1",
+                "GitHub Copilot",
+                CredentialAuthMethod::GitHubCopilotOAuth,
+                tokens,
+            )
+            .await?;
+        match self
+            .refresh_provider_model_options("github_copilot")
+            .await?
+        {
+            true => self.load_provider_settings().await,
+            false => Ok(response),
+        }
+    }
+
+    async fn refresh_provider_model_options(&self, provider_id: &str) -> Result<bool> {
+        let Some(provider) = provider_by_id(provider_id) else {
+            return Ok(false);
+        };
+        if !provider.supports_model_discovery {
+            return Ok(false);
+        }
+
+        let file = self.load_file().await?;
+        let Some(config) = effective_provider_config(
+            &file,
+            provider_profile_by_id(provider_id)
+                .with_context(|| format!("unknown provider `{provider_id}`"))?,
+        ) else {
+            return Ok(false);
+        };
+        let response = self
+            .list_provider_models(ProviderModelListRequest {
+                provider_id: provider_id.to_string(),
+                base_url: normalized_or_default(&config.base_url, &provider.default_base_url),
+                api_key: None,
+                use_saved_api_key: false,
+            })
+            .await?;
+        if response.status != ProviderModelListStatus::Success || response.models.is_empty() {
+            return Ok(false);
+        }
+
+        let mut file = self.load_file().await?;
+        let Some(profile) = provider_profile_by_id(provider_id) else {
+            return Ok(false);
+        };
+        let config = effective_provider_config(&file, profile);
+        let current_model = config
+            .as_ref()
+            .map(|config| normalized_or_default(&config.model, profile.default_model))
+            .unwrap_or_else(|| profile.default_model.to_string());
+        let discovered_model_ids = response
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>();
+        let next_model = if discovered_model_ids
+            .iter()
+            .any(|model_id| *model_id == current_model.as_str())
+        {
+            current_model
+        } else if discovered_model_ids
+            .iter()
+            .any(|model_id| *model_id == profile.default_model)
+        {
+            profile.default_model.to_string()
+        } else {
+            response
+                .models
+                .first()
+                .map(|model| model.id.clone())
+                .unwrap_or(current_model)
+        };
+        let next_base_url = config
+            .as_ref()
+            .map(|config| normalized_or_default(&config.base_url, profile.default_base_url))
+            .unwrap_or_else(|| profile.default_base_url.to_string());
+        if file.provider_id == provider_id {
+            file.base_url = next_base_url.clone();
+            file.model = next_model.clone();
+        }
+        file.provider_configs.insert(
+            provider_id.to_string(),
+            ProviderConfigSettings {
+                base_url: next_base_url,
+                model: next_model,
+                model_options: response.models,
+            },
+        );
+        self.save_file(&file).await?;
+        Ok(true)
     }
 
     pub async fn load_runtime_settings(&self) -> Result<RuntimeSettingsResponse> {
@@ -1030,14 +1130,37 @@ impl DesktopSettingsStore {
             ));
         }
 
-        let api_key = self
-            .resolve_provider_api_key(
+        let oauth_bearer = if provider.protocol == ProviderProtocol::CopilotOAuth {
+            let file = self.load_file().await?;
+            self.saved_provider_oauth_tokens(&file, &provider.id)?
+                .map(|(_, tokens)| tokens.access_token)
+        } else {
+            None
+        };
+        let api_key = if provider.protocol == ProviderProtocol::CopilotOAuth {
+            None
+        } else {
+            self.resolve_provider_api_key(
                 &request.provider_id,
                 request.api_key.as_deref(),
                 request.use_saved_api_key,
             )
-            .await?;
-        if auth_required(provider.auth_mode) && api_key.is_none() {
+            .await?
+        };
+        if provider.protocol == ProviderProtocol::CopilotOAuth && oauth_bearer.is_none() {
+            return Ok(model_list_response(
+                ProviderModelListStatus::MissingCredential,
+                format!(
+                    "{} requires GitHub Copilot OAuth to discover models.",
+                    provider.name
+                ),
+                Vec::new(),
+            ));
+        }
+        if auth_required(provider.auth_mode)
+            && provider.protocol != ProviderProtocol::CopilotOAuth
+            && api_key.is_none()
+        {
             return Ok(model_list_response(
                 ProviderModelListStatus::MissingCredential,
                 format!("{} requires an API key to discover models.", provider.name),
@@ -1070,11 +1193,14 @@ impl DesktopSettingsStore {
                 )
                 .await
             }
-            _ => Ok(model_list_response(
-                ProviderModelListStatus::UnsupportedProvider,
-                format!("{} model discovery is not implemented yet.", provider.name),
-                Vec::new(),
-            )),
+            ProviderProtocol::CopilotOAuth => {
+                list_github_copilot_models(
+                    &provider,
+                    &normalized_or_default(&request.base_url, &provider.default_base_url),
+                    oauth_bearer.expect("Copilot OAuth token should be resolved"),
+                )
+                .await
+            }
         }?;
         if response.status == ProviderModelListStatus::Success {
             response.models = self
@@ -1673,6 +1799,31 @@ fn provider_credentials_referenced(file: &SettingsFile, provider_id: &str) -> bo
         .is_some_and(|collection| {
             collection.active_credential_id.is_some() || !collection.credentials.is_empty()
         })
+}
+
+fn should_refresh_provider_model_options_on_load(file: &SettingsFile, provider_id: &str) -> bool {
+    if file.provider_id != provider_id || !provider_credentials_referenced(file, provider_id) {
+        return false;
+    }
+    let Some(profile) = provider_profile_by_id(provider_id) else {
+        return false;
+    };
+    let Some(config) = effective_provider_config(file, profile) else {
+        return false;
+    };
+    let provider_models = config
+        .model_options
+        .iter()
+        .filter(|model| model.provider_id == provider_id)
+        .collect::<Vec<_>>();
+    let current_model = normalized_or_default(&config.model, profile.default_model);
+    provider_models.is_empty()
+        || !provider_models
+            .iter()
+            .any(|model| model.id == current_model)
+        || provider_models
+            .iter()
+            .all(|model| model.id == profile.default_model)
 }
 
 #[async_trait]
@@ -2633,6 +2784,65 @@ async fn list_gemini_models(
     ))
 }
 
+async fn list_github_copilot_models(
+    provider: &ProviderDescriptor,
+    base_url: &str,
+    oauth_token: String,
+) -> Result<ProviderModelListResponse> {
+    let response = match reqwest::Client::new()
+        .get(copilot_models_endpoint(base_url))
+        .bearer_auth(oauth_token)
+        .copilot_headers()
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return Ok(model_list_response(
+                ProviderModelListStatus::NetworkError,
+                format!("Failed to reach {} models endpoint: {error}", provider.name),
+                Vec::new(),
+            ));
+        }
+    };
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Ok(model_list_response(
+            status_to_model_list_status(status),
+            provider_error_message(status, &body),
+            Vec::new(),
+        ));
+    }
+
+    let value: Value = match serde_json::from_str(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(model_list_response(
+                ProviderModelListStatus::ProviderError,
+                format!("Provider returned invalid JSON: {error}"),
+                Vec::new(),
+            ));
+        }
+    };
+    let models = match parse_copilot_model_list(provider, value) {
+        Ok(models) => models,
+        Err(error) => {
+            return Ok(model_list_response(
+                ProviderModelListStatus::ProviderError,
+                format!("Provider returned an invalid model list: {error}"),
+                Vec::new(),
+            ));
+        }
+    };
+
+    Ok(model_list_response(
+        ProviderModelListStatus::Success,
+        "Model discovery succeeded.".to_string(),
+        models,
+    ))
+}
+
 fn chat_completions_endpoint(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     if trimmed.ends_with("/chat/completions") {
@@ -2757,6 +2967,82 @@ fn parse_gemini_model_list(
         ));
     }
     Ok(models)
+}
+
+fn parse_copilot_model_list(
+    provider: &ProviderDescriptor,
+    value: Value,
+) -> Result<Vec<ProviderModelView>> {
+    let data = value
+        .get("data")
+        .or_else(|| value.get("models"))
+        .and_then(Value::as_array)
+        .context("missing `data` array")?;
+    let mut models = Vec::with_capacity(data.len());
+    for model in data {
+        if model.get("model_picker_enabled").and_then(Value::as_bool) == Some(false)
+            || model.get("available").and_then(Value::as_bool) == Some(false)
+        {
+            continue;
+        }
+
+        let id = model
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .context("model entry is missing `id`")?;
+        let display_name = ["name", "display_name", "displayName", "label"]
+            .iter()
+            .filter_map(|key| model.get(key).and_then(Value::as_str))
+            .map(str::trim)
+            .find(|name| !name.is_empty())
+            .unwrap_or(id);
+        let context_window = first_nested_i64(
+            model,
+            &[
+                &["capabilities", "limits", "max_context_window_tokens"],
+                &["capabilities", "limits", "max_prompt_tokens"],
+                &["limits", "max_context_window_tokens"],
+                &["limits", "max_prompt_tokens"],
+                &["context_window"],
+            ],
+        );
+        let supports_tools = first_nested_bool(
+            model,
+            &[
+                &["capabilities", "supports", "tool_calls"],
+                &["supports", "tool_calls"],
+                &["tool_calls"],
+            ],
+        )
+        .or(Some(provider.supports_tools));
+        models.push(provider_model_view(
+            provider,
+            id,
+            display_name,
+            context_window,
+            supports_tools,
+        ));
+    }
+    Ok(models)
+}
+
+fn first_nested_i64(value: &Value, paths: &[&[&str]]) -> Option<i64> {
+    paths
+        .iter()
+        .find_map(|path| nested_value(value, path)?.as_i64())
+}
+
+fn first_nested_bool(value: &Value, paths: &[&[&str]]) -> Option<bool> {
+    paths
+        .iter()
+        .find_map(|path| nested_value(value, path)?.as_bool())
+}
+
+fn nested_value<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
 }
 
 fn status_to_connection_status(status: StatusCode, body: &str) -> ProviderConnectionStatus {

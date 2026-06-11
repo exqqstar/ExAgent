@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -180,10 +182,92 @@ pub enum MessageRole {
     Tool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageDetail {
+    Auto,
+    Low,
+    High,
+    Original,
+}
+
+impl Default for ImageDetail {
+    fn default() -> Self {
+        Self::High
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum InputModality {
+    Text,
+    Image,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ConversationContentPart {
+    Text {
+        text: String,
+    },
+    LocalImage {
+        path: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ImageDetail>,
+    },
+    ImageUrl {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ImageDetail>,
+    },
+}
+
+impl ConversationContentPart {
+    pub fn is_image(&self) -> bool {
+        matches!(self, Self::LocalImage { .. } | Self::ImageUrl { .. })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UserInput {
+    Text {
+        text: String,
+    },
+    LocalImage {
+        path: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ImageDetail>,
+    },
+    ImageUrl {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ImageDetail>,
+    },
+}
+
+impl UserInput {
+    pub fn is_image(&self) -> bool {
+        matches!(self, Self::LocalImage { .. } | Self::ImageUrl { .. })
+    }
+
+    fn into_content_part(self) -> ConversationContentPart {
+        match self {
+            Self::Text { text } => ConversationContentPart::Text { text },
+            Self::LocalImage { path, detail } => {
+                ConversationContentPart::LocalImage { path, detail }
+            }
+            Self::ImageUrl { url, detail } => ConversationContentPart::ImageUrl { url, detail },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConversationMessage {
     pub role: MessageRole,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<ConversationContentPart>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -201,6 +285,7 @@ impl ConversationMessage {
         Self {
             role: MessageRole::System,
             content: content.into(),
+            parts: vec![],
             tool_call_id: None,
             tool_calls: vec![],
             reasoning: vec![],
@@ -220,6 +305,7 @@ impl ConversationMessage {
         Self {
             role: MessageRole::User,
             content: content.into(),
+            parts: vec![],
             tool_call_id: None,
             tool_calls: vec![],
             reasoning: vec![],
@@ -248,6 +334,7 @@ impl ConversationMessage {
         Self {
             role: MessageRole::Assistant,
             content: content.unwrap_or_default(),
+            parts: vec![],
             tool_call_id: None,
             tool_calls,
             reasoning,
@@ -260,6 +347,7 @@ impl ConversationMessage {
         Self {
             role: MessageRole::Tool,
             content: content.into(),
+            parts: vec![],
             tool_call_id: Some(tool_call_id.into()),
             tool_calls: vec![],
             reasoning: vec![],
@@ -267,10 +355,55 @@ impl ConversationMessage {
             internal_source: None,
         }
     }
+
+    pub fn user_parts(input: Vec<UserInput>) -> Self {
+        let parts: Vec<ConversationContentPart> = input
+            .into_iter()
+            .map(UserInput::into_content_part)
+            .collect();
+        Self {
+            role: MessageRole::User,
+            content: text_preview_from_parts(&parts),
+            parts,
+            tool_call_id: None,
+            tool_calls: vec![],
+            reasoning: vec![],
+            injected: false,
+            internal_source: None,
+        }
+    }
+
+    pub fn effective_parts(&self) -> Vec<ConversationContentPart> {
+        if !self.parts.is_empty() {
+            return self.parts.clone();
+        }
+        if self.content.is_empty() {
+            return vec![];
+        }
+        vec![ConversationContentPart::Text {
+            text: self.content.clone(),
+        }]
+    }
+
+    pub fn sync_content_from_parts(&mut self) {
+        self.content = text_preview_from_parts(&self.parts);
+    }
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+pub fn text_preview_from_parts(parts: &[ConversationContentPart]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ConversationContentPart::Text { text } => Some(text.as_str()),
+            ConversationContentPart::LocalImage { .. }
+            | ConversationContentPart::ImageUrl { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -435,6 +568,54 @@ mod tests {
         .unwrap();
 
         assert_eq!(tool_call.thought_signature, None);
+    }
+
+    #[test]
+    fn legacy_conversation_message_deserializes_without_parts() {
+        let value = serde_json::json!({
+            "role": "user",
+            "content": "legacy prompt"
+        });
+
+        let message: ConversationMessage = serde_json::from_value(value).unwrap();
+
+        assert_eq!(message.role, MessageRole::User);
+        assert_eq!(message.content, "legacy prompt");
+        assert!(message.parts.is_empty());
+        assert_eq!(
+            message.effective_parts(),
+            vec![ConversationContentPart::Text {
+                text: "legacy prompt".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn user_input_parts_preserve_text_preview_and_images() {
+        let message = ConversationMessage::user_parts(vec![
+            UserInput::Text {
+                text: "describe this".to_string(),
+            },
+            UserInput::LocalImage {
+                path: std::path::PathBuf::from("/tmp/screen.png"),
+                detail: Some(ImageDetail::High),
+            },
+        ]);
+
+        assert_eq!(message.role, MessageRole::User);
+        assert_eq!(message.content, "describe this");
+        assert_eq!(
+            message.parts,
+            vec![
+                ConversationContentPart::Text {
+                    text: "describe this".to_string()
+                },
+                ConversationContentPart::LocalImage {
+                    path: std::path::PathBuf::from("/tmp/screen.png"),
+                    detail: Some(ImageDetail::High),
+                },
+            ]
+        );
     }
 
     #[test]

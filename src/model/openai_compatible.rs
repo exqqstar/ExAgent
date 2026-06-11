@@ -13,9 +13,11 @@ use super::openai_reasoning::{
 use super::reasoning::{ReasoningCapabilities, ReasoningProtocol};
 use super::resolved::{ResolvedCredential, ResolvedModelConfig};
 use crate::config::ThinkingMode;
+use crate::model::image_input::load_local_image_for_prompt;
 use crate::tools::{ToolSpec, ToolSpecKind};
 use crate::types::{
-    AssistantTurn, ConversationMessage, LlmCompletion, MessageRole, TokenUsage, ToolCall,
+    AssistantTurn, ConversationContentPart, ConversationMessage, ImageDetail, LlmCompletion,
+    MessageRole, TokenUsage, ToolCall,
 };
 
 pub struct OpenAiCompatibleLlm {
@@ -189,6 +191,7 @@ pub(crate) fn build_openai_chat_completion_request_value(
     apply_openai_reasoning(&mut request, reasoning_capabilities, options.thinking_mode);
     if stream {
         request["stream"] = Value::Bool(true);
+        request["stream_options"] = json!({ "include_usage": true });
     }
     Ok(request)
 }
@@ -344,8 +347,16 @@ impl ChatCompletionStreamParser {
             }
 
             for choice in chunk.choices {
-                self.apply_delta(choice.delta, sink).await?;
-                if choice.finish_reason.is_some() {
+                let ChatCompletionStreamChoice {
+                    delta,
+                    finish_reason,
+                    usage,
+                } = choice;
+                if let Some(usage) = usage {
+                    self.token_usage = Some(TokenUsage::from(usage));
+                }
+                self.apply_delta(delta, sink).await?;
+                if finish_reason.is_some() {
                     self.done = true;
                 }
             }
@@ -466,6 +477,7 @@ struct ChatCompletionStreamChoice {
     #[serde(default)]
     delta: ChatCompletionDelta,
     finish_reason: Option<Value>,
+    usage: Option<ChatUsage>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -719,7 +731,7 @@ fn build_request_messages(
             })),
             MessageRole::User => Ok(json!({
                 "role": "user",
-                "content": message.content,
+                "content": build_user_content(message),
             })),
             MessageRole::Assistant => {
                 let mut assistant = Map::new();
@@ -767,11 +779,65 @@ fn build_request_messages(
         .collect()
 }
 
+fn build_user_content(message: &ConversationMessage) -> Value {
+    let parts = message.effective_parts();
+    if parts
+        .iter()
+        .all(|part| matches!(part, ConversationContentPart::Text { .. }))
+    {
+        return json!(message.content);
+    }
+
+    let content = parts
+        .into_iter()
+        .filter_map(|part| match part {
+            ConversationContentPart::Text { text } => {
+                (!text.is_empty()).then(|| json!({ "type": "text", "text": text }))
+            }
+            ConversationContentPart::ImageUrl { url, detail } => {
+                Some(openai_image_url_part(url, detail))
+            }
+            ConversationContentPart::LocalImage { path, detail } => {
+                match load_local_image_for_prompt(&path, detail.unwrap_or_default()) {
+                    Ok(encoded) => Some(openai_image_url_part(encoded.data_url, detail)),
+                    Err(err) => Some(json!({
+                        "type": "text",
+                        "text": format!("image unavailable: {err}")
+                    })),
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Value::Array(content)
+}
+
+fn openai_image_url_part(url: String, detail: Option<ImageDetail>) -> Value {
+    let mut image_url = Map::new();
+    image_url.insert("url".to_string(), json!(url));
+    if let Some(detail) = detail.and_then(openai_image_detail) {
+        image_url.insert("detail".to_string(), json!(detail));
+    }
+    json!({
+        "type": "image_url",
+        "image_url": Value::Object(image_url),
+    })
+}
+
+fn openai_image_detail(detail: ImageDetail) -> Option<&'static str> {
+    match detail {
+        ImageDetail::Auto | ImageDetail::Original => Some("auto"),
+        ImageDetail::Low => Some("low"),
+        ImageDetail::High => Some("high"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::ThinkingMode;
     use crate::tools::ToolSpec;
+    use crate::types::{ImageDetail, UserInput};
 
     #[test]
     fn chat_completion_request_keeps_reasoning_fields_out_of_base_dto() {
@@ -849,5 +915,54 @@ mod tests {
             value["tools"][0]["function"]["parameters"]["properties"]["path"]["type"],
             "string"
         );
+    }
+
+    #[test]
+    fn chat_completion_request_serializes_user_image_url_parts() {
+        let message = ConversationMessage::user_parts(vec![
+            UserInput::Text {
+                text: "describe".to_string(),
+            },
+            UserInput::ImageUrl {
+                url: "data:image/png;base64,AAA".to_string(),
+                detail: Some(ImageDetail::High),
+            },
+        ]);
+
+        let messages = build_request_messages(&[message], false).unwrap();
+
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(
+            messages[0]["content"],
+            json!([
+                { "type": "text", "text": "describe" },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,AAA",
+                        "detail": "high"
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completion_request_degrades_missing_local_image_to_text_part() {
+        let message = ConversationMessage::user_parts(vec![UserInput::LocalImage {
+            path: std::path::PathBuf::from("/tmp/definitely-missing-exagent-image.png"),
+            detail: Some(ImageDetail::High),
+        }]);
+
+        let messages = build_request_messages(&[message], false).unwrap();
+
+        assert_eq!(messages[0]["role"], "user");
+        let content = messages[0]["content"].as_array().expect("content parts");
+        assert!(content.iter().any(|part| {
+            part["type"] == "text"
+                && part["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("image unavailable"))
+        }));
     }
 }

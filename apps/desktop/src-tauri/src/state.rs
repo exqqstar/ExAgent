@@ -237,6 +237,7 @@ mod tests {
                 TurnStartParams {
                     thread_id: thread.id,
                     prompt: "hello".into(),
+                    input: vec![],
                     workspace_root: None,
                     turn_mode: Default::default(),
                     turn_context: Some(TurnContextOverrides {

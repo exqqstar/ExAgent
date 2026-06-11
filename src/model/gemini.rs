@@ -8,10 +8,11 @@ use serde_json::Value;
 use super::llm::{LlmClient, LlmRequestOptions};
 use super::resolved::{ResolvedCredential, ResolvedModelConfig};
 use crate::config::ThinkingMode;
+use crate::model::image_input::load_local_image_for_prompt;
 use crate::tools::{ToolSpec, ToolSpecKind};
 use crate::types::{
-    AssistantTurn, ConversationMessage, LlmCompletion, MessageRole, ReasoningBlock,
-    ReasoningSignature, TokenUsage, ToolCall,
+    AssistantTurn, ConversationContentPart, ConversationMessage, LlmCompletion, MessageRole,
+    ReasoningBlock, ReasoningSignature, TokenUsage, ToolCall,
 };
 
 pub struct GeminiLlm {
@@ -219,6 +220,25 @@ struct GeminiPart {
     thought_signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thought: Option<bool>,
+    #[serde(rename = "inlineData", skip_serializing_if = "Option::is_none")]
+    inline_data: Option<GeminiInlineData>,
+    #[serde(rename = "fileData", skip_serializing_if = "Option::is_none")]
+    file_data: Option<GeminiFileData>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiInlineData {
+    #[serde(rename = "mimeType")]
+    mime_type: String,
+    data: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiFileData {
+    #[serde(rename = "fileUri")]
+    file_uri: String,
+    #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
+    mime_type: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -342,7 +362,7 @@ fn build_gemini_request(
             }
             MessageRole::User => contents.push(GeminiContent {
                 role: "user",
-                parts: vec![GeminiPart::text(message.content.clone(), None)],
+                parts: gemini_user_parts(message),
             }),
             MessageRole::Assistant => {
                 let mut parts = Vec::new();
@@ -453,6 +473,46 @@ fn push_gemini_unsigned_text_part(parts: &mut Vec<GeminiPart>, text: &str) {
     }
 }
 
+fn gemini_user_parts(message: &ConversationMessage) -> Vec<GeminiPart> {
+    message
+        .effective_parts()
+        .into_iter()
+        .filter_map(|part| match part {
+            ConversationContentPart::Text { text } => {
+                (!text.is_empty()).then(|| GeminiPart::text(text, None))
+            }
+            ConversationContentPart::ImageUrl { url, .. } => Some(gemini_image_url_part(url)),
+            ConversationContentPart::LocalImage { path, detail } => {
+                match load_local_image_for_prompt(&path, detail.unwrap_or_default()) {
+                    Ok(encoded) => Some(GeminiPart::inline_data(encoded.mime, encoded.base64_data)),
+                    Err(err) => Some(GeminiPart::text(format!("image unavailable: {err}"), None)),
+                }
+            }
+        })
+        .collect()
+}
+
+fn gemini_image_url_part(url: String) -> GeminiPart {
+    if let Some((mime_type, data)) = parse_data_url(&url) {
+        GeminiPart::inline_data(mime_type, data)
+    } else {
+        GeminiPart::file_data(url, None)
+    }
+}
+
+fn parse_data_url(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("data:")?;
+    let (metadata, data) = rest.split_once(',')?;
+    if !metadata.ends_with(";base64") {
+        return None;
+    }
+    let mime_type = metadata.trim_end_matches(";base64");
+    if mime_type.is_empty() || data.is_empty() {
+        return None;
+    }
+    Some((mime_type.to_string(), data.to_string()))
+}
+
 impl GeminiPart {
     fn text(text: String, thought_signature: Option<String>) -> Self {
         Self {
@@ -461,6 +521,8 @@ impl GeminiPart {
             function_response: None,
             thought_signature,
             thought: None,
+            inline_data: None,
+            file_data: None,
         }
     }
 
@@ -471,6 +533,8 @@ impl GeminiPart {
             function_response: None,
             thought_signature,
             thought: Some(true),
+            inline_data: None,
+            file_data: None,
         }
     }
 
@@ -481,6 +545,8 @@ impl GeminiPart {
             function_response: None,
             thought_signature,
             thought: None,
+            inline_data: None,
+            file_data: None,
         }
     }
 
@@ -494,6 +560,35 @@ impl GeminiPart {
             }),
             thought_signature: None,
             thought: None,
+            inline_data: None,
+            file_data: None,
+        }
+    }
+
+    fn inline_data(mime_type: String, data: String) -> Self {
+        Self {
+            text: None,
+            function_call: None,
+            function_response: None,
+            thought_signature: None,
+            thought: None,
+            inline_data: Some(GeminiInlineData { mime_type, data }),
+            file_data: None,
+        }
+    }
+
+    fn file_data(file_uri: String, mime_type: Option<String>) -> Self {
+        Self {
+            text: None,
+            function_call: None,
+            function_response: None,
+            thought_signature: None,
+            thought: None,
+            inline_data: None,
+            file_data: Some(GeminiFileData {
+                file_uri,
+                mime_type,
+            }),
         }
     }
 }
@@ -569,4 +664,66 @@ fn build_gemini_tools(tools: &[ToolSpec]) -> Result<Vec<GeminiTool>> {
     Ok(vec![GeminiTool {
         function_declarations,
     }])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    use crate::types::{ImageDetail, UserInput};
+
+    #[test]
+    fn request_serializes_user_image_url_parts() {
+        let message = ConversationMessage::user_parts(vec![
+            UserInput::Text {
+                text: "describe".to_string(),
+            },
+            UserInput::ImageUrl {
+                url: "data:image/png;base64,AAA".to_string(),
+                detail: Some(ImageDetail::High),
+            },
+        ]);
+
+        let request = build_gemini_request(
+            "gemini-3-pro-preview",
+            &[message],
+            &[],
+            &LlmRequestOptions::default(),
+        )
+        .unwrap();
+        let value = serde_json::to_value(request).unwrap();
+
+        assert_eq!(
+            value["contents"][0]["parts"],
+            json!([
+                { "text": "describe" },
+                { "inlineData": { "mimeType": "image/png", "data": "AAA" } }
+            ])
+        );
+    }
+
+    #[test]
+    fn request_degrades_missing_local_image_to_text_part() {
+        let message = ConversationMessage::user_parts(vec![UserInput::LocalImage {
+            path: std::path::PathBuf::from("/tmp/definitely-missing-exagent-image.png"),
+            detail: Some(ImageDetail::High),
+        }]);
+
+        let request = build_gemini_request(
+            "gemini-3-pro-preview",
+            &[message],
+            &[],
+            &LlmRequestOptions::default(),
+        )
+        .unwrap();
+        let value = serde_json::to_value(request).unwrap();
+        let parts = value["contents"][0]["parts"].as_array().expect("parts");
+
+        assert!(parts.iter().any(|part| {
+            part["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("image unavailable"))
+        }));
+    }
 }

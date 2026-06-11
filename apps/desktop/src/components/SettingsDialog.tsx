@@ -4,6 +4,7 @@ import {
   Archive,
   ArrowLeft,
   Check,
+  ChevronDown,
   ExternalLink,
   KeyRound,
   Monitor,
@@ -82,6 +83,11 @@ type ProviderPreset = {
   defaultModel?: string;
 };
 
+type BaseUrlPreset = {
+  labelKey: TranslationKey;
+  url: string;
+};
+
 const settingsSections = [
   { id: "general", labelKey: "settings.sections.general", icon: Settings2 },
   { id: "providers", labelKey: "settings.sections.providers", icon: KeyRound },
@@ -98,6 +104,17 @@ const openAiAuthModeOptions = [
   title?: string;
   titleKey?: TranslationKey;
 }>;
+
+const kimiBaseUrlPresets: BaseUrlPreset[] = [
+  {
+    labelKey: "settings.connection.baseUrlPresetInternational",
+    url: "https://api.moonshot.ai/v1",
+  },
+  {
+    labelKey: "settings.connection.baseUrlPresetMainlandChina",
+    url: "https://api.moonshot.cn/v1",
+  },
+];
 
 export function SettingsDialog({
   open,
@@ -1262,6 +1279,14 @@ function RuntimeProviderForm({
   onTestConnection: () => void;
   t: (key: TranslationKey) => string;
 }) {
+  const baseUrlPresets = provider.id === "kimi" ? kimiBaseUrlPresets : [];
+  const [baseUrlPresetMenuOpen, setBaseUrlPresetMenuOpen] = useState(false);
+
+  function selectBaseUrlPreset(url: string) {
+    onBaseUrlChange(url);
+    setBaseUrlPresetMenuOpen(false);
+  }
+
   return (
     <form
       className="mt-6 space-y-4"
@@ -1288,14 +1313,58 @@ function RuntimeProviderForm({
 
       <div className="grid gap-4">
         {showEndpointFields ? (
-          <label className="type-label-md grid gap-2 text-muted">
-            {t("settings.connection.baseUrl")}
-            <Input
-              className="type-body-lg h-10"
-              value={baseUrl}
-              onChange={(event) => onBaseUrlChange(event.target.value)}
-            />
-          </label>
+          <div className="type-label-md grid gap-2 text-muted">
+            <label htmlFor="provider-base-url">
+              {t("settings.connection.baseUrl")}
+            </label>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Input
+                id="provider-base-url"
+                className="type-body-lg h-10 min-w-0 flex-1"
+                value={baseUrl}
+                onChange={(event) => onBaseUrlChange(event.target.value)}
+              />
+              {baseUrlPresets.length ? (
+                <div className="relative">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="h-10 w-full sm:w-auto"
+                    aria-expanded={baseUrlPresetMenuOpen}
+                    aria-haspopup="menu"
+                    aria-label={t("settings.connection.baseUrlPresetsAria")}
+                    onClick={() =>
+                      setBaseUrlPresetMenuOpen((open) => !open)
+                    }
+                  >
+                    {t("settings.connection.baseUrlPresets")}
+                    <ChevronDown className="h-4 w-4" />
+                  </Button>
+                  {baseUrlPresetMenuOpen ? (
+                    <div
+                      role="menu"
+                      className="absolute right-0 top-[calc(100%+6px)] z-50 w-64 rounded-md border border-border bg-surface-2 p-1 text-ink shadow-panel"
+                    >
+                      {baseUrlPresets.map((preset) => (
+                        <button
+                          key={preset.url}
+                          type="button"
+                          role="menuitem"
+                          className="type-body-md flex w-full flex-col items-start gap-1 rounded px-2 py-1.5 text-left outline-none transition-colors hover:bg-surface-3 focus:bg-surface-3"
+                          onClick={() => selectBaseUrlPreset(preset.url)}
+                        >
+                          <span>{t(preset.labelKey)}</span>
+                          <span className="type-label-sm text-subtle">
+                            {preset.url}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </div>
         ) : null}
         <div className="type-label-md grid gap-2 text-muted">
           <label htmlFor="provider-model">

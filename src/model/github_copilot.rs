@@ -11,6 +11,12 @@ use super::resolved::{ResolvedCredential, ResolvedModelConfig};
 use crate::tools::ToolSpec;
 use crate::types::{ConversationMessage, LlmCompletion};
 
+pub const COPILOT_INTEGRATION_ID: &str = "vscode-chat";
+pub const COPILOT_EDITOR_VERSION: &str = "vscode/1.104.1";
+pub const COPILOT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.35.0";
+pub const COPILOT_USER_AGENT: &str = "ExAgent";
+pub const COPILOT_OPENAI_INTENT: &str = "conversation-edits";
+
 pub struct GitHubCopilotLlm {
     client: reqwest::Client,
     endpoint: String,
@@ -76,8 +82,7 @@ impl LlmClient for GitHubCopilotLlm {
             .client
             .post(&self.endpoint)
             .bearer_auth(&self.token)
-            .header("User-Agent", "exagent")
-            .header("Openai-Intent", "conversation-edits")
+            .copilot_headers()
             .header("x-initiator", "user")
             .json(&request)
             .send()
@@ -109,12 +114,36 @@ impl LlmClient for GitHubCopilotLlm {
     }
 }
 
+pub trait CopilotRequestBuilderExt {
+    fn copilot_headers(self) -> Self;
+}
+
+impl CopilotRequestBuilderExt for reqwest::RequestBuilder {
+    fn copilot_headers(self) -> Self {
+        self.header("User-Agent", COPILOT_USER_AGENT)
+            .header("Copilot-Integration-Id", COPILOT_INTEGRATION_ID)
+            .header("Editor-Version", COPILOT_EDITOR_VERSION)
+            .header("Editor-Plugin-Version", COPILOT_EDITOR_PLUGIN_VERSION)
+            .header("Openai-Intent", COPILOT_OPENAI_INTENT)
+            .header("x-github-api-version", "2025-04-01")
+    }
+}
+
 fn chat_completions_endpoint(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     if trimmed.ends_with("/chat/completions") {
         trimmed.to_string()
     } else {
         format!("{trimmed}/chat/completions")
+    }
+}
+
+pub fn models_endpoint(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/models") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/models")
     }
 }
 
@@ -153,6 +182,18 @@ mod tests {
                             .and_then(|header| header.to_str().ok()),
                         Some("conversation-edits")
                     );
+                    assert_eq!(
+                        headers
+                            .get("Copilot-Integration-Id")
+                            .and_then(|header| header.to_str().ok()),
+                        Some("vscode-chat")
+                    );
+                    assert_eq!(
+                        headers
+                            .get("Editor-Version")
+                            .and_then(|header| header.to_str().ok()),
+                        Some("vscode/1.104.1")
+                    );
                     app_saw_headers.store(true, Ordering::SeqCst);
                     Json(json!({
                         "choices": [{
@@ -173,7 +214,7 @@ mod tests {
 
         let config = ResolvedModelConfig::from_provider_profile(
             "github_copilot",
-            "gpt-5.1-copilot",
+            "gpt-5.5",
             Some(format!("http://{addr}")),
             ResolvedCredential::BearerToken("copilot-token-1".to_string()),
             None,

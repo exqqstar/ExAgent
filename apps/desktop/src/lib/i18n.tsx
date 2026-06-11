@@ -8,6 +8,11 @@ export type TranslationKey =
   | "composer.actions.planMode"
   | "composer.actions.goal"
   | "composer.actions.plugins"
+  | "composer.attachments.imageInputUnavailable"
+  | "composer.attachments.selectedImages"
+  | "composer.attachments.textOnly"
+  | "composer.model.configureProvider"
+  | "composer.model.configureProviderDescription"
   | "settings.title"
   | "settings.description"
   | "settings.sections.general"
@@ -62,6 +67,10 @@ export type TranslationKey =
   | "settings.connection.compatibleDescription"
   | "settings.connection.apiKeyDescription"
   | "settings.connection.baseUrl"
+  | "settings.connection.baseUrlPresets"
+  | "settings.connection.baseUrlPresetsAria"
+  | "settings.connection.baseUrlPresetInternational"
+  | "settings.connection.baseUrlPresetMainlandChina"
   | "settings.connection.model"
   | "settings.connection.discovering"
   | "settings.connection.discoverModels"
@@ -127,11 +136,16 @@ const localeStorageKey = "exagent.locale";
 
 const translations: Record<Locale, Record<TranslationKey, string>> = {
   en: {
-    "composer.actions.addPhotosAndFiles": "Add photos and files",
+    "composer.actions.addPhotosAndFiles": "Add photos",
     "composer.actions.attachChrome": "Attach Google Chrome",
     "composer.actions.planMode": "Plan mode",
     "composer.actions.goal": "Goal",
     "composer.actions.plugins": "Plugins",
+    "composer.attachments.imageInputUnavailable": "Selected model accepts text only. Remove photos or choose a vision-capable model.",
+    "composer.attachments.selectedImages": "Selected photos",
+    "composer.attachments.textOnly": "Text only",
+    "composer.model.configureProvider": "Configure provider",
+    "composer.model.configureProviderDescription": "Configure a provider to choose a model.",
     "settings.title": "Settings",
     "settings.description": "Configure ExAgent runtime behavior.",
     "settings.sections.general": "General",
@@ -186,6 +200,10 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "settings.connection.compatibleDescription": "Enter the OpenAI-compatible endpoint for this provider, with an optional API key.",
     "settings.connection.apiKeyDescription": "Enter your API key to connect this provider.",
     "settings.connection.baseUrl": "Base URL",
+    "settings.connection.baseUrlPresets": "Presets",
+    "settings.connection.baseUrlPresetsAria": "Base URL presets",
+    "settings.connection.baseUrlPresetInternational": "International",
+    "settings.connection.baseUrlPresetMainlandChina": "Mainland China",
     "settings.connection.model": "Model",
     "settings.connection.discovering": "Discovering",
     "settings.connection.discoverModels": "Discover models",
@@ -242,11 +260,16 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "common.close": "Close"
   },
   zh: {
-    "composer.actions.addPhotosAndFiles": "添加照片和文件",
+    "composer.actions.addPhotosAndFiles": "添加照片",
     "composer.actions.attachChrome": "附加 Google Chrome",
     "composer.actions.planMode": "计划模式",
     "composer.actions.goal": "追求目标",
     "composer.actions.plugins": "插件",
+    "composer.attachments.imageInputUnavailable": "当前模型只支持文本。请移除图片或切换到支持视觉输入的模型。",
+    "composer.attachments.selectedImages": "已选择的照片",
+    "composer.attachments.textOnly": "仅文本",
+    "composer.model.configureProvider": "请配置 Provider",
+    "composer.model.configureProviderDescription": "请先配置 Provider 后再选择模型。",
     "settings.title": "设置",
     "settings.description": "配置 ExAgent 的运行行为。",
     "settings.sections.general": "通用",
@@ -301,6 +324,10 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "settings.connection.compatibleDescription": "输入此提供方的 OpenAI-compatible endpoint，可选择提供 API 密钥。",
     "settings.connection.apiKeyDescription": "输入你的 API 密钥以连接此提供方。",
     "settings.connection.baseUrl": "Base URL",
+    "settings.connection.baseUrlPresets": "预设",
+    "settings.connection.baseUrlPresetsAria": "Base URL 预设",
+    "settings.connection.baseUrlPresetInternational": "国际平台",
+    "settings.connection.baseUrlPresetMainlandChina": "国内平台",
     "settings.connection.model": "模型",
     "settings.connection.discovering": "正在发现",
     "settings.connection.discoverModels": "发现模型",

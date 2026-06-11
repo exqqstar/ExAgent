@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use exagent::config::ThinkingMode;
 use exagent::model::reasoning::{ReasoningCapabilities, ReasoningProtocol};
+use exagent::provider::provider_profile_by_id;
+use exagent::types::InputModality;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,6 +29,8 @@ pub struct ModelCapabilities {
     pub supports_tools: bool,
     #[serde(default)]
     pub thinking: ThinkingCapability,
+    #[serde(default)]
+    pub input_modalities: Vec<InputModality>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<CatalogReasoning>,
 }
@@ -42,6 +46,7 @@ impl ModelCapabilities {
         Self {
             supports_tools: false,
             thinking: ThinkingCapability::default(),
+            input_modalities: vec![InputModality::Text],
             reasoning: None,
         }
     }
@@ -483,6 +488,7 @@ pub fn capabilities_for_model(
 ) -> ModelCapabilities {
     if let Some(catalog_model) = catalog_model(provider_id, model_id) {
         let mut capabilities = capabilities_from_static(catalog_model.capabilities);
+        capabilities.input_modalities = input_modalities_for_model(provider_id, model_id);
         if let Some(supports_tools) = discovered_supports_tools {
             capabilities.supports_tools = supports_tools;
         }
@@ -493,6 +499,7 @@ pub fn capabilities_for_model(
         supports_tools: discovered_supports_tools
             .unwrap_or_else(|| default_unknown_tool_support(provider_id, provider_supports_tools)),
         thinking: ThinkingCapability::default(),
+        input_modalities: input_modalities_for_model(provider_id, model_id),
         reasoning: None,
     }
 }
@@ -520,6 +527,7 @@ fn capabilities_from_static(capabilities: StaticModelCapabilities) -> ModelCapab
     ModelCapabilities {
         supports_tools: capabilities.supports_tools,
         thinking,
+        input_modalities: vec![InputModality::Text, InputModality::Image],
         reasoning,
     }
 }
@@ -528,9 +536,33 @@ fn default_unknown_tool_support(_provider_id: &str, _provider_supports_tools: bo
     false
 }
 
+fn input_modalities_for_model(provider_id: &str, model_id: &str) -> Vec<InputModality> {
+    provider_profile_by_id(provider_id)
+        .map(|profile| profile.input_modalities_for_model(model_id))
+        .unwrap_or_else(|| vec![InputModality::Text, InputModality::Image])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exagent::types::InputModality;
+
+    #[test]
+    fn unknown_model_capabilities_default_to_text_and_image_input() {
+        let capabilities = capabilities_for_model("openai_compatible", "local-model", true, None);
+
+        assert_eq!(
+            capabilities.input_modalities,
+            vec![InputModality::Text, InputModality::Image]
+        );
+    }
+
+    #[test]
+    fn known_text_only_model_capabilities_return_text_input_only() {
+        let capabilities = capabilities_for_model("deepseek", "deepseek-v4-pro", true, None);
+
+        assert_eq!(capabilities.input_modalities, vec![InputModality::Text]);
+    }
 
     #[test]
     fn openai_gpt_4_1_does_not_support_thinking() {

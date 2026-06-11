@@ -7,6 +7,7 @@ use crate::agent::Agent;
 use crate::config::{AgentConfig, ThinkingMode};
 use crate::events::RuntimeEventKind;
 use crate::llm::{LlmRequestOptions, LlmStreamEvent, LlmStreamSink};
+use crate::model::multimodal;
 use crate::resolved::ResolvedModelConfig;
 use crate::runtime::agent_profile::{profile_for_type, AgentType};
 use crate::runtime::context::{
@@ -27,7 +28,7 @@ use crate::runtime::tool_orchestrator::ToolExecutionOutcome;
 use crate::runtime::turn_mode::TurnMode;
 use crate::session::{ApprovalId, ApprovalStatus, CompactionSummary, ThreadSnapshot};
 use crate::state::rollout::{CompactedItem, RolloutItem};
-use crate::types::{AssistantTurn, ConversationMessage, MessageRole, ToolCall, TurnId};
+use crate::types::{AssistantTurn, ConversationMessage, MessageRole, ToolCall, TurnId, UserInput};
 use tokio::sync::oneshot;
 
 impl ThreadSession {
@@ -39,21 +40,38 @@ impl ThreadSession {
         turn_context: Option<ThreadTurnContext>,
         interrupt: Option<RuntimeInterrupt>,
     ) -> Result<ThreadOpResult> {
-        self.handle_user_input_with_start_ack(turn_id, prompt, turn_context, interrupt, None)
+        self.handle_user_input_parts(
+            turn_id,
+            vec![UserInput::Text { text: prompt }],
+            turn_context,
+            interrupt,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn handle_user_input_parts(
+        &mut self,
+        turn_id: TurnId,
+        input: Vec<UserInput>,
+        turn_context: Option<ThreadTurnContext>,
+        interrupt: Option<RuntimeInterrupt>,
+    ) -> Result<ThreadOpResult> {
+        self.handle_user_input_parts_with_start_ack(turn_id, input, turn_context, interrupt, None)
             .await
     }
 
-    pub(crate) async fn handle_user_input_with_start_ack(
+    pub(crate) async fn handle_user_input_parts_with_start_ack(
         &mut self,
         turn_id: TurnId,
-        prompt: String,
+        input: Vec<UserInput>,
         turn_context: Option<ThreadTurnContext>,
         interrupt: Option<RuntimeInterrupt>,
         start_tx: Option<oneshot::Sender<Result<TurnId>>>,
     ) -> Result<ThreadOpResult> {
         self.set_status(ThreadRuntimeStatus::Running);
         let result = self
-            .handle_user_input_inner(turn_id, prompt, turn_context, interrupt, start_tx)
+            .handle_user_input_inner(turn_id, input, turn_context, interrupt, start_tx)
             .await;
         self.set_status(ThreadRuntimeStatus::Idle);
         result
@@ -223,10 +241,10 @@ impl ThreadSession {
     async fn handle_user_input_inner(
         &mut self,
         turn_id: TurnId,
-        prompt: String,
+        input: Vec<UserInput>,
         turn_context: Option<ThreadTurnContext>,
         interrupt: Option<RuntimeInterrupt>,
-        start_tx: Option<oneshot::Sender<Result<TurnId>>>,
+        mut start_tx: Option<oneshot::Sender<Result<TurnId>>>,
     ) -> Result<ThreadOpResult> {
         let turn_cwd = turn_context
             .as_ref()
@@ -239,6 +257,20 @@ impl ThreadSession {
             .as_ref()
             .map(|context| context.turn_mode)
             .unwrap_or(TurnMode::Default);
+        let effective_model = turn_resolved_model
+            .as_ref()
+            .unwrap_or(&self.base_config.model);
+        if let Err(err) = multimodal::validate_turn_input_modalities(
+            &input,
+            &effective_model.capabilities.input_modalities,
+        ) {
+            send_start_ack_error(start_tx.take(), &err);
+            return Err(err);
+        }
+        if let Err(err) = multimodal::validate_local_image_inputs(&input) {
+            send_start_ack_error(start_tx.take(), &err);
+            return Err(err);
+        }
 
         // Apply model-visible runtime context before the user message so the
         // sampling prompt has stable background for this turn.
@@ -281,7 +313,7 @@ impl ThreadSession {
             if let Err(err) = self
                 .record_user_turn_start(
                     &turn_id,
-                    prompt,
+                    &input,
                     turn_cwd,
                     turn_resolved_model.as_ref(),
                     turn_thinking_mode,
@@ -338,7 +370,7 @@ impl ThreadSession {
             if let Err(err) = self
                 .record_user_turn_start(
                     &turn_id,
-                    prompt,
+                    &input,
                     turn_cwd,
                     turn_resolved_model.as_ref(),
                     turn_thinking_mode,
@@ -522,7 +554,7 @@ impl ThreadSession {
     async fn record_user_turn_start(
         &mut self,
         turn_id: &TurnId,
-        prompt: String,
+        input: &[UserInput],
         turn_cwd: Option<PathBuf>,
         turn_model: Option<&ResolvedModelConfig>,
         turn_thinking_mode: TurnThinkingModeOverride,
@@ -553,6 +585,8 @@ impl ThreadSession {
         );
         let turn_context = prompt_context.turn_context.clone();
         let context_messages = self.context_manager.apply_context_updates(prompt_context);
+        let user_message = ConversationMessage::user_parts(input.to_vec());
+        let prompt = user_message.content.clone();
         refresh_file_backed_contexts(
             &turn_config,
             &snapshot.workspace_root,
@@ -596,7 +630,6 @@ impl ThreadSession {
         let mailbox_messages = self
             .context_manager
             .record_inter_agent_communications(self.pending_mails.drain(..));
-        let user_message = ConversationMessage::user(prompt);
         self.context_manager.record_items([user_message.clone()]);
         self.context_manager.sync_snapshot(snapshot);
         let mut rollout_items =
@@ -800,11 +833,16 @@ impl ThreadSession {
         if self.context_manager.active_context_tokens() < limit {
             return Ok(());
         }
-        if self.context_manager.for_compaction().is_empty() {
+        let input_modalities = &self.agent.config().model.capabilities.input_modalities;
+        if self
+            .context_manager
+            .for_compaction(input_modalities)
+            .is_empty()
+        {
             return Ok(());
         }
 
-        let history = self.context_manager.for_compaction();
+        let history = self.context_manager.for_compaction(input_modalities);
         let result = crate::runtime::compaction::compact_history(&self.agent, &history).await?;
         record_compaction_checkpoint(
             &mut self.recorder,
@@ -815,6 +853,12 @@ impl ThreadSession {
             result.summary,
             result.replacement_history,
         )
+    }
+}
+
+fn send_start_ack_error(start_tx: Option<oneshot::Sender<Result<TurnId>>>, err: &anyhow::Error) {
+    if let Some(start_tx) = start_tx {
+        let _ = start_tx.send(Err(anyhow!(err.to_string())));
     }
 }
 
@@ -892,7 +936,7 @@ async fn run_session_turn(
     };
 
     loop {
-        let prompt = context_manager.for_prompt();
+        let prompt = context_manager.for_prompt(&turn_config.model.capabilities.input_modalities);
         let tool_specs = tool_runtime.visible_specs();
         let completion = match stream_assistant_turn(
             agent,
@@ -923,7 +967,8 @@ async fn run_session_turn(
                     turn_mode,
                 )
                 .await?;
-                let prompt = context_manager.for_prompt();
+                let prompt =
+                    context_manager.for_prompt(&turn_config.model.capabilities.input_modalities);
                 let tool_specs = tool_runtime.visible_specs();
                 stream_assistant_turn(
                     agent,
@@ -1065,7 +1110,8 @@ async fn compact_after_context_window_error(
     context_manager.set_token_usage_full(context_window);
     record_token_count_event(recorder, context_manager, snapshot, turn_id)?;
 
-    let history = context_manager.for_compaction();
+    let history =
+        context_manager.for_compaction(&agent.config().model.capabilities.input_modalities);
     let last_user_message = history
         .iter()
         .rev()
@@ -1591,8 +1637,8 @@ mod tests {
     use crate::state::rollout::{RolloutItem, RolloutStore};
     use crate::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
     use crate::types::{
-        AssistantTurn, ConversationMessage, LlmCompletion, ReasoningBlock, ThreadId, TokenUsage,
-        ToolCall, ToolResult, ToolStatus, TurnId,
+        AssistantTurn, ConversationMessage, ImageDetail, InputModality, LlmCompletion, MessageRole,
+        ReasoningBlock, ThreadId, TokenUsage, ToolCall, ToolResult, ToolStatus, TurnId, UserInput,
     };
 
     fn write_rollout_meta(config: &AgentConfig, thread_id: &ThreadId) {
@@ -2008,6 +2054,127 @@ mod tests {
         assert!(snapshot.conversation[1]
             .content
             .contains("Environment context:"));
+    }
+
+    #[tokio::test]
+    async fn image_input_on_text_only_model_is_rejected_before_turn_start_recording() {
+        let dir = tempdir().unwrap();
+        let thread_id = ThreadId::new("session_rejects_image_text_only");
+        let turn_id = TurnId::new("turn_image_rejected");
+        let mut config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        config.model.capabilities.input_modalities = vec![InputModality::Text];
+        write_rollout_meta(&config, &thread_id);
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(MockLlm::new(vec![AssistantTurn {
+                    text: Some("should not run".into()),
+                    tool_calls: vec![],
+                    reasoning: vec![],
+                }])),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config.clone(),
+            agent_factory,
+        ))
+        .expect("create thread session");
+
+        let result = session
+            .handle_user_input_parts(
+                turn_id.clone(),
+                vec![UserInput::LocalImage {
+                    path: dir.path().join("screen.png"),
+                    detail: Some(ImageDetail::High),
+                }],
+                None,
+                None,
+            )
+            .await;
+        let err = match result {
+            Ok(_) => panic!("expected image input rejection"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("does not support image input"));
+        let live_view =
+            ThreadSession::live_view_from_state(thread_id.clone(), &session.live_state_handle());
+        assert!(live_view
+            .events
+            .iter()
+            .all(|event| !matches!(event.kind, RuntimeEventKind::TurnStarted)));
+        let rollout_items = read_rollout_items(&config, &thread_id);
+        assert!(rollout_items.iter().all(|item| !matches!(
+            item,
+            RolloutItem::ResponseItem(response)
+                if response.turn_id == turn_id && response.message.role == MessageRole::User
+        )));
+    }
+
+    #[tokio::test]
+    async fn missing_local_image_input_is_rejected_before_turn_start_recording() {
+        let dir = tempdir().unwrap();
+        let thread_id = ThreadId::new("session_rejects_missing_image");
+        let turn_id = TurnId::new("turn_missing_image_rejected");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(MockLlm::new(vec![AssistantTurn {
+                    text: Some("should not run".into()),
+                    tool_calls: vec![],
+                    reasoning: vec![],
+                }])),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config.clone(),
+            agent_factory,
+        ))
+        .expect("create thread session");
+
+        let result = session
+            .handle_user_input_parts(
+                turn_id.clone(),
+                vec![UserInput::LocalImage {
+                    path: dir.path().join("missing.png"),
+                    detail: Some(ImageDetail::High),
+                }],
+                None,
+                None,
+            )
+            .await;
+        let err = match result {
+            Ok(_) => panic!("expected missing image rejection"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("could not read image"));
+        let live_view =
+            ThreadSession::live_view_from_state(thread_id.clone(), &session.live_state_handle());
+        assert!(live_view
+            .events
+            .iter()
+            .all(|event| !matches!(event.kind, RuntimeEventKind::TurnStarted)));
+        let rollout_items = read_rollout_items(&config, &thread_id);
+        assert!(rollout_items.iter().all(|item| !matches!(
+            item,
+            RolloutItem::ResponseItem(response)
+                if response.turn_id == turn_id && response.message.role == MessageRole::User
+        )));
     }
 
     #[tokio::test]

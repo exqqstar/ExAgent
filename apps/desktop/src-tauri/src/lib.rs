@@ -26,6 +26,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::image_attachments_import,
+            commands::image_attachments_import_bytes,
             commands::project_add,
             commands::project_archive,
             commands::project_archive_conversations,

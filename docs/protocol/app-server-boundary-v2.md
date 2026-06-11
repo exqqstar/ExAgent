@@ -159,6 +159,33 @@ unsupported permission profile: managed
 }
 ```
 
+`prompt` is the legacy text preview. Structured clients may also send `input`;
+when `input` is non-empty, it is the authoritative user input for the turn:
+
+```json
+{
+  "thread_id": "session_...",
+  "prompt": "Describe this screenshot.",
+  "workspace_root": ".",
+  "input": [
+    {
+      "type": "text",
+      "text": "Describe this screenshot."
+    },
+    {
+      "type": "local_image",
+      "path": "/Users/me/Desktop/screenshot.png",
+      "detail": "high"
+    }
+  ]
+}
+```
+
+Supported structured input parts are `text`, `local_image`, and `image_url`.
+Local image paths are validated before a new turn is recorded. Historical image
+parts are preserved in rollout history, but prompt views strip images to a text
+placeholder when the selected model is known to accept text only.
+
 `turn_context.cwd` is optional. When present, it applies only to that turn and
 does not rewrite the thread snapshot's durable `cwd`.
 

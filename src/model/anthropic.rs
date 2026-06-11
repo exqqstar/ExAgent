@@ -6,10 +6,11 @@ use serde_json::Value;
 use super::llm::{LlmClient, LlmRequestOptions};
 use super::resolved::{ResolvedCredential, ResolvedModelConfig};
 use crate::config::ThinkingMode;
+use crate::model::image_input::load_local_image_for_prompt;
 use crate::tools::{ToolSpec, ToolSpecKind};
 use crate::types::{
-    AssistantTurn, ConversationMessage, LlmCompletion, MessageRole, ReasoningBlock,
-    ReasoningSignature, TokenUsage, ToolCall,
+    AssistantTurn, ConversationContentPart, ConversationMessage, LlmCompletion, MessageRole,
+    ReasoningBlock, ReasoningSignature, TokenUsage, ToolCall,
 };
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -207,6 +208,9 @@ enum AnthropicRequestContent {
     Text {
         text: String,
     },
+    Image {
+        source: AnthropicImageSource,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -216,6 +220,13 @@ enum AnthropicRequestContent {
         tool_use_id: String,
         content: String,
     },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicImageSource {
+    Base64 { media_type: String, data: String },
+    Url { url: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -304,9 +315,7 @@ fn build_anthropic_request(
             MessageRole::System => system.push(message.content.clone()),
             MessageRole::User => request_messages.push(AnthropicRequestMessage {
                 role: "user",
-                content: vec![AnthropicRequestContent::Text {
-                    text: message.content.clone(),
-                }],
+                content: anthropic_user_content(message),
             }),
             MessageRole::Assistant => {
                 let mut content = Vec::new();
@@ -367,6 +376,55 @@ fn build_anthropic_request(
     })
 }
 
+fn anthropic_user_content(message: &ConversationMessage) -> Vec<AnthropicRequestContent> {
+    message
+        .effective_parts()
+        .into_iter()
+        .filter_map(|part| match part {
+            ConversationContentPart::Text { text } => {
+                (!text.is_empty()).then_some(AnthropicRequestContent::Text { text })
+            }
+            ConversationContentPart::ImageUrl { url, .. } => Some(AnthropicRequestContent::Image {
+                source: anthropic_image_source_from_url(url),
+            }),
+            ConversationContentPart::LocalImage { path, detail } => {
+                match load_local_image_for_prompt(&path, detail.unwrap_or_default()) {
+                    Ok(encoded) => Some(AnthropicRequestContent::Image {
+                        source: AnthropicImageSource::Base64 {
+                            media_type: encoded.mime,
+                            data: encoded.base64_data,
+                        },
+                    }),
+                    Err(err) => Some(AnthropicRequestContent::Text {
+                        text: format!("image unavailable: {err}"),
+                    }),
+                }
+            }
+        })
+        .collect()
+}
+
+fn anthropic_image_source_from_url(url: String) -> AnthropicImageSource {
+    if let Some((media_type, data)) = parse_data_url(&url) {
+        AnthropicImageSource::Base64 { media_type, data }
+    } else {
+        AnthropicImageSource::Url { url }
+    }
+}
+
+fn parse_data_url(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("data:")?;
+    let (metadata, data) = rest.split_once(',')?;
+    if !metadata.ends_with(";base64") {
+        return None;
+    }
+    let media_type = metadata.trim_end_matches(";base64");
+    if media_type.is_empty() || data.is_empty() {
+        return None;
+    }
+    Some((media_type.to_string(), data.to_string()))
+}
+
 fn anthropic_reasoning_content(block: &ReasoningBlock) -> Option<AnthropicRequestContent> {
     match &block.signature {
         Some(ReasoningSignature::AnthropicSignature(signature)) => {
@@ -408,4 +466,75 @@ fn build_anthropic_tools(tools: &[ToolSpec]) -> Result<Vec<AnthropicRequestTool>
             }),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    use crate::types::{ImageDetail, UserInput};
+
+    #[test]
+    fn request_serializes_user_image_url_parts() {
+        let message = ConversationMessage::user_parts(vec![
+            UserInput::Text {
+                text: "describe".to_string(),
+            },
+            UserInput::ImageUrl {
+                url: "https://example.com/cat.png".to_string(),
+                detail: Some(ImageDetail::High),
+            },
+        ]);
+
+        let request = build_anthropic_request(
+            "claude-sonnet-4-5".to_string(),
+            &[message],
+            &[],
+            &LlmRequestOptions::default(),
+        )
+        .unwrap();
+        let value = serde_json::to_value(request).unwrap();
+
+        assert_eq!(
+            value["messages"][0]["content"],
+            json!([
+                { "type": "text", "text": "describe" },
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "url",
+                        "url": "https://example.com/cat.png"
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn request_degrades_missing_local_image_to_text_part() {
+        let message = ConversationMessage::user_parts(vec![UserInput::LocalImage {
+            path: std::path::PathBuf::from("/tmp/definitely-missing-exagent-image.png"),
+            detail: Some(ImageDetail::High),
+        }]);
+
+        let request = build_anthropic_request(
+            "claude-sonnet-4-5".to_string(),
+            &[message],
+            &[],
+            &LlmRequestOptions::default(),
+        )
+        .unwrap();
+        let value = serde_json::to_value(request).unwrap();
+        let content = value["messages"][0]["content"]
+            .as_array()
+            .expect("content parts");
+
+        assert!(content.iter().any(|part| {
+            part["type"] == "text"
+                && part["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("image unavailable"))
+        }));
+    }
 }

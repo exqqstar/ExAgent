@@ -18,7 +18,13 @@
         "minWidth": 900,
         "minHeight": 620
       }
-    ]
+    ],
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPCACHE/attachments/**/*"]
+      }
+    }
   },
   "bundle": {
     "active": true,

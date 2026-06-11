@@ -11,6 +11,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "@/App";
 import { exagentClient } from "@/api/exagentClient";
+import { Composer } from "@/components/Composer";
 import { I18nProvider } from "@/lib/i18n";
 import { useWorkbenchStore } from "@/stores/workbenchStore";
 import type {
@@ -26,12 +27,21 @@ const tauriMocks = vi.hoisted(() => ({
   listen: vi.fn(),
 }));
 
+const dialogMocks = vi.hoisted(() => ({
+  open: vi.fn(),
+}));
+
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: tauriMocks.invoke,
+  convertFileSrc: (path: string) => `asset://${path}`,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: tauriMocks.listen,
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: dialogMocks.open,
 }));
 
 class ResizeObserverMock {
@@ -123,8 +133,8 @@ function oauthProviderSettings(
       providerId === "openai"
         ? "https://api.openai.com/v1"
         : "https://api.githubcopilot.com",
-    default_model: providerId === "openai" ? "gpt-5.5" : "gpt-5.1-copilot",
-    supports_model_discovery: providerId === "openai",
+    default_model: "gpt-5.5",
+    supports_model_discovery: true,
     supports_tools: true,
     unsupported_reason: null,
   };
@@ -207,6 +217,7 @@ describe("AppShell", () => {
     vi.restoreAllMocks();
     tauriMocks.invoke.mockReset();
     tauriMocks.listen.mockReset();
+    dialogMocks.open.mockReset();
     vi.stubGlobal("ResizeObserver", ResizeObserverMock);
     window.localStorage.clear();
     document.documentElement.removeAttribute("data-theme");
@@ -852,6 +863,27 @@ describe("AppShell", () => {
     });
   });
 
+  it("shows an add-project state instead of a draft composer without an active project", async () => {
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [],
+      sessions: [],
+      activeProjectId: null,
+      activeSessionId: null,
+      transcript: [],
+      cwd: "No project selected",
+    });
+
+    render(<App />);
+
+    const main = within(screen.getByRole("main"));
+    expect(main.getByRole("heading", { name: "Add a project" })).toBeInTheDocument();
+    expect(main.getByRole("button", { name: "Add project" })).toBeInTheDocument();
+    expect(screen.queryByText("What should we build in ExAgent?")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Prompt composer")).not.toBeInTheDocument();
+  });
+
   it("archives a session from the quick hover action without opening it", async () => {
     const user = userEvent.setup();
     const archiveThread = vi
@@ -962,6 +994,77 @@ describe("AppShell", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Build a feature")).toBeInTheDocument();
     expect(screen.queryByText("Start a session")).not.toBeInTheDocument();
+  });
+
+  it("prompts provider configuration instead of showing placeholder models when no provider is configured", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(exagentClient, "getWorkbenchSnapshot").mockResolvedValue({
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Volumes/EXEXEX/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [],
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      transcript: [],
+      events: [],
+      changedFiles: [],
+      cwd: "/Volumes/EXEXEX/ExAgent",
+      policy: "local",
+      tokenUsage: {
+        input: 0,
+        output: 0,
+        limit: 1,
+      },
+      tokenUsageByThreadId: {},
+      runtimeSettings: null,
+      selectedModel: null,
+      selectedThinkingMode: null,
+    });
+    vi.spyOn(exagentClient, "getRuntimeSettings").mockResolvedValue({
+      default_model: "gpt-5.5",
+      default_thinking_mode: "medium",
+      presets: [],
+      mcp_servers: [],
+      skill_roots: [],
+    });
+    vi.spyOn(exagentClient, "getProviderSettings").mockResolvedValue({
+      providers: [deepSeekProvider],
+      active_provider_id: "deepseek",
+      config: {
+        provider_id: "deepseek",
+        base_url: "https://api.deepseek.com",
+        model: "deepseek-v4-flash",
+        has_api_key: false,
+        credential_source: "none",
+        auth_required: true,
+      },
+      connected_provider: null,
+      last_connection: null,
+      configured_providers: [],
+      model_options: [],
+    });
+
+    render(<App />);
+
+    await screen.findByText("What should we build in ExAgent?");
+    const modelButton = screen.getByRole("button", { name: "Composer model" });
+
+    expect(modelButton).toHaveTextContent("Configure provider");
+    expect(modelButton).not.toHaveTextContent("deepseek-v4-flash");
+
+    await user.click(modelButton);
+
+    expect(
+      screen.getByText("Configure a provider to choose a model."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitemradio", { name: /deepseek-v4-flash/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("loads the selected model from provider settings instead of runtime defaults", async () => {
@@ -1850,13 +1953,13 @@ describe("AppShell", () => {
     await user.click(actionButton);
 
     expect(
-      screen.getByRole("menuitem", { name: "Add photos and files" }),
-    ).toHaveAttribute("aria-disabled", "true");
+      screen.getByRole("menuitem", { name: "Add photos" }),
+    ).not.toHaveAttribute("aria-disabled", "true");
     expect(
       screen.getByRole("menuitem", { name: "Attach Google Chrome" }),
     ).toHaveAttribute("aria-disabled", "true");
     expect(
-      screen.queryByRole("menuitem", { name: "添加照片和文件" }),
+      screen.queryByRole("menuitem", { name: "添加照片" }),
     ).not.toBeInTheDocument();
     const planModeItem = screen.getByRole("menuitemcheckbox", {
       name: /Plan mode/,
@@ -1912,7 +2015,7 @@ describe("AppShell", () => {
     );
 
     expect(
-      screen.getByRole("menuitem", { name: "添加照片和文件" }),
+      screen.getByRole("menuitem", { name: "添加照片" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("menuitem", { name: "附加 Google Chrome" }),
@@ -1965,6 +2068,538 @@ describe("AppShell", () => {
         },
       );
     });
+  });
+
+  it("sends selected photos as structured local image input", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(exagentClient, "pickImageFiles").mockResolvedValue([
+      "/tmp/exagent-screenshot.png",
+    ]);
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-desktop",
+      turn: {
+        id: "turn-image-submit",
+        status: "in_progress",
+        items: [],
+      },
+    });
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await user.click(
+      screen.getByRole("button", { name: "Open composer actions" }),
+    );
+    await user.click(
+      screen.getByRole("menuitem", { name: /Add photos|添加照片/ }),
+    );
+    expect(await screen.findByText("exagent-screenshot.png")).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Message ExAgent"), "Use this screenshot");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(startTurn).toHaveBeenCalledWith(
+      "project-exagent",
+      "session-desktop",
+      "Use this screenshot",
+      {
+        model: {
+          provider_id: "openai",
+          model_id: "gpt-5.5",
+        },
+        thinkingMode: null,
+        clearThinkingMode: false,
+        turnMode: "default",
+        input: [
+          { type: "text", text: "Use this screenshot" },
+          {
+            type: "local_image",
+            path: "/tmp/exagent-screenshot.png",
+            detail: "high",
+          },
+        ],
+      },
+    );
+    expect(screen.getByAltText("exagent-screenshot.png")).toBeInTheDocument();
+  });
+
+  it("attaches pasted image files through the desktop cache", async () => {
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "clipboard.png", {
+      type: "image/png",
+    });
+    const importImageFiles = vi
+      .spyOn(exagentClient, "importImageFiles")
+      .mockResolvedValue(["/tmp/exagent-cache/clipboard.png"]);
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    fireEvent.paste(screen.getByLabelText("Message ExAgent"), {
+      clipboardData: {
+        files: [file],
+      },
+    });
+
+    await waitFor(() => {
+      expect(importImageFiles).toHaveBeenCalledWith([file]);
+    });
+    expect(await screen.findByText("clipboard.png")).toBeInTheDocument();
+  });
+
+  it("attaches dropped image paths through the desktop cache", async () => {
+    let dragDropHandlers:
+      | Parameters<typeof exagentClient.subscribeImageDragDrop>[0]
+      | undefined;
+    vi.spyOn(exagentClient, "subscribeImageDragDrop").mockImplementation(
+      async (handlers) => {
+        dragDropHandlers = handlers;
+        return () => undefined;
+      },
+    );
+    const importImagePaths = vi
+      .spyOn(exagentClient, "importImagePaths")
+      .mockResolvedValue(["/tmp/exagent-cache/drop.jpg"]);
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    expect(dragDropHandlers).toBeDefined();
+    act(() => {
+      dragDropHandlers!.onDrop([
+        "/Users/me/Desktop/drop.jpg",
+        "/Users/me/Desktop/notes.txt",
+      ]);
+    });
+
+    await waitFor(() => {
+      expect(importImagePaths).toHaveBeenCalledWith([
+        "/Users/me/Desktop/drop.jpg",
+      ]);
+    });
+    expect(await screen.findByText("drop.jpg")).toBeInTheDocument();
+  });
+
+  it("handles native drag-drop only from the latest mounted composer", async () => {
+    let dragDropHandlers:
+      | Parameters<typeof exagentClient.subscribeImageDragDrop>[0]
+      | undefined;
+    const subscribeImageDragDrop = vi.spyOn(exagentClient, "subscribeImageDragDrop").mockImplementation(
+      async (handlers) => {
+        dragDropHandlers = handlers;
+        return () => undefined;
+      },
+    );
+    const importImagePaths = vi
+      .spyOn(exagentClient, "importImagePaths")
+      .mockResolvedValue(["/tmp/exagent-cache/drop.jpg"]);
+    const firstState = {
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-desktop",
+      activeProviderId: "deepseek",
+      providerSettings: deepSeekProviderSettings({
+        model_options: [
+          {
+            provider_id: "deepseek",
+            id: "deepseek-v4-flash",
+            display_name: "deepseek-v4-flash",
+            context_window: null,
+            supports_tools: true,
+            capabilities: {
+              supports_tools: true,
+              input_modalities: ["text"],
+              thinking: {
+                supported: false,
+                modes: [],
+              },
+            },
+          },
+        ],
+      }),
+      selectedModel: {
+        provider_id: "deepseek",
+        model_id: "deepseek-v4-flash",
+      },
+    };
+    const latestState = {
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-desktop",
+      selectedModel: {
+        provider_id: "openai",
+        model_id: "gpt-5.5",
+      },
+    };
+
+    render(
+      <I18nProvider>
+        <Composer state={firstState} />
+        <Composer state={latestState} />
+      </I18nProvider>,
+    );
+
+    await waitFor(() => {
+      expect(dragDropHandlers).toBeDefined();
+    });
+    expect(subscribeImageDragDrop).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      dragDropHandlers!.onDrop(["/Users/me/Desktop/drop.jpg"]);
+    });
+
+    await waitFor(() => {
+      expect(importImagePaths).toHaveBeenCalledTimes(1);
+    });
+    expect(importImagePaths).toHaveBeenCalledWith([
+      "/Users/me/Desktop/drop.jpg",
+    ]);
+    expect(
+      screen.queryByText(/Selected model accepts text only/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("retries native drag-drop subscription after a rejection while mounted", async () => {
+    vi.useFakeTimers();
+    try {
+      let dragDropHandlers:
+        | Parameters<typeof exagentClient.subscribeImageDragDrop>[0]
+        | undefined;
+      const subscribeImageDragDrop = vi
+        .spyOn(exagentClient, "subscribeImageDragDrop")
+        .mockRejectedValueOnce(new Error("listen failed"))
+        .mockImplementationOnce(async (handlers) => {
+          dragDropHandlers = handlers;
+          return () => undefined;
+        });
+      const importImagePaths = vi
+        .spyOn(exagentClient, "importImagePaths")
+        .mockResolvedValue(["/tmp/exagent-cache/drop.jpg"]);
+      const state = {
+        ...useWorkbenchStore.getInitialState(),
+        loading: false,
+        activeProjectId: "project-exagent",
+        activeSessionId: "session-desktop",
+        selectedModel: {
+          provider_id: "openai",
+          model_id: "gpt-5.5",
+        },
+      };
+
+      render(
+        <I18nProvider>
+          <Composer state={state} />
+        </I18nProvider>,
+      );
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(subscribeImageDragDrop).toHaveBeenCalledTimes(1);
+      expect(dragDropHandlers).toBeUndefined();
+
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(subscribeImageDragDrop).toHaveBeenCalledTimes(2);
+      expect(dragDropHandlers).toBeDefined();
+
+      await act(async () => {
+        dragDropHandlers!.onDrop(["/Users/me/Desktop/drop.jpg"]);
+        await Promise.resolve();
+      });
+      expect(importImagePaths).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects pasted images before import when the selected model is text only", async () => {
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "blocked.png", {
+      type: "image/png",
+    });
+    const importImageFiles = vi.spyOn(exagentClient, "importImageFiles");
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    act(() => {
+      useWorkbenchStore.setState({
+        activeProviderId: "deepseek",
+        selectedModel: {
+          provider_id: "deepseek",
+          model_id: "deepseek-v4-flash",
+        },
+        providerSettings: deepSeekProviderSettings({
+          model_options: [
+            {
+              provider_id: "deepseek",
+              id: "deepseek-v4-flash",
+              display_name: "deepseek-v4-flash",
+              context_window: null,
+              supports_tools: true,
+              capabilities: {
+                supports_tools: true,
+                input_modalities: ["text"],
+                thinking: {
+                  supported: false,
+                  modes: [],
+                },
+              },
+            },
+          ],
+        }),
+      });
+    });
+    fireEvent.paste(screen.getByLabelText("Message ExAgent"), {
+      clipboardData: {
+        files: [file],
+      },
+    });
+
+    expect(importImageFiles).not.toHaveBeenCalled();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Selected model accepts text only",
+    );
+  });
+
+  it("does not restore a stale text-only image warning after switching through a vision model", async () => {
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "blocked.png", {
+      type: "image/png",
+    });
+    const importImageFiles = vi.spyOn(exagentClient, "importImageFiles");
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    const visionProviderSettings = useWorkbenchStore.getState().providerSettings;
+    act(() => {
+      useWorkbenchStore.setState({
+        activeProviderId: "deepseek",
+        selectedModel: {
+          provider_id: "deepseek",
+          model_id: "deepseek-v4-flash",
+        },
+        providerSettings: deepSeekProviderSettings({
+          model_options: [
+            {
+              provider_id: "deepseek",
+              id: "deepseek-v4-flash",
+              display_name: "deepseek-v4-flash",
+              context_window: null,
+              supports_tools: true,
+              capabilities: {
+                supports_tools: true,
+                input_modalities: ["text"],
+                thinking: {
+                  supported: false,
+                  modes: [],
+                },
+              },
+            },
+          ],
+        }),
+      });
+    });
+    fireEvent.paste(screen.getByLabelText("Message ExAgent"), {
+      clipboardData: {
+        files: [file],
+      },
+    });
+
+    expect(importImageFiles).not.toHaveBeenCalled();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Selected model accepts text only",
+    );
+
+    act(() => {
+      useWorkbenchStore.setState({
+        activeProviderId: "openai",
+        selectedModel: {
+          provider_id: "openai",
+          model_id: "gpt-5.5",
+        },
+        providerSettings: visionProviderSettings,
+        composerAttachments: [],
+      });
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    act(() => {
+      useWorkbenchStore.setState({
+        activeProviderId: "deepseek",
+        selectedModel: {
+          provider_id: "deepseek",
+          model_id: "deepseek-v4-flash",
+        },
+        providerSettings: deepSeekProviderSettings({
+          model_options: [
+            {
+              provider_id: "deepseek",
+              id: "deepseek-v4-flash",
+              display_name: "deepseek-v4-flash",
+              context_window: null,
+              supports_tools: true,
+              capabilities: {
+                supports_tools: true,
+                input_modalities: ["text"],
+                thinking: {
+                  supported: false,
+                  modes: [],
+                },
+              },
+            },
+          ],
+        }),
+        composerAttachments: [],
+      });
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+  });
+
+  it("shows a warning when a pasted image fails to import", async () => {
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "broken.png", {
+      type: "image/png",
+    });
+    vi.spyOn(exagentClient, "importImageFiles").mockRejectedValue(
+      new Error("file is too large"),
+    );
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    fireEvent.paste(screen.getByLabelText("Message ExAgent"), {
+      clipboardData: {
+        files: [file],
+      },
+    });
+
+    expect(await screen.findByText(/file is too large/)).toBeInTheDocument();
+  });
+
+  it("shows the text-only warning instead of a stale pasted-image import error", async () => {
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "broken.png", {
+      type: "image/png",
+    });
+    vi.spyOn(exagentClient, "importImageFiles").mockRejectedValueOnce(
+      new Error("file is too large"),
+    );
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    fireEvent.paste(screen.getByLabelText("Message ExAgent"), {
+      clipboardData: {
+        files: [file],
+      },
+    });
+    expect(await screen.findByText(/file is too large/)).toBeInTheDocument();
+
+    act(() => {
+      useWorkbenchStore.setState({
+        activeProviderId: "deepseek",
+        selectedModel: {
+          provider_id: "deepseek",
+          model_id: "deepseek-v4-flash",
+        },
+        providerSettings: deepSeekProviderSettings({
+          model_options: [
+            {
+              provider_id: "deepseek",
+              id: "deepseek-v4-flash",
+              display_name: "deepseek-v4-flash",
+              context_window: null,
+              supports_tools: true,
+              capabilities: {
+                supports_tools: true,
+                input_modalities: ["text"],
+                thinking: {
+                  supported: false,
+                  modes: [],
+                },
+              },
+            },
+          ],
+        }),
+        composerAttachments: [
+          {
+            id: "attachment-one",
+            type: "local_image",
+            path: "/tmp/blocked.png",
+            name: "blocked.png",
+            detail: "high",
+          },
+        ],
+      });
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Selected model accepts text only",
+    );
+    expect(screen.getByRole("alert")).not.toHaveTextContent(
+      "file is too large",
+    );
+  });
+
+  it("restores the draft and removes the optimistic message when starting an image turn fails", async () => {
+    const startTurn = vi
+      .spyOn(exagentClient, "startTurn")
+      .mockRejectedValue(new Error("could not read image"));
+    const existingMessage = {
+      id: "existing-message",
+      role: "assistant" as const,
+      body: "Earlier reply",
+      timestamp: "history",
+      threadId: "session-desktop",
+    };
+    const attachment = {
+      id: "attachment-one",
+      type: "local_image" as const,
+      path: "/tmp/missing.png",
+      name: "missing.png",
+      detail: "high" as const,
+    };
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-desktop",
+      composerValue: "Describe this",
+      composerAttachments: [attachment],
+      composerPlanMode: true,
+      transcript: [existingMessage],
+      sessions: [
+        {
+          id: "session-desktop",
+          projectId: "project-exagent",
+          title: "Desktop session",
+          updatedAt: "now",
+          status: "idle",
+        },
+      ],
+    });
+
+    await useWorkbenchStore.getState().sendPrompt();
+
+    expect(startTurn).toHaveBeenCalled();
+    expect(useWorkbenchStore.getState().error).toContain("could not read image");
+    expect(useWorkbenchStore.getState().composerValue).toBe("Describe this");
+    expect(useWorkbenchStore.getState().composerAttachments).toEqual([attachment]);
+    expect(useWorkbenchStore.getState().composerPlanMode).toBe(true);
+    expect(useWorkbenchStore.getState().transcript).toEqual([existingMessage]);
+    expect(useWorkbenchStore.getState().sessions[0]?.status).toBe("idle");
+  });
+
+  it("deduplicates repeated image paths from the same picker result", () => {
+    useWorkbenchStore.getState().addComposerAttachments([
+      "/tmp/repeated.png",
+      "/tmp/repeated.png",
+      " /tmp/repeated.png ",
+    ]);
+
+    expect(useWorkbenchStore.getState().composerAttachments).toHaveLength(1);
+    expect(useWorkbenchStore.getState().composerAttachments[0]?.path).toBe(
+      "/tmp/repeated.png",
+    );
   });
 
   it("sends plan mode with the next prompt and clears the composer toggle", async () => {
@@ -2046,6 +2681,115 @@ describe("AppShell", () => {
     });
 
     expect(screen.queryByText("Runtime event goal")).not.toBeInTheDocument();
+  });
+
+  it("lets a draft session save a goal and applies it when the first prompt creates a thread", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(exagentClient, "getWorkbenchSnapshot").mockResolvedValue({
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Volumes/EXEXEX/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [],
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      transcript: [],
+      events: [],
+      changedFiles: [],
+      cwd: "/Volumes/EXEXEX/ExAgent",
+      policy: "local",
+      tokenUsage: {
+        input: 0,
+        output: 0,
+        limit: 1,
+      },
+      tokenUsageByThreadId: {},
+      runtimeSettings: null,
+      selectedModel: null,
+      selectedThinkingMode: null,
+    });
+    vi.spyOn(exagentClient, "getRuntimeSettings").mockResolvedValue({
+      default_model: "gpt-5.5",
+      default_thinking_mode: "medium",
+      presets: [],
+      mcp_servers: [],
+      skill_roots: [],
+    });
+    vi.spyOn(exagentClient, "getProviderSettings").mockResolvedValue(
+      deepSeekProviderSettings(),
+    );
+    const setThreadGoal = vi
+      .spyOn(exagentClient, "setThreadGoal")
+      .mockResolvedValue({
+        goal: threadGoal({
+          thread_id: "session-created",
+          objective: "Ship the draft goal",
+          token_budget: 1200,
+        }),
+      });
+    vi.spyOn(exagentClient, "startThread").mockResolvedValue({
+      thread: {
+        id: "session-created",
+        status: "idle",
+        active_turn: null,
+        turns: [],
+      },
+    });
+    vi.spyOn(exagentClient, "listThreads").mockResolvedValue([
+      threadRecord({
+        id: "session-created",
+        project_id: "project-exagent",
+        fallback_title: "New session",
+      }),
+    ]);
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-created",
+      turn: {
+        id: "turn-created",
+        status: "in_progress",
+        items: [],
+      },
+    });
+    render(<App />);
+
+    await screen.findByText("What should we build in ExAgent?");
+    await user.click(screen.getByRole("button", { name: "Open composer actions" }));
+    const goalItem = screen.getByRole("menuitem", { name: /Goal/ });
+    expect(goalItem).not.toHaveAttribute("aria-disabled", "true");
+
+    await user.click(goalItem);
+    await user.type(screen.getByLabelText("Goal objective"), "Ship the draft goal");
+    await user.type(screen.getByLabelText("Goal token budget"), "1200");
+    await user.click(screen.getByRole("button", { name: "Save goal" }));
+
+    expect(setThreadGoal).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(useWorkbenchStore.getState().draftGoal?.objective).toBe(
+        "Ship the draft goal",
+      );
+    });
+    expect(await screen.findByText("Ship the draft goal")).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Message ExAgent"), "Build it");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(setThreadGoal).toHaveBeenCalledWith("project-exagent", "session-created", {
+      objective: "Ship the draft goal",
+      status: "active",
+      tokenBudget: 1200,
+      clearTokenBudget: false,
+    });
+    expect(setThreadGoal.mock.invocationCallOrder[0]).toBeLessThan(
+      startTurn.mock.invocationCallOrder[0],
+    );
+    expect(useWorkbenchStore.getState().draftGoal).toBeNull();
+    expect(useWorkbenchStore.getState().currentGoal?.objective).toBe(
+      "Ship the draft goal",
+    );
   });
 
   it("uses the composer action as interrupt while the active session is running", async () => {
@@ -2676,6 +3420,188 @@ describe("AppShell", () => {
     );
   });
 
+  it("blocks image input before starting a turn when the selected model is text-only", async () => {
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-desktop",
+      turn: {
+        id: "turn-blocked-image",
+        status: "in_progress",
+        items: [],
+      },
+    });
+    useWorkbenchStore.setState({
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-desktop",
+      composerValue: "Describe this",
+      composerAttachments: [
+        {
+          id: "attachment-one",
+          type: "local_image",
+          path: "/tmp/blocked.png",
+          name: "blocked.png",
+          detail: "high",
+        },
+      ],
+      selectedModel: {
+        provider_id: "deepseek",
+        model_id: "deepseek-v4-flash",
+      },
+      selectedThinkingMode: null,
+      runtimeSettings: {
+        default_model: "deepseek-v4-flash",
+        default_thinking_mode: null,
+        presets: [],
+        mcp_servers: [],
+        skill_roots: [],
+      },
+      providerSettings: deepSeekProviderSettings({
+        model_options: [
+          {
+            provider_id: "deepseek",
+            id: "deepseek-v4-flash",
+            display_name: "deepseek-v4-flash",
+            context_window: null,
+            supports_tools: true,
+            capabilities: {
+              supports_tools: true,
+              input_modalities: ["text"],
+              thinking: {
+                supported: false,
+                modes: [],
+              },
+            },
+          },
+        ],
+      }),
+    });
+
+    await useWorkbenchStore.getState().sendPrompt();
+
+    expect(startTurn).not.toHaveBeenCalled();
+    expect(useWorkbenchStore.getState().error).toContain(
+      "does not support image input",
+    );
+    expect(useWorkbenchStore.getState().composerAttachments).toHaveLength(1);
+  });
+
+  it("shows image input as unavailable in the composer for text-only models", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    act(() => {
+      useWorkbenchStore.setState({
+        activeProviderId: "deepseek",
+        selectedModel: {
+          provider_id: "deepseek",
+          model_id: "deepseek-v4-flash",
+        },
+        providerSettings: deepSeekProviderSettings({
+          model_options: [
+            {
+              provider_id: "deepseek",
+              id: "deepseek-v4-flash",
+              display_name: "deepseek-v4-flash",
+              context_window: null,
+              supports_tools: true,
+              capabilities: {
+                supports_tools: true,
+                input_modalities: ["text"],
+                thinking: {
+                  supported: false,
+                  modes: [],
+                },
+              },
+            },
+          ],
+        }),
+        composerValue: "Describe this",
+        composerAttachments: [
+          {
+            id: "attachment-one",
+            type: "local_image",
+            path: "/tmp/blocked.png",
+            name: "blocked.png",
+            detail: "high",
+          },
+        ],
+      });
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Selected model accepts text only",
+    );
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+
+    await user.click(
+      screen.getByRole("button", { name: "Open composer actions" }),
+    );
+    expect(
+      screen.getByRole("menuitem", { name: /Add photos/ }),
+    ).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByText("Text only")).toBeInTheDocument();
+  });
+
+  it("does not submit blocked image input from the Enter shortcut", async () => {
+    const user = userEvent.setup();
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-desktop",
+      turn: {
+        id: "turn-should-not-start",
+        status: "in_progress",
+        items: [],
+      },
+    });
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    act(() => {
+      useWorkbenchStore.setState({
+        activeProviderId: "deepseek",
+        selectedModel: {
+          provider_id: "deepseek",
+          model_id: "deepseek-v4-flash",
+        },
+        providerSettings: deepSeekProviderSettings({
+          model_options: [
+            {
+              provider_id: "deepseek",
+              id: "deepseek-v4-flash",
+              display_name: "deepseek-v4-flash",
+              context_window: null,
+              supports_tools: true,
+              capabilities: {
+                supports_tools: true,
+                input_modalities: ["text"],
+                thinking: {
+                  supported: false,
+                  modes: [],
+                },
+              },
+            },
+          ],
+        }),
+        composerValue: "Describe this",
+        composerAttachments: [
+          {
+            id: "attachment-one",
+            type: "local_image",
+            path: "/tmp/blocked.png",
+            name: "blocked.png",
+            detail: "high",
+          },
+        ],
+        error: null,
+      });
+    });
+
+    await user.click(screen.getByLabelText("Message ExAgent"));
+    await user.keyboard("{Enter}");
+
+    expect(startTurn).not.toHaveBeenCalled();
+    expect(useWorkbenchStore.getState().error).toBeNull();
+  });
+
   it("omits unsupported runtime default thinking mode for low-only models", async () => {
     const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
       thread_id: "session-desktop",
@@ -2985,6 +3911,10 @@ describe("AppShell", () => {
         },
         clearThinkingMode: true,
         turnMode: "plan",
+        input: [
+          { type: "text", text: "Clear inherited thinking" },
+          { type: "local_image", path: "/tmp/plan.png", detail: "high" },
+        ],
       },
     );
 
@@ -2999,6 +3929,10 @@ describe("AppShell", () => {
       thinkingMode: null,
       clearThinkingMode: true,
       turnMode: "plan",
+      input: [
+        { type: "text", text: "Clear inherited thinking" },
+        { type: "local_image", path: "/tmp/plan.png", detail: "high" },
+      ],
     });
   });
 

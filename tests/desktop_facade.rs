@@ -80,6 +80,7 @@ async fn desktop_facade_runs_turn_replays_events_and_updates_index() {
             TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "run the desktop chain".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,

@@ -14,6 +14,10 @@ apps/desktop/dist
 
 # Local-only reference checkouts and private notes.
 /external-references
+/ExAgent-notes/
+/AGENTS.md
+/AGENT.md
+/Agent.md
 docs/private/
 docs/.private-archive/
 /.claude

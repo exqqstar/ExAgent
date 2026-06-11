@@ -66,6 +66,7 @@ pub(in crate::app_server) async fn run_turn_through_runtime(
 ) -> Result<(ThreadId, PathBuf, AssistantTurn)> {
     let requested_workspace_root = params.workspace_root.clone();
     let requested_workspace_root = requested_workspace_root.is_some();
+    let input = params.effective_input();
     let config = OverridePolicy::merge_turn_start(&services.base_config, params.workspace_root)?;
     let thread_id = params.thread_id;
     let runtime = services.runtime_loader.ensure_runtime_loaded(
@@ -83,9 +84,8 @@ pub(in crate::app_server) async fn run_turn_through_runtime(
         params.turn_mode,
     )
     .await?;
-    let prompt = params.prompt;
     let result = runtime
-        .submit_user_input_and_wait(prompt, turn_context)
+        .submit_user_input_parts_and_wait(input, turn_context)
         .await
         .map_err(map_thread_runtime_error)?;
     let ThreadOpResult::UserInput { final_turn, .. } = result else {
@@ -104,6 +104,7 @@ pub(in crate::app_server) async fn start_turn_in_background(
 ) -> Result<TurnStartStarted> {
     let requested_workspace_root = params.workspace_root.clone();
     let requested_workspace_root = requested_workspace_root.is_some();
+    let input = params.effective_input();
     let config = OverridePolicy::merge_turn_start(&services.base_config, params.workspace_root)?;
     let thread_id = params.thread_id;
     let runtime = services.runtime_loader.ensure_runtime_loaded(
@@ -121,7 +122,7 @@ pub(in crate::app_server) async fn start_turn_in_background(
     )
     .await?;
     let turn_id = runtime
-        .submit_user_input(params.prompt, turn_context)
+        .submit_user_input_parts(input, turn_context)
         .await
         .map_err(map_thread_runtime_error)?;
 

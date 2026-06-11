@@ -14,10 +14,11 @@ use super::openai_compatible::is_openai_context_window_error;
 use super::reasoning::ReasoningCapabilities;
 use super::resolved::{ResolvedCredential, ResolvedModelConfig};
 use crate::config::ThinkingMode;
+use crate::model::image_input::load_local_image_for_prompt;
 use crate::tools::{ToolSpec, ToolSpecKind};
 use crate::types::{
-    AssistantTurn, ConversationMessage, LlmCompletion, MessageRole, ReasoningBlock, TokenUsage,
-    ToolCall,
+    AssistantTurn, ConversationContentPart, ConversationMessage, ImageDetail, LlmCompletion,
+    MessageRole, ReasoningBlock, TokenUsage, ToolCall,
 };
 
 const CHATGPT_CODEX_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
@@ -337,7 +338,7 @@ fn build_chatgpt_codex_responses_request(
             MessageRole::User => input.push(json!({
                 "type": "message",
                 "role": "user",
-                "content": [{ "type": "input_text", "text": message.content }],
+                "content": build_chatgpt_codex_user_content(message),
             })),
             MessageRole::Assistant => {
                 if !message.content.trim().is_empty() {
@@ -394,6 +395,48 @@ fn build_chatgpt_codex_responses_request(
         request["reasoning"] = reasoning;
     }
     Ok(request)
+}
+
+fn build_chatgpt_codex_user_content(message: &ConversationMessage) -> Vec<Value> {
+    message
+        .effective_parts()
+        .into_iter()
+        .filter_map(|part| match part {
+            ConversationContentPart::Text { text } => {
+                (!text.is_empty()).then(|| json!({ "type": "input_text", "text": text }))
+            }
+            ConversationContentPart::ImageUrl { url, detail } => {
+                Some(chatgpt_codex_image_part(url, detail))
+            }
+            ConversationContentPart::LocalImage { path, detail } => {
+                match load_local_image_for_prompt(&path, detail.unwrap_or_default()) {
+                    Ok(encoded) => Some(chatgpt_codex_image_part(encoded.data_url, detail)),
+                    Err(err) => Some(json!({
+                        "type": "input_text",
+                        "text": format!("image unavailable: {err}")
+                    })),
+                }
+            }
+        })
+        .collect()
+}
+
+fn chatgpt_codex_image_part(url: String, detail: Option<ImageDetail>) -> Value {
+    let mut part = serde_json::Map::new();
+    part.insert("type".to_string(), json!("input_image"));
+    part.insert("image_url".to_string(), json!(url));
+    if let Some(detail) = detail.and_then(chatgpt_codex_image_detail) {
+        part.insert("detail".to_string(), json!(detail));
+    }
+    Value::Object(part)
+}
+
+fn chatgpt_codex_image_detail(detail: ImageDetail) -> Option<&'static str> {
+    match detail {
+        ImageDetail::Auto | ImageDetail::Original => Some("auto"),
+        ImageDetail::Low => Some("low"),
+        ImageDetail::High => Some("high"),
+    }
 }
 
 async fn stream_chatgpt_codex_response(
@@ -799,7 +842,7 @@ mod tests {
     use crate::llm::{LlmClient, LlmRequestOptions, LlmStreamEvent, LlmStreamSink};
     use crate::model::reasoning::{ReasoningCapabilities, ReasoningProtocol};
     use crate::resolved::ResolvedCredential;
-    use crate::types::ConversationMessage;
+    use crate::types::{ConversationMessage, ImageDetail, UserInput};
 
     #[derive(Default)]
     struct RecordingTokenRefreshSink {
@@ -885,6 +928,69 @@ mod tests {
 
         assert_eq!(request["reasoning"], json!({ "effort": "none" }));
         assert_eq!(request["include"], json!([]));
+    }
+
+    #[test]
+    fn responses_request_serializes_user_image_url_parts() {
+        let message = ConversationMessage::user_parts(vec![
+            UserInput::Text {
+                text: "describe".to_string(),
+            },
+            UserInput::ImageUrl {
+                url: "data:image/png;base64,AAA".to_string(),
+                detail: Some(ImageDetail::High),
+            },
+        ]);
+
+        let request = super::build_chatgpt_codex_responses_request(
+            "gpt-5.5".to_string(),
+            &[message],
+            &[],
+            &LlmRequestOptions::default(),
+            &openai_reasoning_capabilities(),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            request["input"][0]["content"],
+            json!([
+                { "type": "input_text", "text": "describe" },
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,AAA",
+                    "detail": "high"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn responses_request_degrades_missing_local_image_to_text_part() {
+        let message = ConversationMessage::user_parts(vec![UserInput::LocalImage {
+            path: std::path::PathBuf::from("/tmp/definitely-missing-exagent-image.png"),
+            detail: Some(ImageDetail::High),
+        }]);
+
+        let request = super::build_chatgpt_codex_responses_request(
+            "gpt-5.5".to_string(),
+            &[message],
+            &[],
+            &LlmRequestOptions::default(),
+            &openai_reasoning_capabilities(),
+            true,
+        )
+        .unwrap();
+
+        let content = request["input"][0]["content"]
+            .as_array()
+            .expect("content parts");
+        assert!(content.iter().any(|part| {
+            part["type"] == "input_text"
+                && part["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("image unavailable"))
+        }));
     }
 
     #[tokio::test]

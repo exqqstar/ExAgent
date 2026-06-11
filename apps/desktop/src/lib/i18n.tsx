@@ -8,6 +8,11 @@ export type TranslationKey =
   | "composer.actions.planMode"
   | "composer.actions.goal"
   | "composer.actions.plugins"
+  | "composer.attachments.imageInputUnavailable"
+  | "composer.attachments.selectedImages"
+  | "composer.attachments.textOnly"
+  | "composer.model.configureProvider"
+  | "composer.model.configureProviderDescription"
   | "settings.title"
   | "settings.description"
   | "settings.sections.general"
@@ -127,11 +132,16 @@ const localeStorageKey = "exagent.locale";
 
 const translations: Record<Locale, Record<TranslationKey, string>> = {
   en: {
-    "composer.actions.addPhotosAndFiles": "Add photos and files",
+    "composer.actions.addPhotosAndFiles": "Add photos",
     "composer.actions.attachChrome": "Attach Google Chrome",
     "composer.actions.planMode": "Plan mode",
     "composer.actions.goal": "Goal",
     "composer.actions.plugins": "Plugins",
+    "composer.attachments.imageInputUnavailable": "Selected model accepts text only. Remove photos or choose a vision-capable model.",
+    "composer.attachments.selectedImages": "Selected photos",
+    "composer.attachments.textOnly": "Text only",
+    "composer.model.configureProvider": "Configure provider",
+    "composer.model.configureProviderDescription": "Configure a provider to choose a model.",
     "settings.title": "Settings",
     "settings.description": "Configure ExAgent runtime behavior.",
     "settings.sections.general": "General",
@@ -242,11 +252,16 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "common.close": "Close"
   },
   zh: {
-    "composer.actions.addPhotosAndFiles": "添加照片和文件",
+    "composer.actions.addPhotosAndFiles": "添加照片",
     "composer.actions.attachChrome": "附加 Google Chrome",
     "composer.actions.planMode": "计划模式",
     "composer.actions.goal": "追求目标",
     "composer.actions.plugins": "插件",
+    "composer.attachments.imageInputUnavailable": "当前模型只支持文本。请移除图片或切换到支持视觉输入的模型。",
+    "composer.attachments.selectedImages": "已选择的照片",
+    "composer.attachments.textOnly": "仅文本",
+    "composer.model.configureProvider": "请配置 Provider",
+    "composer.model.configureProviderDescription": "请先配置 Provider 后再选择模型。",
     "settings.title": "设置",
     "settings.description": "配置 ExAgent 的运行行为。",
     "settings.sections.general": "通用",

@@ -2,6 +2,21 @@ export type SessionStatus = "idle" | "running" | "awaiting_approval" | "failed" 
 
 export type ThinkingMode = "auto" | "off" | "minimal" | "low" | "medium" | "high" | "x_high";
 export type TurnMode = "default" | "plan";
+export type ImageDetail = "auto" | "low" | "high" | "original";
+export type InputModality = "text" | "image";
+
+export type TurnInput =
+  | { type: "text"; text: string }
+  | { type: "local_image"; path: string; detail?: ImageDetail | null }
+  | { type: "image_url"; url: string; detail?: ImageDetail | null };
+
+export interface ComposerAttachment {
+  id: string;
+  type: "local_image";
+  path: string;
+  name: string;
+  detail: ImageDetail;
+}
 
 export interface ThinkingCapability {
   supported: boolean;
@@ -29,6 +44,7 @@ export interface ModelCapabilities {
   supports_tools: boolean;
   thinking: ThinkingCapability;
   reasoning?: ReasoningCapabilities | null;
+  input_modalities?: InputModality[];
 }
 
 export interface ProjectSummary {
@@ -55,6 +71,7 @@ export interface TranscriptMessage {
   role: "user" | "assistant" | "reasoning" | "system" | "tool" | "approval";
   title?: string;
   body: string;
+  input?: TurnInput[];
   timestamp: string;
   status?: "info" | "success" | "warning" | "danger";
   threadId?: string;
@@ -235,6 +252,11 @@ export interface ThreadGoal {
   updated_at_ms: number;
 }
 
+export interface DraftThreadGoal {
+  objective: string;
+  token_budget: number | null;
+}
+
 export interface ThreadGoalSetResponse {
   goal: ThreadGoal;
 }
@@ -254,7 +276,7 @@ export interface TurnView {
 }
 
 export type ThreadItem =
-  | { type: "user_message"; text: string }
+  | { type: "user_message"; text: string; input?: TurnInput[] }
   | { type: "assistant_message"; event_id?: string | null; text: string | null }
   | { type: "reasoning"; event_id?: string | null; summary?: string[]; content?: string[] }
   | { type: "tool_result"; event_id?: string | null; name: string }

@@ -2,11 +2,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::{AgentConfig, ThinkingMode};
+use crate::model::multimodal;
 use crate::runtime::agent_profile::AgentType;
 use crate::runtime::subagent::InterAgentCommunication;
 use crate::runtime::turn_mode::TurnMode;
 use crate::session::{ThreadSnapshot, TurnContextItem};
-use crate::types::{ConversationMessage, MessageRole, TokenUsage, TokenUsageInfo, TurnId};
+use crate::types::{
+    ConversationMessage, InputModality, MessageRole, TokenUsage, TokenUsageInfo, TurnId,
+};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ContextManager {
@@ -210,14 +213,23 @@ impl ContextManager {
         self.reference_turn_context.clone()
     }
 
-    pub(crate) fn for_prompt(&self) -> Vec<ConversationMessage> {
+    pub(crate) fn for_prompt(
+        &self,
+        input_modalities: &[InputModality],
+    ) -> Vec<ConversationMessage> {
         let mut items = self.items.clone();
         items.extend(self.ephemeral_internal_context.values().cloned());
+        strip_images_when_unsupported(&mut items, input_modalities);
         items
     }
 
-    pub(crate) fn for_compaction(&self) -> Vec<ConversationMessage> {
-        self.items.clone()
+    pub(crate) fn for_compaction(
+        &self,
+        input_modalities: &[InputModality],
+    ) -> Vec<ConversationMessage> {
+        let mut items = self.items.clone();
+        strip_images_when_unsupported(&mut items, input_modalities);
+        items
     }
 
     pub(crate) fn token_info(&self) -> Option<TokenUsageInfo> {
@@ -305,6 +317,15 @@ fn role_name(role: &MessageRole) -> &'static str {
         MessageRole::User => "user",
         MessageRole::Assistant => "assistant",
         MessageRole::Tool => "tool",
+    }
+}
+
+fn strip_images_when_unsupported(
+    messages: &mut [ConversationMessage],
+    input_modalities: &[InputModality],
+) {
+    if !multimodal::supports_images(input_modalities) {
+        multimodal::strip_images_from_messages(messages);
     }
 }
 
@@ -544,10 +565,14 @@ fn current_utc_date() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::multimodal;
     use crate::policy::PolicyMode;
     use crate::resolved::ModelRef;
     use crate::runtime::agent_profile::{profile_for_type, AgentType};
-    use crate::types::{MessageRole, ThreadId, TokenUsage};
+    use crate::types::{
+        ConversationContentPart, ImageDetail, InputModality, MessageRole, ThreadId, TokenUsage,
+        UserInput,
+    };
 
     fn test_config(workspace_root: &Path, cwd: &Path) -> AgentConfig {
         let mut model = AgentConfig::default().model;
@@ -561,6 +586,10 @@ mod tests {
             max_output_bytes: 1024,
             ..AgentConfig::default()
         }
+    }
+
+    fn all_input_modalities() -> &'static [InputModality] {
+        &[InputModality::Text, InputModality::Image]
     }
 
     #[test]
@@ -889,7 +918,56 @@ mod tests {
         assert_eq!(injected.len(), 2);
         assert!(manager.reference_turn_context().is_some());
         assert_eq!(manager.raw_items().len(), 3);
-        assert_eq!(manager.for_prompt()[2].content, "hello");
+        assert_eq!(
+            manager.for_prompt(all_input_modalities())[2].content,
+            "hello"
+        );
+    }
+
+    #[test]
+    fn for_prompt_strips_images_for_text_only_model_without_mutating_history() {
+        let mut manager = ContextManager::new();
+        manager.record_items([ConversationMessage::user_parts(vec![
+            UserInput::Text {
+                text: "look".to_string(),
+            },
+            UserInput::ImageUrl {
+                url: "data:image/png;base64,AAA".to_string(),
+                detail: Some(ImageDetail::High),
+            },
+        ])]);
+
+        let text_only = manager.for_prompt(&[InputModality::Text]);
+        let with_image = manager.for_prompt(&[InputModality::Text, InputModality::Image]);
+
+        assert!(!multimodal::contains_image(&text_only[0].parts));
+        assert!(text_only[0].parts.iter().any(|part| {
+            matches!(
+                part,
+                ConversationContentPart::Text { text }
+                    if text.contains(multimodal::IMAGE_OMITTED_PLACEHOLDER)
+            )
+        }));
+        assert!(multimodal::contains_image(&with_image[0].parts));
+        assert!(multimodal::contains_image(&manager.raw_items()[0].parts));
+    }
+
+    #[test]
+    fn for_compaction_strips_images_for_text_only_model_without_mutating_history() {
+        let mut manager = ContextManager::new();
+        manager.record_items([ConversationMessage::user_parts(vec![
+            UserInput::LocalImage {
+                path: PathBuf::from("/tmp/screen.png"),
+                detail: Some(ImageDetail::High),
+            },
+        ])]);
+
+        let text_only = manager.for_compaction(&[InputModality::Text]);
+        let with_image = manager.for_prompt(&[InputModality::Text, InputModality::Image]);
+
+        assert!(!multimodal::contains_image(&text_only[0].parts));
+        assert!(multimodal::contains_image(&with_image[0].parts));
+        assert!(multimodal::contains_image(&manager.raw_items()[0].parts));
     }
 
     #[test]
@@ -901,15 +979,18 @@ mod tests {
             ConversationMessage::injected_user_context("goal_snapshot", "internal"),
         );
 
-        let prompt = manager.for_prompt();
+        let prompt = manager.for_prompt(all_input_modalities());
         assert_eq!(prompt.len(), 2);
         assert_eq!(prompt[0].content, "visible");
         assert_eq!(prompt[1].content, "internal");
         assert_eq!(prompt[1].internal_source.as_deref(), Some("goal_snapshot"));
 
         assert_eq!(manager.raw_items().len(), 1);
-        assert_eq!(manager.for_compaction().len(), 1);
-        assert_eq!(manager.for_compaction()[0].content, "visible");
+        assert_eq!(manager.for_compaction(all_input_modalities()).len(), 1);
+        assert_eq!(
+            manager.for_compaction(all_input_modalities())[0].content,
+            "visible"
+        );
 
         let mut snapshot = crate::session::ThreadSnapshot::new_thread(
             ThreadId::new("thread_context"),
@@ -921,7 +1002,7 @@ mod tests {
         assert_eq!(snapshot.conversation[0].content, "visible");
 
         manager.clear_ephemeral_internal_context("goal_snapshot");
-        assert_eq!(manager.for_prompt().len(), 1);
+        assert_eq!(manager.for_prompt(all_input_modalities()).len(), 1);
     }
 
     #[test]
@@ -934,7 +1015,7 @@ mod tests {
         assert!(message.injected);
         assert_eq!(message.internal_source.as_deref(), Some("goal_snapshot"));
         assert_eq!(manager.raw_items(), &[message.clone()]);
-        assert_eq!(manager.for_prompt(), vec![message]);
+        assert_eq!(manager.for_prompt(all_input_modalities()), vec![message]);
     }
 
     #[test]

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::provider::{provider_profile_by_id, ProviderProtocol};
 use crate::model::reasoning::ReasoningCapabilities;
+use crate::types::InputModality;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ModelRef {
@@ -77,11 +78,23 @@ impl Default for ResolvedCredential {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelCapabilities {
     pub context_window: Option<i64>,
     pub supports_tools: bool,
     pub reasoning: ReasoningCapabilities,
+    pub input_modalities: Vec<InputModality>,
+}
+
+impl Default for ModelCapabilities {
+    fn default() -> Self {
+        Self {
+            context_window: None,
+            supports_tools: false,
+            reasoning: ReasoningCapabilities::default(),
+            input_modalities: vec![InputModality::Text, InputModality::Image],
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,6 +132,7 @@ impl ResolvedModelConfig {
                 context_window,
                 supports_tools: profile.supports_tools,
                 reasoning: profile.reasoning_capabilities_for_model(&model_id),
+                input_modalities: profile.input_modalities_for_model(&model_id),
             },
         }
     }
@@ -199,6 +213,22 @@ mod tests {
 
         assert!(debug.contains("***"));
         assert!(!debug.contains("sk-secret"));
+    }
+
+    #[test]
+    fn resolved_model_config_includes_input_modalities_from_provider_profile() {
+        let model = ResolvedModelConfig::from_provider_profile(
+            "deepseek",
+            "deepseek-v4-pro",
+            None,
+            ResolvedCredential::None,
+            None,
+        );
+
+        assert_eq!(
+            model.capabilities.input_modalities,
+            vec![crate::types::InputModality::Text]
+        );
     }
 
     #[test]

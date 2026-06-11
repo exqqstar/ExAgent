@@ -12,7 +12,8 @@ use axum::{
 use exagent::config::ThinkingMode;
 use exagent::model::reasoning::ReasoningProtocol;
 use exagent_desktop::settings::{
-    DesktopSettingsStore, ProviderModelListRequest, ProviderModelListStatus, SecretStore,
+    CredentialAuthMethod, DesktopSettingsStore, OAuthTokenBundle, ProviderModelListRequest,
+    ProviderModelListStatus, ProviderSettingsSaveRequest, SecretStore,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -584,7 +585,7 @@ async fn anthropic_model_discovery_lists_models_with_api_key() {
 }
 
 #[tokio::test]
-async fn model_discovery_reports_unavailable_for_copilot_provider() {
+async fn copilot_model_discovery_requires_oauth_before_network_call() {
     let dir = tempdir().unwrap();
     let secrets = Arc::new(MemorySecrets::default());
     let store = DesktopSettingsStore::with_secret_store(dir.path().join("settings.json"), secrets);
@@ -599,8 +600,213 @@ async fn model_discovery_reports_unavailable_for_copilot_provider() {
         .await
         .unwrap();
 
-    assert_eq!(response.status, ProviderModelListStatus::Unavailable);
+    assert_eq!(response.status, ProviderModelListStatus::MissingCredential);
     assert!(response.models.is_empty());
+}
+
+#[tokio::test]
+async fn copilot_model_discovery_lists_models_with_oauth_headers() {
+    let base_url = spawn_copilot_models_server(json!({
+        "data": [
+            {
+                "id": "gpt-5.5",
+                "name": "GPT-5.5",
+                "capabilities": {
+                    "limits": {
+                        "max_context_window_tokens": 1048576
+                    },
+                    "supports": {
+                        "tool_calls": true
+                    }
+                }
+            },
+            {
+                "id": "claude-sonnet-4.6",
+                "name": "Claude Sonnet 4.6",
+                "capabilities": {
+                    "limits": {
+                        "max_prompt_tokens": 200000
+                    }
+                }
+            },
+            {
+                "id": "legacy-hidden",
+                "name": "Legacy hidden",
+                "model_picker_enabled": false
+            }
+        ]
+    }))
+    .await;
+    let dir = tempdir().unwrap();
+    let secrets = Arc::new(MemorySecrets::default());
+    let store = DesktopSettingsStore::with_secret_store(dir.path().join("settings.json"), secrets);
+    store
+        .save_oauth_credential(
+            "github_copilot",
+            "copilot-1",
+            "GitHub Copilot",
+            CredentialAuthMethod::GitHubCopilotOAuth,
+            OAuthTokenBundle {
+                access_token: "copilot-oauth-token".to_string(),
+                refresh_token: "copilot-oauth-token".to_string(),
+                expires_at_ms: None,
+                account_id: None,
+                account_label: None,
+                raw_id_token: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let response = store
+        .list_provider_models(ProviderModelListRequest {
+            provider_id: "github_copilot".into(),
+            base_url,
+            api_key: None,
+            use_saved_api_key: false,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, ProviderModelListStatus::Success);
+    assert_eq!(
+        response
+            .models
+            .iter()
+            .map(|model| (model.id.as_str(), model.display_name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("gpt-5.5", "GPT-5.5"),
+            ("claude-sonnet-4.6", "Claude Sonnet 4.6")
+        ]
+    );
+    assert_eq!(response.models[0].provider_id, "github_copilot");
+    assert_eq!(response.models[0].context_window, Some(1048576));
+    assert_eq!(response.models[0].supports_tools, Some(true));
+    assert_eq!(response.models[1].context_window, Some(200000));
+}
+
+#[tokio::test]
+async fn provider_settings_load_refreshes_existing_copilot_oauth_models() {
+    let base_url = spawn_copilot_models_server(json!({
+        "data": [
+            { "id": "gpt-5.5", "name": "GPT-5.5" },
+            { "id": "gemini-3.1-pro", "name": "Gemini 3.1 Pro" }
+        ]
+    }))
+    .await;
+    let dir = tempdir().unwrap();
+    let secrets = Arc::new(MemorySecrets::default());
+    let store = DesktopSettingsStore::with_secret_store(dir.path().join("settings.json"), secrets);
+    store
+        .save_oauth_credential(
+            "github_copilot",
+            "copilot-1",
+            "GitHub Copilot",
+            CredentialAuthMethod::GitHubCopilotOAuth,
+            OAuthTokenBundle {
+                access_token: "copilot-oauth-token".to_string(),
+                refresh_token: "copilot-oauth-token".to_string(),
+                expires_at_ms: None,
+                account_id: None,
+                account_label: None,
+                raw_id_token: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .save_provider_settings(ProviderSettingsSaveRequest {
+            provider_id: "github_copilot".into(),
+            base_url,
+            model: "gpt-5.1-copilot".into(),
+            api_key: None,
+            clear_api_key: false,
+            credential_id: Some("copilot-1".into()),
+            create_credential: false,
+            model_options: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let settings = store.load_provider_settings().await.unwrap();
+
+    assert_eq!(settings.active_provider_id, "github_copilot");
+    assert_eq!(settings.config.model, "gpt-5.5");
+    assert!(
+        settings
+            .model_options
+            .iter()
+            .any(|model| model.provider_id == "github_copilot" && model.id == "gemini-3.1-pro"),
+        "expected refreshed Copilot model options, got {:?}",
+        settings
+            .model_options
+            .iter()
+            .map(|model| (&model.provider_id, &model.id))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn provider_settings_load_migrates_stale_copilot_model_with_cached_options() {
+    let base_url = spawn_copilot_models_server(json!({
+        "data": [
+            { "id": "gpt-5.5", "name": "GPT-5.5" },
+            { "id": "claude-opus-4.8", "name": "Claude Opus 4.8" }
+        ]
+    }))
+    .await;
+    let dir = tempdir().unwrap();
+    let secrets = Arc::new(MemorySecrets::default());
+    let store = DesktopSettingsStore::with_secret_store(dir.path().join("settings.json"), secrets);
+    store
+        .save_oauth_credential(
+            "github_copilot",
+            "copilot-1",
+            "GitHub Copilot",
+            CredentialAuthMethod::GitHubCopilotOAuth,
+            OAuthTokenBundle {
+                access_token: "copilot-oauth-token".to_string(),
+                refresh_token: "copilot-oauth-token".to_string(),
+                expires_at_ms: None,
+                account_id: None,
+                account_label: None,
+                raw_id_token: None,
+            },
+        )
+        .await
+        .unwrap();
+    let cached_models = store
+        .list_provider_models(ProviderModelListRequest {
+            provider_id: "github_copilot".into(),
+            base_url: base_url.clone(),
+            api_key: None,
+            use_saved_api_key: false,
+        })
+        .await
+        .unwrap()
+        .models;
+    store
+        .save_provider_settings(ProviderSettingsSaveRequest {
+            provider_id: "github_copilot".into(),
+            base_url,
+            model: "gpt-5.1-copilot".into(),
+            api_key: None,
+            clear_api_key: false,
+            credential_id: Some("copilot-1".into()),
+            create_credential: false,
+            model_options: cached_models,
+        })
+        .await
+        .unwrap();
+
+    let settings = store.load_provider_settings().await.unwrap();
+
+    assert_eq!(settings.config.model, "gpt-5.5");
+    assert!(settings
+        .model_options
+        .iter()
+        .any(|model| model.provider_id == "github_copilot" && model.id == "claude-opus-4.8"));
 }
 
 #[tokio::test]
@@ -688,4 +894,46 @@ async fn spawn_models_server_with_auth_probe(
         axum::serve(listener, app).await.unwrap();
     });
     format!("http://{addr}/v1")
+}
+
+async fn spawn_copilot_models_server(body: serde_json::Value) -> String {
+    let app = Router::new().route(
+        "/models",
+        get(move |headers: HeaderMap| {
+            let body = body.clone();
+            async move {
+                assert_eq!(
+                    headers
+                        .get(AUTHORIZATION)
+                        .and_then(|header| header.to_str().ok()),
+                    Some("Bearer copilot-oauth-token")
+                );
+                assert_eq!(
+                    headers
+                        .get("Copilot-Integration-Id")
+                        .and_then(|header| header.to_str().ok()),
+                    Some("vscode-chat")
+                );
+                assert_eq!(
+                    headers
+                        .get("Editor-Version")
+                        .and_then(|header| header.to_str().ok()),
+                    Some("vscode/1.104.1")
+                );
+                assert_eq!(
+                    headers
+                        .get("Openai-Intent")
+                        .and_then(|header| header.to_str().ok()),
+                    Some("conversation-edits")
+                );
+                Json(body)
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
 }

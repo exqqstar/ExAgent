@@ -12,6 +12,9 @@ import type {
   AgentRunStatus,
   AgentThreadView,
   BackendRuntimeEvent,
+  ComposerAttachment,
+  DraftThreadGoal,
+  InputModality,
   ModelRef,
   ProviderSettingsResponse,
   ProjectSummary,
@@ -21,6 +24,7 @@ import type {
   ThreadGoal,
   ThreadGoalStatus,
   ThinkingMode,
+  TurnInput,
   ThreadItem,
   ThreadTokenUsage,
   ThreadView,
@@ -39,7 +43,9 @@ type WorkbenchState = WorkbenchSnapshot & {
   error: string | null;
   agents: AgentNode[];
   composerValue: string;
+  composerAttachments: ComposerAttachment[];
   currentGoal: ThreadGoal | null;
+  draftGoal: DraftThreadGoal | null;
   goalEditorOpen: boolean;
   search: string;
   activeProviderId: string | null;
@@ -76,6 +82,8 @@ type WorkbenchState = WorkbenchSnapshot & {
   openArchivedSession: (projectId: string, sessionId: string) => Promise<void>;
   pinSession: (sessionId: string, pinned: boolean) => Promise<void>;
   setComposerValue: (composerValue: string) => void;
+  addComposerAttachments: (paths: string[]) => void;
+  removeComposerAttachment: (id: string) => void;
   composerPlanMode: boolean;
   setComposerPlanMode: (enabled: boolean) => void;
   setSelectedModel: (model: string | ModelRef | null) => void;
@@ -118,8 +126,10 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   error: null,
   agents: [],
   composerValue: "",
+  composerAttachments: [],
   composerPlanMode: false,
   currentGoal: null,
+  draftGoal: null,
   goalEditorOpen: false,
   search: "",
   activeProviderId: DEFAULT_PROVIDER_ID,
@@ -153,6 +163,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         selectedModel: normalized.selectedModel,
         selectedThinkingMode: normalized.selectedThinkingMode,
         activeProviderId: normalized.activeProviderId,
+        draftGoal: null,
         appliedRuntimeEventIds: new Set(),
         loading: false,
         error: null
@@ -168,6 +179,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         ...emptySnapshot,
         activeProviderId: DEFAULT_PROVIDER_ID,
         providerSettings: null,
+        draftGoal: null,
         appliedRuntimeEventIds: new Set(),
         loading: false,
         error: errorMessage(error)
@@ -193,6 +205,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         activeProjectId: project.id,
         activeSessionId: sessions[0]?.id ?? null,
         transcript: [],
+        draftGoal: null,
         events: [],
         cwd: project.path
       });
@@ -264,6 +277,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         transcript: [],
         events: [],
         changedFiles: [],
+        draftGoal: null,
         appliedRuntimeEventIds: new Set(),
         error: null
       });
@@ -304,6 +318,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         transcript: [],
         events: [],
         changedFiles: [],
+        draftGoal: null,
         cwd: project.path,
         appliedRuntimeEventIds: new Set(),
         loading: false
@@ -331,6 +346,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       eventUnlisten: null,
       transcript: [],
       events: [],
+      draftGoal: null,
       agents: [],
       appliedRuntimeEventIds: new Set()
     });
@@ -495,8 +511,10 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         events: [],
         changedFiles: [],
         composerValue: "",
+        composerAttachments: [],
         composerPlanMode: false,
         currentGoal: null,
+        draftGoal: null,
         goalEditorOpen: false,
         appliedRuntimeEventIds: new Set()
       });
@@ -511,6 +529,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
           activeSessionId: null,
           transcript: [],
           currentGoal: null,
+          draftGoal: null,
           goalEditorOpen: false,
           events: [],
           changedFiles: [],
@@ -530,10 +549,12 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       activeSessionId: null,
       transcript: [],
       currentGoal: null,
+      draftGoal: null,
       goalEditorOpen: false,
       events: [],
       changedFiles: [],
       composerValue: "",
+      composerAttachments: [],
       composerPlanMode: false,
       eventUnlisten: null,
       appliedRuntimeEventIds: new Set(),
@@ -544,7 +565,17 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
 
   async sendPrompt() {
     const prompt = get().composerValue.trim();
-    if (!prompt) {
+    const attachments = get().composerAttachments;
+    if (!prompt && attachments.length === 0) {
+      return;
+    }
+    const input = buildTurnInput(prompt, attachments);
+    const inputForTurn = attachments.length > 0 ? input : [];
+    const normalized = normalizeWorkbenchSelection(get());
+    if (inputContainsImage(input) && !selectedModelInputModalities(normalized, get()).includes("image")) {
+      set({
+        error: "The selected model does not support image input. Choose a vision-capable model before sending photos."
+      });
       return;
     }
     const planMode = get().composerPlanMode;
@@ -554,6 +585,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       return;
     }
     let threadId = get().activeSessionId;
+    const draftGoal = threadId ? null : get().draftGoal;
     if (!threadId) {
       try {
         const started = await exagentClient.startThread(projectId);
@@ -575,16 +607,24 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     if (!threadId) {
       return;
     }
+    if (draftGoal) {
+      const applied = await persistDraftGoal(projectId, threadId, draftGoal, set);
+      if (!applied) {
+        return;
+      }
+    }
 
     const optimisticMessage: TranscriptMessage = {
       id: `user-${Date.now()}`,
       role: "user",
       body: prompt,
+      input: inputForTurn,
       timestamp: "now",
       threadId
     };
     set({
       composerValue: "",
+      composerAttachments: [],
       composerPlanMode: false,
       transcript: [...get().transcript, optimisticMessage],
       sessions: get().sessions.map((session) =>
@@ -593,7 +633,6 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     });
 
     try {
-      const normalized = normalizeWorkbenchSelection(get());
       const thinkingOverride = turnThinkingOverride(get(), normalized);
       set({
         activeProviderId: normalized.activeProviderId,
@@ -608,11 +647,25 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
           model: normalized.selectedModel,
           thinkingMode: thinkingOverride.thinkingMode,
           clearThinkingMode: thinkingOverride.clearThinkingMode,
-          turnMode: planMode ? "plan" : "default"
+          turnMode: planMode ? "plan" : "default",
+          ...(inputForTurn.length > 0 ? { input: inputForTurn } : {})
         }
       );
     } catch (error) {
-      set({ error: errorMessage(error) });
+      const current = get();
+      const shouldRestoreDraft = current.composerValue.length === 0 && current.composerAttachments.length === 0;
+      set({
+        error: errorMessage(error),
+        ...(shouldRestoreDraft
+          ? {
+              composerValue: prompt,
+              composerAttachments: attachments,
+              composerPlanMode: planMode
+            }
+          : {}),
+        transcript: current.transcript.filter((message) => message.id !== optimisticMessage.id),
+        sessions: updateSessionStatus(current.sessions, threadId, "idle")
+      });
     }
   },
 
@@ -649,12 +702,23 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     const projectId = get().activeProjectId;
     const threadId = get().activeSessionId;
     const trimmedObjective = objective.trim();
-    if (!projectId || !threadId) {
-      set({ error: "Open a thread before starting a goal." });
+    if (!projectId) {
+      set({ error: "Choose a project folder before starting a goal." });
       return;
     }
     if (!trimmedObjective) {
       set({ error: "Goal objective cannot be empty." });
+      return;
+    }
+    if (!threadId) {
+      set({
+        draftGoal: {
+          objective: trimmedObjective,
+          token_budget: tokenBudget ?? null
+        },
+        goalEditorOpen: false,
+        error: null
+      });
       return;
     }
     try {
@@ -687,7 +751,11 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   async clearThreadGoal() {
     const projectId = get().activeProjectId;
     const threadId = get().activeSessionId;
-    if (!projectId || !threadId) {
+    if (!threadId) {
+      set({ draftGoal: null, goalEditorOpen: false, error: null });
+      return;
+    }
+    if (!projectId) {
       return;
     }
     try {
@@ -812,6 +880,32 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
 
   setComposerValue(composerValue: string) {
     set({ composerValue });
+  },
+
+  addComposerAttachments(paths: string[]) {
+    if (paths.length === 0) {
+      return;
+    }
+    const seenPaths = new Set(get().composerAttachments.map((attachment) => attachment.path));
+    const attachments: ComposerAttachment[] = [];
+    for (const path of paths) {
+      const normalizedPath = path.trim();
+      if (!normalizedPath || seenPaths.has(normalizedPath)) {
+        continue;
+      }
+      seenPaths.add(normalizedPath);
+      attachments.push(composerAttachmentFromPath(normalizedPath));
+    }
+    if (attachments.length === 0) {
+      return;
+    }
+    set({ composerAttachments: [...get().composerAttachments, ...attachments], error: null });
+  },
+
+  removeComposerAttachment(id: string) {
+    set({
+      composerAttachments: get().composerAttachments.filter((attachment) => attachment.id !== id)
+    });
   },
 
   setComposerPlanMode(composerPlanMode: boolean) {
@@ -1181,6 +1275,10 @@ export function getWorkbenchState() {
 export const loadWorkbench = () => useWorkbenchStore.getState().loadWorkbench();
 export const setComposerValue = (composerValue: string) =>
   useWorkbenchStore.getState().setComposerValue(composerValue);
+export const addComposerAttachments = (paths: string[]) =>
+  useWorkbenchStore.getState().addComposerAttachments(paths);
+export const removeComposerAttachment = (id: string) =>
+  useWorkbenchStore.getState().removeComposerAttachment(id);
 export const setComposerPlanMode = (enabled: boolean) =>
   useWorkbenchStore.getState().setComposerPlanMode(enabled);
 export const setSelectedModel = (model: string | ModelRef | null) =>
@@ -1203,6 +1301,33 @@ export const setThreadGoalStatus = (
 export const clearThreadGoal = () => useWorkbenchStore.getState().clearThreadGoal();
 export const submitApproval = (message: TranscriptMessage, decision: "approved" | "denied") =>
   useWorkbenchStore.getState().submitApproval(message, decision);
+
+function composerAttachmentFromPath(path: string): ComposerAttachment {
+  const normalizedPath = path.trim();
+  const name = normalizedPath.split(/[\\/]/).filter(Boolean).at(-1) ?? normalizedPath;
+  return {
+    id: `${normalizedPath}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    type: "local_image",
+    path: normalizedPath,
+    name,
+    detail: "high"
+  };
+}
+
+function buildTurnInput(prompt: string, attachments: ComposerAttachment[]): TurnInput[] {
+  return [
+    ...(prompt ? [{ type: "text" as const, text: prompt }] : []),
+    ...attachments.map((attachment) => ({
+      type: "local_image" as const,
+      path: attachment.path,
+      detail: attachment.detail
+    }))
+  ];
+}
+
+function inputContainsImage(input: TurnInput[]) {
+  return input.some((part) => part.type === "local_image" || part.type === "image_url");
+}
 
 function createRuntimeEventBatcher(apply: (events: BackendRuntimeEvent[]) => void) {
   let queued: BackendRuntimeEvent[] = [];
@@ -1245,6 +1370,36 @@ function createRuntimeEventBatcher(apply: (events: BackendRuntimeEvent[]) => voi
       timeoutId = null;
     }
   };
+}
+
+async function persistDraftGoal(
+  projectId: string,
+  threadId: string,
+  draftGoal: DraftThreadGoal,
+  set: (partial: Partial<WorkbenchState>) => void
+) {
+  try {
+    const response = await exagentClient.setThreadGoal(projectId, threadId, {
+      objective: draftGoal.objective,
+      status: "active",
+      tokenBudget: draftGoal.token_budget,
+      clearTokenBudget: draftGoal.token_budget === null
+    });
+    set({
+      currentGoal: response.goal,
+      draftGoal: null,
+      goalEditorOpen: false,
+      error: null
+    });
+    return true;
+  } catch (error) {
+    set({
+      draftGoal,
+      goalEditorOpen: false,
+      error: errorMessage(error)
+    });
+    return false;
+  }
 }
 
 function resetSelectedAgentThread(
@@ -1323,6 +1478,7 @@ async function refreshProjectSelection(
       activeSessionId: null,
       transcript: [],
       currentGoal: null,
+      draftGoal: null,
       goalEditorOpen: false,
       events: [],
       changedFiles: [],
@@ -1346,6 +1502,7 @@ async function refreshProjectSelection(
     activeSessionId: targetSessionId,
     transcript: [],
     currentGoal: null,
+    draftGoal: null,
     goalEditorOpen: false,
     events: [],
     changedFiles: [],
@@ -1433,6 +1590,7 @@ function threadItemToTranscript(
         id,
         role: "user",
         body: item.text,
+        input: item.input ?? [],
         timestamp: "history",
         threadId,
         turnId
@@ -2327,10 +2485,11 @@ type SelectionState = Pick<
 
 function normalizeWorkbenchSelection(state: Partial<SelectionState>) {
   const activeProviderId = activeProviderIdFromSettings(state.providerSettings, state.activeProviderId);
-  const selectedModel =
-    normalizeModelRef(state.selectedModel ?? null, activeProviderId) ??
-    providerConfigModelRef(state.providerSettings) ??
-    modelRefFromString(state.runtimeSettings?.default_model, activeProviderId);
+  const selectedModel = isProviderConfigurationRequired(state.providerSettings)
+    ? null
+    : normalizeModelRef(state.selectedModel ?? null, activeProviderId) ??
+      providerConfigModelRef(state.providerSettings) ??
+      modelRefFromString(state.runtimeSettings?.default_model, activeProviderId);
   const selectedThinkingMode = normalizeThinkingModeForModel(
     state.selectedThinkingMode ?? null,
     selectedModel,
@@ -2353,6 +2512,19 @@ function providerConfigModelRef(settings?: ProviderSettingsResponse | null): Mod
     return null;
   }
   return modelRefFromString(settings.config.model, activeProviderIdFromSettings(settings, null));
+}
+
+function isProviderConfigurationRequired(settings?: ProviderSettingsResponse | null) {
+  const missingRequiredCredential = Boolean(
+    settings?.config.auth_required && !settings.config.has_api_key && !settings.config.has_credential
+  );
+  return Boolean(
+    settings &&
+      settings.connected_provider === null &&
+      settings.configured_providers.length === 0 &&
+      settings.model_options.length === 0 &&
+      missingRequiredCredential
+  );
 }
 
 function normalizeThinkingModeForModel(
@@ -2401,4 +2573,29 @@ function selectedModelThinkingCapability(normalized: ReturnType<typeof normalize
       (option) => option.provider_id === model.provider_id && option.id === model.model_id
     )?.capabilities.thinking ?? null
   );
+}
+
+function selectedModelInputModalities(
+  normalized: ReturnType<typeof normalizeWorkbenchSelection>,
+  state: SelectionState
+): InputModality[] {
+  const model = normalized.selectedModel;
+  if (!model) {
+    return ["text", "image"];
+  }
+
+  const configured = state.providerSettings?.model_options.find(
+    (option) => option.provider_id === model.provider_id && option.id === model.model_id
+  )?.capabilities.input_modalities;
+  if (configured?.length) {
+    return configured;
+  }
+
+  return isKnownTextOnlyModel(model) ? ["text"] : ["text", "image"];
+}
+
+function isKnownTextOnlyModel(model: ModelRef) {
+  const providerId = model.provider_id.toLowerCase();
+  const modelId = model.model_id.toLowerCase();
+  return providerId === "deepseek" || modelId.startsWith("embedding") || modelId.includes("/embedding");
 }

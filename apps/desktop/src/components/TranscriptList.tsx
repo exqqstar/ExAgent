@@ -3,7 +3,8 @@ import { useState, type ReactNode } from "react";
 import { ApprovalCard } from "@/components/ApprovalCard";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { TranscriptMessage } from "@/types";
+import type { TranscriptMessage, TurnInput } from "@/types";
+import { fileBaseName, localFileAssetSrc } from "@/lib/media";
 import { cn } from "@/lib/utils";
 
 const roleLabel: Record<TranscriptMessage["role"], string> = {
@@ -64,10 +65,13 @@ export function TranscriptItem({ message }: { message: TranscriptMessage }) {
   }
 
   if (message.role === "user") {
+    const images = imageInputs(message.input);
+    const hasBody = message.body.trim().length > 0;
     return (
       <article className="flex justify-end" aria-label="User message">
         <div className="user-bubble max-w-[min(74%,680px)] rounded-lg px-4 py-2.5 text-ink sm:max-w-[min(68%,680px)]">
-          <p className="type-body-lg whitespace-pre-wrap break-words">{message.body}</p>
+          {hasBody ? <p className="type-body-lg whitespace-pre-wrap break-words">{message.body}</p> : null}
+          {images.length > 0 ? <UserImageGrid images={images} hasBody={hasBody} /> : null}
         </div>
       </article>
     );
@@ -116,6 +120,64 @@ export function TranscriptItem({ message }: { message: TranscriptMessage }) {
       )}
     </article>
   );
+}
+
+function UserImageGrid({
+  images,
+  hasBody
+}: {
+  images: Array<Extract<TurnInput, { type: "local_image" | "image_url" }>>;
+  hasBody: boolean;
+}) {
+  return (
+    <div className={cn("grid grid-cols-2 gap-2", hasBody && "mt-2")}>
+      {images.map((image, index) => (
+        <div
+          key={`${image.type}-${imageKey(image)}-${index}`}
+          className="min-w-0 overflow-hidden rounded-md border border-border bg-surface-2"
+        >
+          <TranscriptImagePreview image={image} />
+          {image.type === "local_image" ? (
+            <div className="type-label-sm truncate px-2 py-1 text-subtle">{fileBaseName(image.path)}</div>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TranscriptImagePreview({ image }: { image: Extract<TurnInput, { type: "local_image" | "image_url" }> }) {
+  const [failed, setFailed] = useState(false);
+  const label = image.type === "local_image" ? fileBaseName(image.path) : "Attached image";
+  if (failed) {
+    return (
+      <div className="flex aspect-video w-full items-center justify-center bg-surface-3 text-subtle">
+        <Info className="h-4 w-4" />
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={image.type === "local_image" ? localFileAssetSrc(image.path) : image.url}
+      alt={label}
+      loading="lazy"
+      decoding="async"
+      className="aspect-video w-full bg-surface-3 object-cover"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
+function imageInputs(input: TurnInput[] | undefined): Array<Extract<TurnInput, { type: "local_image" | "image_url" }>> {
+  return (input ?? []).filter(
+    (part): part is Extract<TurnInput, { type: "local_image" | "image_url" }> =>
+      part.type === "local_image" || part.type === "image_url"
+  );
+}
+
+function imageKey(image: Extract<TurnInput, { type: "local_image" | "image_url" }>) {
+  return image.type === "local_image" ? image.path : image.url;
 }
 
 function ReasoningBlock({ message }: { message: TranscriptMessage }) {

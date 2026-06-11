@@ -29,6 +29,7 @@ import type {
   ThreadGoalSetResponse,
   ThreadGoalStatus,
   ThreadStartResponse,
+  TurnInput,
   TurnMode,
   TurnStartResponse,
   WorkbenchSnapshot
@@ -131,6 +132,7 @@ const mockSnapshot: WorkbenchSnapshot = {
 function mockCapabilities(supportsThinking: boolean, supportsTools = true): ModelCapabilities {
   return {
     supports_tools: supportsTools,
+    input_modalities: ["text", "image"],
     thinking: {
       supported: supportsThinking,
       modes: supportsThinking ? ["off", "low", "medium", "high", "x_high"] : []
@@ -247,8 +249,8 @@ const mockProviderSettings: ProviderSettingsResponse = {
       auth_mode: "oauth_required",
       protocol: "copilot_oauth",
       default_base_url: "https://api.githubcopilot.com",
-      default_model: "gpt-5.1-copilot",
-      supports_model_discovery: false,
+      default_model: "gpt-5.5",
+      supports_model_discovery: true,
       supports_tools: true,
       unsupported_reason: null
     }
@@ -292,8 +294,8 @@ function mockOAuthProviderSettings(providerId: "openai" | "github_copilot", name
     auth_mode: providerId === "openai" ? "api_key_required" : "oauth_required",
     protocol: providerId === "openai" ? "openai_chat_completions" : "copilot_oauth",
     default_base_url: providerId === "openai" ? "https://api.openai.com/v1" : "https://api.githubcopilot.com",
-    default_model: providerId === "openai" ? "gpt-5.5" : "gpt-5.1-copilot",
-    supports_model_discovery: providerId === "openai",
+    default_model: "gpt-5.5",
+    supports_model_discovery: true,
     supports_tools: true,
     unsupported_reason: null
   };
@@ -614,6 +616,163 @@ export async function pickAndAddProject(): Promise<ProjectRecord | null> {
   return invokeCommand<ProjectRecord>("project_add", { name, path: selected });
 }
 
+export async function importImagePaths(paths: string[]): Promise<string[]> {
+  if (!isTauriRuntime() || paths.length === 0) {
+    return [];
+  }
+  return invokeCommand<string[]>("image_attachments_import", { paths });
+}
+
+export async function pickImageFiles(): Promise<string[]> {
+  if (!isTauriRuntime()) {
+    return [];
+  }
+
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
+    directory: false,
+    multiple: true,
+    filters: [
+      {
+        name: "Images",
+        extensions: ["png", "jpg", "jpeg", "webp", "gif"]
+      }
+    ]
+  });
+  const paths = Array.isArray(selected)
+    ? selected.filter((item): item is string => typeof item === "string")
+    : typeof selected === "string"
+      ? [selected]
+      : [];
+  if (paths.length === 0) {
+    return [];
+  }
+  return importImagePaths(paths);
+}
+
+type ImageAttachmentBytesImport = {
+  fileName: string;
+  mimeType: string | null;
+  bytesBase64: string;
+};
+
+const MAX_IMAGE_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+const MAX_IMAGE_ATTACHMENT_BATCH_BYTES = 20 * 1024 * 1024;
+const MAX_IMAGE_ATTACHMENT_FILE_COUNT = 8;
+
+export async function importImageFiles(files: File[]): Promise<string[]> {
+  if (!isTauriRuntime() || files.length === 0) {
+    return [];
+  }
+
+  validateImageFileBatch(files);
+
+  const items: ImageAttachmentBytesImport[] = [];
+  for (const file of files) {
+    items.push(await fileToImageAttachmentBytesImport(file));
+  }
+  return invokeCommand<string[]>("image_attachments_import_bytes", { items });
+}
+
+async function fileToImageAttachmentBytesImport(file: File): Promise<ImageAttachmentBytesImport> {
+  return {
+    fileName: file.name || "image.png",
+    mimeType: file.type || null,
+    bytesBase64: arrayBufferToBase64(await fileToArrayBuffer(file))
+  };
+}
+
+function validateImageFileBatch(files: File[]) {
+  if (files.length > MAX_IMAGE_ATTACHMENT_FILE_COUNT) {
+    throw new Error(
+      `Could not import images: ${files.length} files exceeds the ${MAX_IMAGE_ATTACHMENT_FILE_COUNT} file limit`
+    );
+  }
+
+  let totalBytes = 0;
+  for (const file of files) {
+    validateImageFileSize(file);
+    totalBytes += file.size;
+  }
+
+  if (totalBytes > MAX_IMAGE_ATTACHMENT_BATCH_BYTES) {
+    throw new Error(
+      `Could not import images: ${totalBytes} total bytes exceeds the ${MAX_IMAGE_ATTACHMENT_BATCH_BYTES} byte batch limit`
+    );
+  }
+}
+
+function validateImageFileSize(file: File) {
+  const fileName = file.name || "image.png";
+  if (file.size === 0) {
+    throw new Error(`Could not import image \`${fileName}\`: file is empty`);
+  }
+  if (file.size > MAX_IMAGE_ATTACHMENT_BYTES) {
+    throw new Error(
+      `Could not import image \`${fileName}\`: ${file.size} bytes exceeds the ${MAX_IMAGE_ATTACHMENT_BYTES} byte limit`
+    );
+  }
+}
+
+function fileToArrayBuffer(file: File): Promise<ArrayBuffer> {
+  if (typeof file.arrayBuffer === "function") {
+    return file.arrayBuffer();
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read image file"));
+    reader.onload = () => {
+      if (reader.result instanceof ArrayBuffer) {
+        resolve(reader.result);
+      } else {
+        reject(new Error("Could not read image file as bytes"));
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+export type ImageDragDropHandlers = {
+  onEnter: (paths: string[]) => void;
+  onLeave: () => void;
+  onDrop: (paths: string[]) => void;
+};
+
+/**
+ * Tauri v2 intercepts OS file drags, so HTML5 drop events do not receive
+ * file paths. The webview-level drag-drop event provides those paths.
+ */
+export async function subscribeImageDragDrop(handlers: ImageDragDropHandlers): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+
+  const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+  return getCurrentWebview().onDragDropEvent((event) => {
+    if (event.payload.type === "enter") {
+      handlers.onEnter(event.payload.paths);
+    } else if (event.payload.type === "over") {
+      handlers.onEnter([]);
+    } else if (event.payload.type === "leave") {
+      handlers.onLeave();
+    } else if (event.payload.type === "drop") {
+      handlers.onDrop(event.payload.paths);
+    }
+  });
+}
+
 export async function listProjects(): Promise<ProjectRecord[]> {
   if (!isTauriRuntime()) {
     return mockSnapshot.projects
@@ -837,6 +996,7 @@ export type StartTurnOptions = {
   thinkingMode?: ThinkingMode | null;
   clearThinkingMode?: boolean;
   turnMode?: TurnMode;
+  input?: TurnInput[];
 };
 
 export async function startTurn(
@@ -849,6 +1009,7 @@ export async function startTurn(
   const thinkingMode = options.thinkingMode ?? null;
   const clearThinkingMode = options.clearThinkingMode ?? false;
   const turnMode = options.turnMode ?? "default";
+  const input = options.input ?? [];
 
   if (!isTauriRuntime()) {
     return {
@@ -859,14 +1020,15 @@ export async function startTurn(
         items: [
           {
             type: "user_message",
-            text: prompt
+            text: prompt,
+            input
           }
         ]
       }
     };
   }
 
-  return invokeCommand<TurnStartResponse>("turn_start", {
+  const args: Record<string, unknown> = {
     projectId,
     threadId,
     prompt,
@@ -874,7 +1036,11 @@ export async function startTurn(
     thinkingMode: thinkingMode ?? null,
     clearThinkingMode,
     turnMode
-  });
+  };
+  if (input.length > 0) {
+    args.input = input;
+  }
+  return invokeCommand<TurnStartResponse>("turn_start", args);
 }
 
 export async function interruptTurn(projectId: string, threadId: string, turnId?: string) {
@@ -1344,10 +1510,13 @@ export const exagentClient = {
   mockSubagentEvents,
   mockAgentTree,
   interruptTurn,
+  importImageFiles,
+  importImagePaths,
   agentTree,
   listProjects,
   listThreads,
   pickAndAddProject,
+  pickImageFiles,
   pinProject,
   pinThread,
   readThread,
@@ -1364,6 +1533,7 @@ export const exagentClient = {
   startThread,
   startTurn,
   submitApprovalDecision,
+  subscribeImageDragDrop,
   subscribeRuntimeEvents,
   threadRecordToSession,
   clearThreadGoal,

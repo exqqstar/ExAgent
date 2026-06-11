@@ -182,6 +182,7 @@ impl ThreadManager {
         self.turn_start_and_wait(TurnStartParams {
             thread_id,
             prompt: params.prompt,
+            input: vec![],
             workspace_root,
             turn_mode: Default::default(),
             turn_context: thinking_mode.map(|thinking_mode| TurnContextOverrides {
@@ -1581,6 +1582,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "continue".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -1617,6 +1619,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id,
                 prompt: "continue".into(),
+                input: vec![],
                 workspace_root: Some(other_root.display().to_string()),
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -1669,6 +1672,7 @@ mod tests {
             .turn_start(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "request approval".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -1758,6 +1762,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: visible_thread.thread.id,
                 prompt: "record visible tools".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -1794,6 +1799,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: hidden_thread.thread.id,
                 prompt: "record hidden tools".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -1837,6 +1843,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "make a plan".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: TurnMode::Plan,
                 turn_context: None,
@@ -1879,6 +1886,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "plan but force a write".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: TurnMode::Plan,
                 turn_context: None,
@@ -1914,6 +1922,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "plan but force a command".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: TurnMode::Plan,
                 turn_context: None,
@@ -1949,6 +1958,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "plan but force a worker spawn".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: TurnMode::Plan,
                 turn_context: None,
@@ -1993,6 +2003,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "delegate root".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2095,6 +2106,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "remember parent fact".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2107,6 +2119,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "fork with all".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2184,6 +2197,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "old parent fact".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2194,6 +2208,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "new parent fact".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2205,6 +2220,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "fork last two".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2281,6 +2297,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "spawn override child".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2364,6 +2381,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "spawn role child".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2429,6 +2447,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "spawn planner child".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2501,6 +2520,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "delegate and close".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2557,6 +2577,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "spawn child".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2587,6 +2608,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id,
                 prompt: "list agents after resume".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2623,6 +2645,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "spawn child".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2656,6 +2679,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "send resumed child".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2678,6 +2702,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: child_thread_id.clone(),
                 prompt: "drain queued resumed mail".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2723,6 +2748,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "delegate and close".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2750,6 +2776,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id,
                 prompt: "list agents after resume".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2786,6 +2813,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "spawn child".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2815,7 +2843,7 @@ mod tests {
             turn.items.iter().any(|item| {
                 matches!(
                     item,
-                    crate::app_server::protocol::ThreadItem::UserMessage { text }
+                    crate::app_server::protocol::ThreadItem::UserMessage { text, .. }
                         if text == "research child task"
                 )
             })
@@ -3085,6 +3113,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "send child only".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -3120,6 +3149,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: child_thread_id.clone(),
                 prompt: "drain queued send-only mail".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -3166,6 +3196,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "spawn child".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -3180,6 +3211,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "follow up child".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -3243,6 +3275,7 @@ mod tests {
             manager.run_turn_through_runtime(TurnStartParams {
                 thread_id: started.thread.id.clone(),
                 prompt: "follow up busy child".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -3277,6 +3310,7 @@ mod tests {
             .run_turn_through_runtime(TurnStartParams {
                 thread_id: child_thread_id,
                 prompt: "drain queued busy follow-up mail".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,

@@ -699,7 +699,7 @@ async fn runtime_config_uses_github_copilot_oauth_credential_as_bearer_token() {
     let config = store.runtime_config().await.unwrap();
 
     assert_eq!(config.model.identity.provider_id, "github_copilot");
-    assert_eq!(config.model.identity.model_id, "gpt-5.1-copilot");
+    assert_eq!(config.model.identity.model_id, "gpt-5.5");
     assert_eq!(
         config.model.credential,
         ResolvedCredential::BearerToken("copilot-token".to_string())
@@ -1345,5 +1345,6 @@ async fn provider_catalog_is_backed_by_structured_profiles() {
     assert_eq!(copilot.protocol, ProviderProtocol::CopilotOAuth);
     assert_eq!(copilot.auth_mode, ProviderAuthMode::OAuthRequired);
     assert!(copilot.supported);
+    assert!(copilot.supports_model_discovery);
     assert_eq!(copilot.unsupported_reason, None);
 }

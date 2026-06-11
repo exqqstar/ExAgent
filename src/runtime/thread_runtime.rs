@@ -18,7 +18,7 @@ use crate::runtime::thread_session::{
 };
 use crate::runtime::turn_mode::TurnMode;
 use crate::session::{ApprovalId, ApprovalStatus};
-use crate::types::{AssistantTurn, ThreadId, TurnId};
+use crate::types::{AssistantTurn, ThreadId, TurnId, UserInput};
 
 const THREAD_OP_CHANNEL_CAPACITY: usize = 64;
 const THREAD_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -60,7 +60,7 @@ pub struct ThreadTurnContext {
 pub(crate) enum ThreadOp {
     UserInput {
         turn_id: TurnId,
-        prompt: String,
+        input: Vec<UserInput>,
         turn_context: Option<ThreadTurnContext>,
     },
     GoalContinuation {
@@ -224,8 +224,17 @@ impl ThreadRuntime {
         prompt: String,
         turn_context: Option<ThreadTurnContext>,
     ) -> Result<ThreadOpResult> {
+        self.submit_user_input_parts_and_wait(vec![UserInput::Text { text: prompt }], turn_context)
+            .await
+    }
+
+    pub async fn submit_user_input_parts_and_wait(
+        &self,
+        input: Vec<UserInput>,
+        turn_context: Option<ThreadTurnContext>,
+    ) -> Result<ThreadOpResult> {
         let (completion_tx, completion_rx) = oneshot::channel();
-        self.send_user_input(prompt, turn_context, Some(completion_tx))
+        self.send_user_input_parts(input, turn_context, Some(completion_tx))
             .await?;
         completion_rx
             .await
@@ -237,7 +246,16 @@ impl ThreadRuntime {
         prompt: String,
         turn_context: Option<ThreadTurnContext>,
     ) -> Result<TurnId> {
-        self.send_user_input(prompt, turn_context, None).await
+        self.submit_user_input_parts(vec![UserInput::Text { text: prompt }], turn_context)
+            .await
+    }
+
+    pub(crate) async fn submit_user_input_parts(
+        &self,
+        input: Vec<UserInput>,
+        turn_context: Option<ThreadTurnContext>,
+    ) -> Result<TurnId> {
+        self.send_user_input_parts(input, turn_context, None).await
     }
 
     pub async fn shutdown(&self) -> Result<()> {
@@ -299,9 +317,9 @@ impl ThreadRuntime {
         Ok(())
     }
 
-    async fn send_user_input(
+    async fn send_user_input_parts(
         &self,
-        prompt: String,
+        input: Vec<UserInput>,
         turn_context: Option<ThreadTurnContext>,
         completion_tx: Option<oneshot::Sender<Result<ThreadOpResult>>>,
     ) -> Result<TurnId> {
@@ -317,7 +335,7 @@ impl ThreadRuntime {
         permit.send(ThreadSubmission {
             op: ThreadOp::UserInput {
                 turn_id: turn_id.clone(),
-                prompt,
+                input,
                 turn_context,
             },
             start_tx: Some(start_tx),
@@ -579,14 +597,14 @@ impl ThreadRuntimeLoop {
                 }
                 ThreadOp::UserInput {
                     turn_id,
-                    prompt,
+                    input,
                     turn_context,
                 } => {
                     let result = self
                         .session
-                        .handle_user_input_with_start_ack(
+                        .handle_user_input_parts_with_start_ack(
                             turn_id,
-                            prompt,
+                            input,
                             turn_context,
                             submission.interrupt,
                             submission.start_tx,

@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import type { ThreadGoal, ThreadGoalStatus } from "@/types";
+import type { DraftThreadGoal, ThreadGoal, ThreadGoalStatus } from "@/types";
 
 type WorkbenchState = ReturnType<typeof getWorkbenchState>;
 type GoalControlVariant = "dock" | "hero";
@@ -24,41 +24,49 @@ export function GoalControl({
   variant?: GoalControlVariant;
 }) {
   const goal = state.currentGoal;
+  const draftGoal = state.draftGoal;
   const [editing, setEditing] = useState(false);
   const [objective, setObjective] = useState("");
   const [tokenBudget, setTokenBudget] = useState("");
+  const editorObjective = goal?.objective ?? draftGoal?.objective ?? state.composerValue.trim();
+  const editorTokenBudget = goal?.token_budget ?? draftGoal?.token_budget ?? null;
 
   useEffect(() => {
     if (state.goalEditorOpen) {
-      setObjective(goal?.objective ?? state.composerValue.trim());
-      setTokenBudget(goal?.token_budget ? String(goal.token_budget) : "");
+      setObjective(editorObjective);
+      setTokenBudget(formatTokenBudget(editorTokenBudget));
       setEditing(true);
     }
-  }, [goal?.objective, goal?.token_budget, state.composerValue, state.goalEditorOpen]);
+  }, [editorObjective, editorTokenBudget, state.goalEditorOpen]);
 
   useEffect(() => {
     if (state.goalEditorOpen) {
       return;
     }
-    if (!goal) {
+    if (goal) {
+      setObjective(goal.objective);
+      setTokenBudget(formatTokenBudget(goal.token_budget ?? null));
+      setEditing(false);
       return;
     }
-    setObjective(goal.objective);
-    setTokenBudget(goal.token_budget ? String(goal.token_budget) : "");
-    setEditing(false);
-  }, [goal?.goal_id, goal?.objective, goal?.token_budget, state.goalEditorOpen]);
+    if (draftGoal) {
+      setObjective(draftGoal.objective);
+      setTokenBudget(formatTokenBudget(draftGoal.token_budget));
+      setEditing(false);
+    }
+  }, [draftGoal?.objective, draftGoal?.token_budget, goal?.goal_id, goal?.objective, goal?.token_budget, state.goalEditorOpen]);
 
-  if (!state.activeSessionId) {
+  if (!state.activeProjectId || (!state.activeSessionId && !draftGoal && !state.goalEditorOpen && !editing)) {
     return null;
   }
 
   const openEditor = () => {
-    setObjective(goal?.objective ?? state.composerValue.trim());
-    setTokenBudget(goal?.token_budget ? String(goal.token_budget) : "");
+    setObjective(editorObjective);
+    setTokenBudget(formatTokenBudget(editorTokenBudget));
     setEditing(true);
   };
 
-  if (!goal && !editing) {
+  if (!goal && !draftGoal && !editing) {
     return (
       <div className={variant === "hero" ? "mt-3 flex justify-start" : "mb-2 flex justify-start"}>
         <Button type="button" variant="secondary" className="px-2.5" onClick={openEditor}>
@@ -76,6 +84,7 @@ export function GoalControl({
         onSubmit={(event) => {
           event.preventDefault();
           const budget = parseTokenBudget(tokenBudget);
+          setEditing(false);
           void saveThreadGoal(objective, budget);
         }}
       >
@@ -123,23 +132,27 @@ export function GoalControl({
   }
 
   const visibleGoal = goal;
-  if (!visibleGoal) {
+  const visibleObjective = visibleGoal?.objective ?? draftGoal?.objective;
+  if (!visibleObjective) {
     return null;
   }
+  const usageLabel = visibleGoal ? goalUsageLabel(visibleGoal) : draftGoalUsageLabel(draftGoal);
 
   return (
     <div className={variant === "hero" ? "mt-3 rounded-lg border border-border bg-surface-1 p-2" : "mb-2 rounded-lg border border-border bg-surface-1 p-2"}>
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <Target className="h-4 w-4 shrink-0 text-muted" />
-        <Badge variant={goalStatusBadge(visibleGoal.status)}>{goalStatusLabel(visibleGoal.status)}</Badge>
-        <div className="type-body-sm min-w-[160px] flex-1 truncate text-ink">{visibleGoal.objective}</div>
-        <div className="type-label-sm shrink-0 text-subtle">{goalUsageLabel(visibleGoal)}</div>
+        <Badge variant={visibleGoal ? goalStatusBadge(visibleGoal.status) : "neutral"}>
+          {visibleGoal ? goalStatusLabel(visibleGoal.status) : "draft"}
+        </Badge>
+        <div className="type-body-sm min-w-[160px] flex-1 truncate text-ink">{visibleObjective}</div>
+        {usageLabel ? <div className="type-label-sm shrink-0 text-subtle">{usageLabel}</div> : null}
         <div className="ml-auto flex shrink-0 items-center gap-1">
-          {visibleGoal.status === "active" ? (
+          {visibleGoal?.status === "active" ? (
             <Button type="button" variant="ghost" size="icon" aria-label="Pause goal" onClick={() => void setThreadGoalStatus("paused")}>
               <Pause className="h-4 w-4" />
             </Button>
-          ) : visibleGoal.status === "paused" ? (
+          ) : visibleGoal?.status === "paused" ? (
             <Button type="button" variant="ghost" size="icon" aria-label="Resume goal" onClick={() => void setThreadGoalStatus("active")}>
               <Play className="h-4 w-4" />
             </Button>
@@ -165,12 +178,20 @@ function parseTokenBudget(value: string): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function formatTokenBudget(value: number | null) {
+  return value ? String(value) : "";
+}
+
 function goalUsageLabel(goal: ThreadGoal) {
   if (!goal.token_budget) {
     return `${goal.tokens_used} tokens`;
   }
   const remaining = Math.max(goal.token_budget - goal.tokens_used, 0);
   return `${remaining}/${goal.token_budget} left`;
+}
+
+function draftGoalUsageLabel(goal: DraftThreadGoal | null) {
+  return goal?.token_budget ? `0/${goal.token_budget} left` : "";
 }
 
 function goalStatusLabel(status: ThreadGoalStatus) {

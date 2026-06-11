@@ -291,6 +291,7 @@ fn boundary_capabilities_match_boundary_op_type_names() {
             serde_json::to_value(BoundaryOp::TurnStart(TurnStartParams {
                 thread_id: ThreadId::new("session_123"),
                 prompt: "continue".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -443,6 +444,7 @@ async fn turn_start_runs_existing_thread_non_streaming_and_events_replay_returns
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "continue work".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -517,6 +519,7 @@ async fn events_replay_redacts_assistant_reasoning_metadata() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "produce private metadata".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -598,6 +601,7 @@ async fn thread_read_reconstructs_turn_view_from_replayed_events() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "run a tool".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -628,7 +632,7 @@ async fn thread_read_reconstructs_turn_view_from_replayed_events() {
     assert_eq!(view.items.len(), 5);
     assert!(matches!(
         &view.items[0],
-        ThreadItem::UserMessage { text } if text == "run a tool"
+        ThreadItem::UserMessage { text, .. } if text == "run a tool"
     ));
     assert!(matches!(
         &view.items[1],
@@ -699,6 +703,7 @@ async fn events_subscribe_receives_live_turn_lifecycle_events() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "stream live events".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -758,6 +763,7 @@ async fn events_subscribe_redacts_live_assistant_reasoning_metadata() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "stream private metadata".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -839,6 +845,7 @@ async fn events_subscribe_receives_live_approval_requested_events() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "request approval".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -950,6 +957,7 @@ async fn events_subscribe_receives_live_exec_output_without_persisting_it() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "run persistent command".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -1094,6 +1102,7 @@ async fn events_subscribe_receives_tool_invocation_lifecycle_events() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "run lifecycle command".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -1206,6 +1215,7 @@ async fn events_subscribe_receives_tool_invocation_waiting_approval() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "request approval lifecycle".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -1287,6 +1297,7 @@ async fn thread_read_updates_waiting_tool_invocation_after_approval_decision() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "request approval lifecycle".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -1404,6 +1415,7 @@ async fn turn_start_applies_validated_context_override_with_user_input() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "run from new cwd".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: Some(TurnContextOverrides {
@@ -1477,6 +1489,7 @@ async fn turn_context_cwd_is_used_for_tools_without_becoming_thread_cwd() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "probe cwd".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: Some(TurnContextOverrides {
@@ -1526,6 +1539,7 @@ async fn turn_context_thinking_mode_reaches_llm_without_mutating_later_turns() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "run with high thinking".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: Some(TurnContextOverrides {
@@ -1552,6 +1566,7 @@ async fn turn_context_thinking_mode_reaches_llm_without_mutating_later_turns() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "run with default thinking".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -1614,6 +1629,7 @@ async fn turn_context_clear_thinking_mode_suppresses_default_for_one_turn() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "run with default thinking".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -1679,6 +1695,7 @@ async fn turn_context_model_reaches_turn_context_without_mutating_later_turns() 
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "run with override model".into(),
+            input: vec![],
             workspace_root: Some(workspace.display().to_string()),
             turn_mode: Default::default(),
             turn_context: Some(TurnContextOverrides {
@@ -1696,6 +1713,7 @@ async fn turn_context_model_reaches_turn_context_without_mutating_later_turns() 
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "run with default model".into(),
+            input: vec![],
             workspace_root: Some(workspace.display().to_string()),
             turn_mode: Default::default(),
             turn_context: None,
@@ -1753,6 +1771,7 @@ async fn turn_start_rejects_invalid_context_override_before_accepting_input() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "must not be accepted".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: Some(TurnContextOverrides {
@@ -1951,6 +1970,7 @@ async fn events_replay_snapshot_includes_latest_compaction_after_auto_compact() 
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "first prompt".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -1962,6 +1982,7 @@ async fn events_replay_snapshot_includes_latest_compaction_after_auto_compact() 
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "second prompt".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -2034,6 +2055,7 @@ async fn events_replay_snapshot_counts_live_open_exec_sessions_from_overlay_only
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "open persistent command".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -2425,6 +2447,7 @@ async fn submit_boundary_op_dispatches_turn_start() {
         .submit_boundary_op(BoundaryOp::TurnStart(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "continue through op".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -2479,6 +2502,7 @@ async fn submit_boundary_op_dispatches_events_replay_as_first_class_op() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "produce replayable events".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -2549,6 +2573,7 @@ async fn events_replay_supports_after_event_id_and_limit_cursor_fields() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "make cursor events".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -2596,6 +2621,7 @@ async fn failed_turn_start_records_runtime_error_for_replay() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "this will fail".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -2654,6 +2680,7 @@ async fn thread_rejects_second_turn_while_first_turn_is_running() {
             .turn_start(TurnStartParams {
                 thread_id: first_thread_id,
                 prompt: "hold the turn open".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2683,6 +2710,7 @@ async fn thread_rejects_second_turn_while_first_turn_is_running() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "must be rejected".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -2749,6 +2777,7 @@ async fn rejected_concurrent_turn_context_does_not_mutate_thread_snapshot() {
             .turn_start(TurnStartParams {
                 thread_id: first_thread_id,
                 prompt: "hold the turn open".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2762,6 +2791,7 @@ async fn rejected_concurrent_turn_context_does_not_mutate_thread_snapshot() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "must be rejected without context mutation".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: Some(TurnContextOverrides {
@@ -2820,6 +2850,7 @@ async fn turn_interrupt_aborts_active_turn_and_records_interrupted_event() {
             .turn_start(TurnStartParams {
                 thread_id: first_thread_id,
                 prompt: "hold until interrupted".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -2921,6 +2952,7 @@ async fn turn_interrupt_records_active_tool_invocation_cancelled() {
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "interrupt active tool".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -3044,6 +3076,7 @@ async fn turn_interrupt_aborts_pre_turn_auto_compaction() {
             .turn_start(TurnStartParams {
                 thread_id: first_thread_id,
                 prompt: "new user".into(),
+                input: vec![],
                 workspace_root: None,
                 turn_mode: Default::default(),
                 turn_context: None,
@@ -3123,6 +3156,7 @@ async fn thread_read_reports_waiting_approval_when_runtime_overlay_has_pending_a
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "request approval".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,
@@ -3543,6 +3577,7 @@ async fn turn_interrupt_clears_waiting_approval_and_records_interrupted_event() 
         .turn_start(TurnStartParams {
             thread_id: thread.thread.id.clone(),
             prompt: "request approval".into(),
+            input: vec![],
             workspace_root: None,
             turn_mode: Default::default(),
             turn_context: None,

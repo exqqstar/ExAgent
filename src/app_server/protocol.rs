@@ -9,7 +9,7 @@ use crate::runtime::agent_profile::AgentType;
 use crate::runtime::turn_mode::TurnMode;
 use crate::session::ApprovalId;
 use crate::session::CompactionSummary;
-use crate::types::{EventId, ThreadId, ToolCall, TurnId};
+use crate::types::{EventId, ThreadId, ToolCall, TurnId, UserInput};
 
 pub const BOUNDARY_PROTOCOL_VERSION: &str = "appserver-runtime-boundary-v2";
 pub const MAX_THREAD_GOAL_OBJECTIVE_CHARS: usize = 4_000;
@@ -196,6 +196,8 @@ pub struct TurnView {
 pub enum ThreadItem {
     UserMessage {
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        input: Vec<UserInput>,
     },
     AssistantMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -406,11 +408,25 @@ pub struct TurnContextOverrides {
 pub struct TurnStartParams {
     pub thread_id: ThreadId,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input: Vec<UserInput>,
     pub workspace_root: Option<String>,
     #[serde(default, skip_serializing_if = "TurnMode::is_default")]
     pub turn_mode: TurnMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_context: Option<TurnContextOverrides>,
+}
+
+impl TurnStartParams {
+    pub fn effective_input(&self) -> Vec<UserInput> {
+        if self.input.is_empty() {
+            vec![UserInput::Text {
+                text: self.prompt.clone(),
+            }]
+        } else {
+            self.input.clone()
+        }
+    }
 }
 
 fn is_false(value: &bool) -> bool {

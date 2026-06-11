@@ -5,11 +5,12 @@ use tokio::sync::broadcast;
 
 use crate::app_server::protocol::{
     ApprovalDecisionParams, ApprovalDecisionResponse, EventsReplayParams, EventsReplayResponse,
-    EventsSubscribeParams, ThreadGoal, ThreadGoalClearParams, ThreadGoalClearResponse,
-    ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse,
-    ThreadGoalStatus, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, TurnInterruptParams,
-    TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    EventsSubscribeParams, ThreadCompactParams, ThreadCompactResponse, ThreadGoal,
+    ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse,
+    ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
+    ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
+    TurnStartResponse,
 };
 use crate::app_server::AppServerService;
 use crate::events::RuntimeEvent;
@@ -181,6 +182,20 @@ impl DesktopFacade {
         })?;
         self.hydrate_thread_goal(&mut response.thread).await?;
         Ok(response)
+    }
+
+    pub async fn compact_thread(
+        &self,
+        project_id: &str,
+        params: ThreadCompactParams,
+    ) -> Result<ThreadCompactResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        self.service
+            .thread_compact(ThreadCompactParams {
+                workspace_root: Some(project.path.display().to_string()),
+                ..params
+            })
+            .await
     }
 
     pub async fn agent_tree(

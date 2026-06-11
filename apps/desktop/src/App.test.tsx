@@ -2017,6 +2017,64 @@ describe("AppShell", () => {
     ).toBeInTheDocument();
   });
 
+  it("opens a slash command menu and compacts the active thread", async () => {
+    const user = userEvent.setup();
+    const compactThread = vi.spyOn(exagentClient, "compactThread").mockResolvedValue({
+      thread_id: "session-desktop",
+      latest_compaction: { summary: "Slash compact summary" },
+    });
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-desktop",
+      events: [
+        {
+          event_id: "evt-slash-compact",
+          thread_id: "session-desktop",
+          kind: {
+            type: "compaction_written",
+            summary: { summary: "Slash compact summary" },
+          },
+        },
+      ],
+    });
+    const composer = screen.getByLabelText("Message ExAgent");
+    await user.type(composer, "/");
+
+    await user.click(screen.getByRole("menuitem", { name: /\/compact/ }));
+
+    expect(compactThread).toHaveBeenCalledWith(
+      "project-exagent",
+      "session-desktop",
+    );
+    expect(composer).toHaveValue("");
+    await user.click(await screen.findByRole("button", { name: /Events/ }));
+    expect(await screen.findByText("Slash compact summary")).toBeInTheDocument();
+  });
+
+  it("runs the visible slash command with Enter", async () => {
+    const user = userEvent.setup();
+    const compactThread = vi.spyOn(exagentClient, "compactThread").mockResolvedValue({
+      thread_id: "session-desktop",
+      latest_compaction: { summary: "Slash compact summary" },
+    });
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-desktop",
+      events: [],
+    });
+
+    await user.type(screen.getByLabelText("Message ExAgent"), "/c{Enter}");
+
+    expect(compactThread).toHaveBeenCalledWith(
+      "project-exagent",
+      "session-desktop",
+    );
+  });
+
   it("uses Chinese labels for composer actions when Chinese is selected", async () => {
     const user = userEvent.setup();
     window.localStorage.setItem("exagent.locale", "zh");
@@ -2838,7 +2896,7 @@ describe("AppShell", () => {
     act(() => {
       const current = useWorkbenchStore.getState();
       useWorkbenchStore.setState({
-        composerValue: "Do not submit while busy",
+        composerValue: "/",
         sessions: current.sessions.map((session) =>
           session.id === "session-desktop"
             ? { ...session, status: "running" }
@@ -2847,7 +2905,7 @@ describe("AppShell", () => {
       });
     });
 
-    await user.click(screen.getByRole("button", { name: "Interrupt" }));
+    await user.type(screen.getByLabelText("Message ExAgent"), "{Enter}");
 
     expect(interruptTurn).toHaveBeenCalledWith(
       "project-exagent",

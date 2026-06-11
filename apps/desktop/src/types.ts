@@ -269,6 +269,11 @@ export interface ThreadGoalClearResponse {
   cleared: boolean;
 }
 
+export interface ThreadCompactResponse {
+  thread_id: string;
+  latest_compaction: { summary: string } | null;
+}
+
 export interface TurnView {
   id: string;
   status: string;

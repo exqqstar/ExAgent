@@ -82,6 +82,7 @@ pub(crate) enum ThreadOp {
     GoalRuntimeEffect {
         effect: GoalRuntimeEffect,
     },
+    ManualCompaction,
     Shutdown,
 }
 
@@ -297,6 +298,30 @@ impl ThreadRuntime {
         Ok(())
     }
 
+    pub async fn compact_now(&self) -> Result<()> {
+        let permit = self
+            .op_tx
+            .reserve()
+            .await
+            .map_err(|_| anyhow!("thread runtime is stopped"))?;
+        let guard = self.reserve_manual_compaction_turn()?;
+        let (completion_tx, completion_rx) = oneshot::channel();
+        permit.send(ThreadSubmission {
+            op: ThreadOp::ManualCompaction,
+            start_tx: None,
+            completion_tx: Some(completion_tx),
+            interrupt: None,
+            _active_turn_guard: Some(guard),
+        });
+        match completion_rx
+            .await
+            .map_err(|_| anyhow!("thread runtime stopped before completing op"))??
+        {
+            ThreadOpResult::Ack => Ok(()),
+            _ => Err(anyhow!("manual compaction returned non-ack runtime result")),
+        }
+    }
+
     pub(crate) async fn enqueue_goal_runtime_effect(
         &self,
         effect: GoalRuntimeEffect,
@@ -385,7 +410,7 @@ impl ThreadRuntime {
             state
                 .active_turn
                 .as_ref()
-                .map(|record| record.turn_id.clone())
+                .and_then(|record| record.public_turn_id.clone())
         })
     }
 
@@ -409,11 +434,19 @@ impl ThreadRuntime {
             .ok()
             .and_then(|state| state.active_turn.clone())
             .ok_or_else(|| anyhow!("thread has no active turn"))?;
+        let public_turn_id =
+            record
+                .public_turn_id
+                .clone()
+                .ok_or_else(|| ThreadRuntimeError::TurnRejected {
+                    thread_id: self.thread_id.clone(),
+                    reason: "active operation is not interruptible".to_string(),
+                })?;
         if let Some(requested_turn_id) = requested_turn_id {
-            if requested_turn_id != &record.turn_id {
+            if requested_turn_id != &public_turn_id {
                 return Err(ThreadRuntimeError::TurnRejected {
                     thread_id: self.thread_id.clone(),
-                    reason: format!("active turn is {}", record.turn_id.as_str()),
+                    reason: format!("active turn is {}", public_turn_id.as_str()),
                 }
                 .into());
             }
@@ -434,7 +467,7 @@ impl ThreadRuntime {
             .into());
         }
         record.interrupted.notified().await;
-        Ok(record.turn_id)
+        Ok(public_turn_id)
     }
 
     pub(crate) async fn interrupt_waiting_approval_turn(
@@ -492,6 +525,17 @@ impl ThreadRuntime {
             interrupted,
         )
     }
+
+    fn reserve_manual_compaction_turn(&self) -> Result<ActiveRuntimeTurnGuard> {
+        let (interrupt_tx, _interrupt_rx) = oneshot::channel();
+        reserve_turn_record_from_state(
+            &self.turn_reservation,
+            &self.thread_id,
+            None,
+            interrupt_tx,
+            Arc::new(Notify::new()),
+        )
+    }
 }
 
 fn reserve_next_turn_from_state(
@@ -509,7 +553,7 @@ fn reserve_next_turn_from_state(
     let turn_id = TurnId::new(format!("turn_{}", state.next_turn_index));
     state.next_turn_index = state.next_turn_index.saturating_add(1);
     state.active_turn = Some(ActiveRuntimeTurnRecord {
-        turn_id: turn_id.clone(),
+        public_turn_id: Some(turn_id.clone()),
         interrupt_tx: Arc::new(Mutex::new(Some(interrupt_tx))),
         interrupted,
     });
@@ -522,6 +566,30 @@ fn reserve_next_turn_from_state(
     ))
 }
 
+fn reserve_turn_record_from_state(
+    turn_reservation: &Arc<Mutex<TurnReservationState>>,
+    thread_id: &ThreadId,
+    public_turn_id: Option<TurnId>,
+    interrupt_tx: oneshot::Sender<()>,
+    interrupted: Arc<Notify>,
+) -> Result<ActiveRuntimeTurnGuard> {
+    let mut state = turn_reservation
+        .lock()
+        .expect("turn reservation mutex poisoned");
+    if state.active_turn.is_some() {
+        return Err(ThreadRuntimeError::ThreadBusy(thread_id.clone()).into());
+    }
+    state.active_turn = Some(ActiveRuntimeTurnRecord {
+        public_turn_id,
+        interrupt_tx: Arc::new(Mutex::new(Some(interrupt_tx))),
+        interrupted,
+    });
+
+    Ok(ActiveRuntimeTurnGuard {
+        turn_reservation: turn_reservation.clone(),
+    })
+}
+
 struct TurnReservationState {
     next_turn_index: u64,
     active_turn: Option<ActiveRuntimeTurnRecord>,
@@ -529,7 +597,7 @@ struct TurnReservationState {
 
 #[derive(Clone)]
 struct ActiveRuntimeTurnRecord {
-    turn_id: TurnId,
+    public_turn_id: Option<TurnId>,
     interrupt_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     interrupted: Arc<Notify>,
 }
@@ -643,6 +711,11 @@ impl ThreadRuntimeLoop {
                     let result = self.session.handle_inter_agent_communication(mail);
                     complete(submission.completion_tx, result);
                 }
+                ThreadOp::ManualCompaction => {
+                    let result = self.session.handle_manual_compaction().await;
+                    drop(submission._active_turn_guard.take());
+                    complete(submission.completion_tx, result);
+                }
                 ThreadOp::GoalRuntimeEffect { effect } => {
                     match self.session.handle_goal_runtime_effect(effect) {
                         Ok(should_check_goal_continuation) => {
@@ -728,7 +801,7 @@ impl ThreadRuntimeLoop {
             state
                 .active_turn
                 .as_ref()
-                .map(|record| record.turn_id.clone())
+                .and_then(|record| record.public_turn_id.clone())
         })
     }
 }
@@ -1123,6 +1196,146 @@ VALUES (?, ?, ?, 'Goal thread', 'Goal preview', 'test', 0, 'idle', 1, 1)
             panic!("expected user input result");
         };
         assert_eq!(turn_id, TurnId::new("turn_2"));
+        runtime.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_reservation_rejects_concurrent_submit() {
+        let dir = tempdir().expect("tempdir");
+        let thread_id = ThreadId::new("thread_manual_compaction_busy");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        let rollout_paths = rollout_paths(&config.workspace_root, &thread_id);
+        RolloutStore::new(rollout_paths.rollout_path)
+            .append_items_blocking(&[
+                RolloutItem::response_item_for_turn(
+                    TurnId::new("turn_0"),
+                    ConversationMessage::user("old user"),
+                ),
+                RolloutItem::response_item_for_turn(
+                    TurnId::new("turn_0"),
+                    ConversationMessage::assistant(Some("old assistant".to_string()), vec![]),
+                ),
+            ])
+            .expect("seed compaction history");
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let runtime =
+            blocking_first_runtime(thread_id.clone(), config, started.clone(), release.clone());
+
+        let compact_runtime = runtime.clone();
+        let compact = tokio::spawn(async move { compact_runtime.compact_now().await });
+        started.notified().await;
+        assert_eq!(runtime.active_turn_id(), None);
+
+        let rejected = runtime
+            .submit_user_input("rejected while compacting".to_string(), None)
+            .await
+            .expect_err("manual compaction should reserve the runtime");
+        assert!(matches!(
+            rejected.downcast_ref::<ThreadRuntimeError>(),
+            Some(ThreadRuntimeError::ThreadBusy(busy_thread_id)) if busy_thread_id == &thread_id
+        ));
+
+        release.notify_one();
+        compact
+            .await
+            .expect("compaction task")
+            .expect("manual compaction");
+        wait_until_no_active_turn(&runtime).await;
+        runtime.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn interrupt_during_manual_compaction_is_rejected_without_sentinel() {
+        let dir = tempdir().expect("tempdir");
+        let thread_id = ThreadId::new("thread_compact_interrupt");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        let rollout_paths = rollout_paths(&config.workspace_root, &thread_id);
+        RolloutStore::new(rollout_paths.rollout_path)
+            .append_items_blocking(&[
+                RolloutItem::response_item_for_turn(
+                    TurnId::new("turn_0"),
+                    ConversationMessage::user("old user"),
+                ),
+                RolloutItem::response_item_for_turn(
+                    TurnId::new("turn_0"),
+                    ConversationMessage::assistant(Some("old assistant".to_string()), vec![]),
+                ),
+            ])
+            .expect("seed compaction history");
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let runtime =
+            blocking_first_runtime(thread_id.clone(), config, started.clone(), release.clone());
+
+        let compact_runtime = runtime.clone();
+        let compact = tokio::spawn(async move { compact_runtime.compact_now().await });
+        started.notified().await;
+
+        let rejected = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            runtime.interrupt_active_turn(None),
+        )
+        .await
+        .expect("interrupt should not hang")
+        .expect_err("manual compaction should not be interruptible");
+        let message = rejected.to_string();
+        assert!(message.contains("active operation is not interruptible"));
+        assert!(!message.contains("manual_compaction"));
+
+        release.notify_one();
+        compact
+            .await
+            .expect("compaction task")
+            .expect("manual compaction");
+        runtime.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn compact_now_rejects_while_user_turn_running() {
+        let dir = tempdir().expect("tempdir");
+        let thread_id = ThreadId::new("thread_compact_rejected_busy_turn");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let runtime =
+            blocking_first_runtime(thread_id.clone(), config, started.clone(), release.clone());
+
+        let first_runtime = runtime.clone();
+        let first = tokio::spawn(async move {
+            first_runtime
+                .submit_user_input_and_wait("first".to_string(), None)
+                .await
+        });
+        started.notified().await;
+        assert_eq!(runtime.active_turn_id(), Some(TurnId::new("turn_1")));
+
+        let rejected = runtime
+            .compact_now()
+            .await
+            .expect_err("running turn should reject manual compaction");
+        assert!(matches!(
+            rejected.downcast_ref::<ThreadRuntimeError>(),
+            Some(ThreadRuntimeError::ThreadBusy(busy_thread_id)) if busy_thread_id == &thread_id
+        ));
+
+        release.notify_one();
+        first.await.expect("first task").expect("first turn");
         runtime.shutdown().await.expect("shutdown");
     }
 

@@ -5,9 +5,16 @@ use crate::runtime::agent::Agent;
 use crate::types::ConversationMessage;
 
 const DEFAULT_COMPACT_PROMPT: &str = "\
-Summarize the conversation so far for a coding agent runtime. \
-Preserve user goals, architectural decisions, files changed, commands run, \
-open questions, and constraints. Omit irrelevant chatter.";
+Write a concise summary for a coding agent that will continue this work. \
+Omit irrelevant chatter and preserve only actionable context. \
+Use these sections:\n\
+- Current goal\n\
+- Important constraints\n\
+- Decisions made\n\
+- Files changed\n\
+- Commands and tests run\n\
+- Open issues\n\
+- Next suggested step";
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CompactionResult {
@@ -159,6 +166,31 @@ mod tests {
             .join("\n");
         assert!(prompt_text.contains("keep this user goal"));
         assert!(prompt_text.contains("keep this decision"));
+    }
+
+    #[tokio::test]
+    async fn compaction_prompt_requests_structured_coding_agent_summary() {
+        let (agent, prompts) = test_agent(RecordingLlm::new("summary"));
+        let history = vec![ConversationMessage::user("old prompt")];
+
+        compact_history(&agent, &history).await.expect("compact");
+
+        let prompts = prompts.lock().expect("prompts");
+        let system_prompt = &prompts[0][0].content;
+        for section in [
+            "Current goal",
+            "Important constraints",
+            "Decisions made",
+            "Files changed",
+            "Commands and tests run",
+            "Open issues",
+            "Next suggested step",
+        ] {
+            assert!(
+                system_prompt.contains(section),
+                "prompt should request section: {section}"
+            );
+        }
     }
 
     #[tokio::test]

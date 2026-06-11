@@ -42,6 +42,7 @@ pub fn run() {
             commands::thread_start,
             commands::thread_read,
             commands::thread_resume,
+            commands::thread_compact,
             commands::thread_goal_set,
             commands::thread_goal_get,
             commands::thread_goal_clear,

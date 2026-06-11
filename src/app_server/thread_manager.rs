@@ -8,13 +8,14 @@ use crate::app_server::protocol::{
     AgentRunResponse, AgentTreeParams, AgentTreeResponse, ApprovalDecisionParams,
     ApprovalDecisionResponse, BoundaryCapability, BoundaryOp, BoundaryOpResponse,
     EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, InitializeParams,
-    InitializeResponse, RunParams, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, TurnContextOverrides,
-    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
-    BOUNDARY_PROTOCOL_VERSION,
+    InitializeResponse, RunParams, ThreadCompactParams, ThreadCompactResponse, ThreadReadParams,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
+    ThreadStartResponse, TurnContextOverrides, TurnInterruptParams, TurnInterruptResponse,
+    TurnStartParams, TurnStartResponse, BOUNDARY_PROTOCOL_VERSION,
 };
 use crate::app_server::request_processors::{
-    agent_processor, events_processor, goal_processor, thread_processor, turn_processor,
+    agent_processor, compaction_processor, events_processor, goal_processor, thread_processor,
+    turn_processor,
 };
 use crate::app_server::services::AppServerServices;
 use crate::config::AgentConfig;
@@ -203,6 +204,7 @@ impl ThreadManager {
                 BoundaryCapability::ThreadStart,
                 BoundaryCapability::ThreadResume,
                 BoundaryCapability::ThreadRead,
+                BoundaryCapability::ThreadCompact,
                 BoundaryCapability::ThreadGoal,
                 BoundaryCapability::AgentTree,
                 BoundaryCapability::TurnStart,
@@ -221,6 +223,13 @@ impl ThreadManager {
 
     pub fn thread_read(&self, params: ThreadReadParams) -> Result<ThreadReadResponse> {
         thread_processor::thread_read(self.services.as_ref(), params)
+    }
+
+    pub async fn thread_compact(
+        &self,
+        params: ThreadCompactParams,
+    ) -> Result<ThreadCompactResponse> {
+        compaction_processor::thread_compact(self.services.as_ref(), params).await
     }
 
     pub fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse> {
@@ -276,6 +285,10 @@ impl ThreadManager {
             BoundaryOp::ThreadRead(params) => {
                 self.thread_read(params).map(BoundaryOpResponse::ThreadRead)
             }
+            BoundaryOp::ThreadCompact(params) => self
+                .thread_compact(params)
+                .await
+                .map(BoundaryOpResponse::ThreadCompacted),
             BoundaryOp::ThreadResume(params) => self
                 .thread_resume(params)
                 .map(BoundaryOpResponse::ThreadResumed),

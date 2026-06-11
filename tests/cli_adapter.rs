@@ -3,10 +3,11 @@ use std::sync::Mutex;
 use exagent::app_server::protocol::{
     AgentRunResponse, AgentTreeParams, AgentTreeResponse, ApprovalDecisionParams,
     ApprovalDecisionResponse, BoundaryOp, BoundaryOpResponse, EventsReplayParams,
-    EventsReplayResponse, EventsSubscribeParams, RunParams, ThreadReadParams, ThreadReadResponse,
-    ThreadResumeParams, ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, ThreadStatus,
-    ThreadView, TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
-    TurnStatus, TurnView,
+    EventsReplayResponse, EventsSubscribeParams, RunParams, ThreadCompactParams,
+    ThreadCompactResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, ThreadStatus, ThreadView,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnStatus,
+    TurnView,
 };
 use exagent::app_server::AppServerBoundary;
 use exagent::cli::CliCommand;
@@ -49,6 +50,13 @@ impl AppServerBoundary for CliBoundary {
 
     async fn thread_read(&self, _params: ThreadReadParams) -> anyhow::Result<ThreadReadResponse> {
         panic!("thread_read is not used in these CLI adapter tests");
+    }
+
+    async fn thread_compact(
+        &self,
+        _params: ThreadCompactParams,
+    ) -> anyhow::Result<ThreadCompactResponse> {
+        panic!("thread_compact is not used in these CLI adapter tests");
     }
 
     async fn thread_resume(

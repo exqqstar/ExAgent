@@ -7,10 +7,11 @@ use exagent::app_server::protocol::{
     AgentRunResponse, AgentTreeAgentStatus, AgentTreeNode, AgentTreeParams, AgentTreeResponse,
     ApprovalDecisionParams, ApprovalDecisionResponse, BoundaryCapability, BoundaryOp,
     BoundaryOpResponse, EventsReplayParams, EventsReplayResponse, EventsSubscribeParams,
-    IgnoredOverrideField, InitializeResponse, RunParams, ThreadReadParams, ThreadReadResponse,
-    ThreadResumeParams, ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, ThreadStatus,
-    ThreadView, TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
-    TurnStatus, TurnView, BOUNDARY_PROTOCOL_VERSION,
+    IgnoredOverrideField, InitializeResponse, RunParams, ThreadCompactParams,
+    ThreadCompactResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, ThreadStatus, ThreadView,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnStatus,
+    TurnView, BOUNDARY_PROTOCOL_VERSION,
 };
 use exagent::app_server::{AppServerBoundary, AppServerError};
 use exagent::cli::{parse_cli_command, CliCommand};
@@ -28,6 +29,7 @@ struct StubBoundary {
     response: AgentRunResponse,
     thread_start_response: ThreadStartResponse,
     thread_read_response: ThreadReadResponse,
+    thread_compact_response: ThreadCompactResponse,
     thread_resume_response: ThreadResumeResponse,
     agent_tree_response: AgentTreeResponse,
     turn_start_response: TurnStartResponse,
@@ -41,6 +43,7 @@ impl StubBoundary {
             response: sample_run_response("done"),
             thread_start_response: sample_thread_start_response(),
             thread_read_response: sample_thread_read_response(),
+            thread_compact_response: sample_thread_compact_response(),
             thread_resume_response: sample_thread_resume_response(),
             agent_tree_response: sample_agent_tree_response(),
             turn_start_response: sample_turn_start_response(),
@@ -77,6 +80,16 @@ impl AppServerBoundary for StubBoundary {
         assert_eq!(params.thread_id.as_str(), "thread_123");
         assert_eq!(params.workspace_root.as_deref(), Some("."));
         Ok(self.thread_read_response.clone())
+    }
+
+    async fn thread_compact(
+        &self,
+        params: ThreadCompactParams,
+    ) -> anyhow::Result<ThreadCompactResponse> {
+        self.calls.lock().unwrap().push("thread_compact".into());
+        assert_eq!(params.thread_id.as_str(), "thread_123");
+        assert_eq!(params.workspace_root.as_deref(), Some("."));
+        Ok(self.thread_compact_response.clone())
     }
 
     async fn thread_resume(
@@ -158,6 +171,9 @@ impl AppServerBoundary for StubBoundary {
             BoundaryOp::ThreadRead(_) => Ok(BoundaryOpResponse::ThreadRead(
                 self.thread_read_response.clone(),
             )),
+            BoundaryOp::ThreadCompact(_) => Ok(BoundaryOpResponse::ThreadCompacted(
+                self.thread_compact_response.clone(),
+            )),
             BoundaryOp::EventsReplay(_) => Ok(BoundaryOpResponse::EventsReplayed(
                 self.events_replay_response.clone(),
             )),
@@ -225,6 +241,13 @@ impl AppServerBoundary for ErrorBoundary {
     }
 
     async fn thread_read(&self, _params: ThreadReadParams) -> anyhow::Result<ThreadReadResponse> {
+        Err(self.error())
+    }
+
+    async fn thread_compact(
+        &self,
+        _params: ThreadCompactParams,
+    ) -> anyhow::Result<ThreadCompactResponse> {
         Err(self.error())
     }
 
@@ -316,6 +339,7 @@ async fn initialize_route_returns_protocol_capabilities() {
                 "thread_start",
                 "thread_resume",
                 "thread_read",
+                "thread_compact",
                 "agent_tree",
                 "turn_start",
                 "turn_interrupt",
@@ -701,6 +725,32 @@ async fn thread_op_route_accepts_thread_read_as_boundary_op() {
     );
 }
 
+#[tokio::test]
+async fn thread_op_route_accepts_thread_compact_as_boundary_op() {
+    let app = build_router(Arc::new(StubBoundary::new()));
+
+    let response = json_post(
+        app,
+        "/thread/op",
+        json!({
+            "type": "thread_compact",
+            "thread_id": "thread_123",
+            "workspace_root": "."
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(response).await,
+        json!({
+            "type": "thread_compacted",
+            "thread_id": "thread_123",
+            "latest_compaction": null
+        })
+    );
+}
+
 #[test]
 fn parse_cli_resume_command_reads_thread_id_and_prompt() {
     let command = parse_cli_command(vec![
@@ -756,6 +806,7 @@ fn sample_initialize_response() -> InitializeResponse {
             BoundaryCapability::ThreadStart,
             BoundaryCapability::ThreadResume,
             BoundaryCapability::ThreadRead,
+            BoundaryCapability::ThreadCompact,
             BoundaryCapability::AgentTree,
             BoundaryCapability::TurnStart,
             BoundaryCapability::TurnInterrupt,
@@ -821,6 +872,13 @@ fn sample_thread_start_response() -> ThreadStartResponse {
 fn sample_thread_read_response() -> ThreadReadResponse {
     ThreadReadResponse {
         thread: sample_thread_view(),
+    }
+}
+
+fn sample_thread_compact_response() -> ThreadCompactResponse {
+    ThreadCompactResponse {
+        thread_id: ThreadId::new("thread_123"),
+        latest_compaction: None,
     }
 }
 

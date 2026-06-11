@@ -91,6 +91,42 @@ impl ThreadSession {
         result
     }
 
+    pub(crate) async fn handle_manual_compaction(&mut self) -> Result<ThreadOpResult> {
+        self.set_status(ThreadRuntimeStatus::Running);
+        let result = self.handle_manual_compaction_inner().await;
+        if let Err(error) = &result {
+            let _ = self.record_runtime_error_without_turn(error.to_string());
+        }
+        self.set_status(ThreadRuntimeStatus::Idle);
+        result
+    }
+
+    async fn handle_manual_compaction_inner(&mut self) -> Result<ThreadOpResult> {
+        let mut snapshot = self
+            .live_state
+            .read()
+            .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?
+            .snapshot
+            .clone();
+        let input_modalities = &self.agent.config().model.capabilities.input_modalities;
+        let history = self.context_manager.for_compaction(input_modalities);
+        if history.is_empty() {
+            return Ok(ThreadOpResult::Ack);
+        }
+
+        let result = crate::runtime::compaction::compact_history(&self.agent, &history).await?;
+        record_compaction_checkpoint(
+            &mut self.recorder,
+            &self.rollout_store,
+            &mut self.context_manager,
+            &mut snapshot,
+            None,
+            result.summary,
+            result.replacement_history,
+        )?;
+        Ok(ThreadOpResult::Ack)
+    }
+
     async fn handle_goal_continuation_inner(
         &mut self,
         turn_id: TurnId,
@@ -849,7 +885,7 @@ impl ThreadSession {
             &self.rollout_store,
             &mut self.context_manager,
             snapshot,
-            turn_id,
+            Some(turn_id),
             result.summary,
             result.replacement_history,
         )
@@ -998,7 +1034,7 @@ async fn run_session_turn(
                 usage,
                 agent.config().model.capabilities.context_window,
             );
-            record_token_count_event(recorder, context_manager, snapshot, &runtime_turn_id)?;
+            record_token_count_event(recorder, context_manager, snapshot, Some(&runtime_turn_id))?;
         }
 
         if turn.tool_calls.is_empty() {
@@ -1108,7 +1144,7 @@ async fn compact_after_context_window_error(
         .context_window
         .ok_or_else(|| anyhow!("model context window is required for context-window retry"))?;
     context_manager.set_token_usage_full(context_window);
-    record_token_count_event(recorder, context_manager, snapshot, turn_id)?;
+    record_token_count_event(recorder, context_manager, snapshot, Some(turn_id))?;
 
     let history =
         context_manager.for_compaction(&agent.config().model.capabilities.input_modalities);
@@ -1124,7 +1160,7 @@ async fn compact_after_context_window_error(
         rollout_store,
         context_manager,
         snapshot,
-        turn_id,
+        Some(turn_id),
         result.summary,
         result.replacement_history,
     )?;
@@ -1386,7 +1422,7 @@ fn record_compaction_checkpoint(
     rollout_store: &crate::state::rollout::RolloutStore,
     context_manager: &mut ContextManager,
     snapshot: &mut ThreadSnapshot,
-    turn_id: &TurnId,
+    turn_id: Option<&TurnId>,
     summary_text: String,
     replacement_history: Vec<ConversationMessage>,
 ) -> Result<()> {
@@ -1404,7 +1440,7 @@ fn record_compaction_checkpoint(
     })])?;
     recorder.record(
         snapshot,
-        Some(turn_id),
+        turn_id,
         RuntimeEventKind::CompactionWritten { summary },
     )?;
     record_token_count_event(recorder, context_manager, snapshot, turn_id)
@@ -1414,11 +1450,11 @@ fn record_token_count_event(
     recorder: &mut ThreadEventRecorder,
     context_manager: &ContextManager,
     snapshot: &ThreadSnapshot,
-    turn_id: &TurnId,
+    turn_id: Option<&TurnId>,
 ) -> Result<()> {
     recorder.record(
         snapshot,
-        Some(turn_id),
+        turn_id,
         RuntimeEventKind::TokenCount {
             info: context_manager.token_info(),
         },
@@ -1630,7 +1666,9 @@ mod tests {
     use crate::registry::{ToolContext, ToolRegistry};
     use crate::resolved::{ResolvedCredential, ResolvedModelConfig};
     use crate::runtime::agent_profile::AgentType;
-    use crate::runtime::thread_runtime::{AgentFactory, ThreadOpResult, ThreadTurnContext};
+    use crate::runtime::thread_runtime::{
+        AgentFactory, ThreadOpResult, ThreadRuntimeStatus, ThreadTurnContext,
+    };
     use crate::runtime::thread_session::{RuntimeInterrupt, ThreadSession, ThreadSessionOptions};
     use crate::runtime::turn_mode::TurnMode;
     use crate::session::{ThreadLineage, ThreadSnapshot};
@@ -3323,6 +3361,172 @@ mod tests {
         assert!(contents.contains(&"done"));
         assert!(!contents.contains(&"old user"));
         assert!(!contents.contains(&"old assistant"));
+    }
+
+    #[tokio::test]
+    async fn thread_session_manual_compaction_writes_checkpoint_without_user_turn() {
+        let dir = tempdir().unwrap();
+        let thread_id = ThreadId::new("session_manual_compaction");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        append_rollout_items(
+            &config,
+            &thread_id,
+            &[
+                RolloutItem::response_item_for_turn(
+                    TurnId::new("turn_0"),
+                    ConversationMessage::user("old user"),
+                ),
+                RolloutItem::response_item_for_turn(
+                    TurnId::new("turn_0"),
+                    ConversationMessage::assistant(Some("old assistant".to_string()), vec![]),
+                ),
+            ],
+        );
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(MockLlm::new(vec![AssistantTurn {
+                    text: Some("manual summary".into()),
+                    tool_calls: vec![],
+                    reasoning: vec![],
+                }])),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config.clone(),
+            agent_factory,
+        ))
+        .expect("create thread session");
+
+        let result = session
+            .handle_manual_compaction()
+            .await
+            .expect("manual compaction should succeed");
+
+        assert!(matches!(result, ThreadOpResult::Ack));
+        let live_view =
+            ThreadSession::live_view_from_state(thread_id.clone(), &session.live_state_handle());
+        assert_eq!(
+            live_view
+                .snapshot
+                .latest_compaction
+                .as_ref()
+                .map(|summary| summary.summary.as_str()),
+            Some("manual summary")
+        );
+        assert!(live_view.events.iter().any(|event| matches!(
+            &event.kind,
+            RuntimeEventKind::CompactionWritten { summary }
+                if event.turn_id.is_none() && summary.summary == "manual summary"
+        )));
+        assert!(live_view.events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent {
+                turn_id: None,
+                kind: RuntimeEventKind::TokenCount { .. },
+                ..
+            }
+        )));
+
+        let rollout_items = read_rollout_items(&config, &thread_id);
+        assert!(rollout_items.iter().any(|item| matches!(
+            item,
+            RolloutItem::Compacted(compacted) if compacted.message == "manual summary"
+        )));
+        assert!(rollout_items.iter().any(|item| matches!(
+            item,
+            RolloutItem::EventMsg(RuntimeEvent {
+                turn_id: None,
+                kind: RuntimeEventKind::TokenCount { .. },
+                ..
+            })
+        )));
+        assert!(!rollout_items.iter().any(|item| matches!(
+            item,
+            RolloutItem::ResponseItem(response) if response.turn_id.as_str() == "manual_compaction"
+        )));
+        assert!(!live_view.events.iter().any(|event| event
+            .turn_id
+            .as_ref()
+            .is_some_and(|turn_id| { turn_id.as_str() == "manual_compaction" })));
+    }
+
+    #[tokio::test]
+    async fn thread_session_manual_compaction_failure_records_unscoped_runtime_error() {
+        let dir = tempdir().unwrap();
+        let thread_id = ThreadId::new("session_manual_compaction_failure");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        append_rollout_items(
+            &config,
+            &thread_id,
+            &[
+                RolloutItem::response_item_for_turn(
+                    TurnId::new("turn_0"),
+                    ConversationMessage::user("old user"),
+                ),
+                RolloutItem::response_item_for_turn(
+                    TurnId::new("turn_0"),
+                    ConversationMessage::assistant(Some("old assistant".to_string()), vec![]),
+                ),
+            ],
+        );
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(MockLlm::new(vec![AssistantTurn {
+                    text: Some("".into()),
+                    tool_calls: vec![],
+                    reasoning: vec![],
+                }])),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config.clone(),
+            agent_factory,
+        ))
+        .expect("create thread session");
+
+        let error = match session.handle_manual_compaction().await {
+            Ok(_) => panic!("empty compaction summary should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("empty compaction summary"));
+        let live_view =
+            ThreadSession::live_view_from_state(thread_id.clone(), &session.live_state_handle());
+        assert_eq!(live_view.status, ThreadRuntimeStatus::Idle);
+        assert!(live_view.events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent {
+                turn_id: None,
+                kind: RuntimeEventKind::RuntimeError { message },
+                ..
+            } if message.contains("empty compaction summary")
+        )));
+        assert!(read_rollout_items(&config, &thread_id)
+            .iter()
+            .any(|item| matches!(
+                item,
+                RolloutItem::EventMsg(RuntimeEvent {
+                    turn_id: None,
+                    kind: RuntimeEventKind::RuntimeError { message },
+                    ..
+                }) if message.contains("empty compaction summary")
+            )));
     }
 
     #[tokio::test]

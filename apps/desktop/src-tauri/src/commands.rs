@@ -3,11 +3,11 @@ use exagent::app_server::desktop_facade::NewProjectRequest;
 use exagent::app_server::protocol::{
     AgentTreeParams, AgentTreeResponse, ApprovalDecisionParams, ApprovalDecisionResponse,
     ApprovalDecisionStatus, EventsReplayParams, EventsReplayResponse, EventsSubscribeParams,
-    ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse,
-    ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams,
-    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartResponse,
-    TurnContextOverrides, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse,
+    ThreadCompactParams, ThreadCompactResponse, ThreadGoalClearParams, ThreadGoalClearResponse,
+    ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse,
+    ThreadGoalStatus, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadStartResponse, TurnContextOverrides, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse,
 };
 use exagent::config::ThinkingMode;
 use exagent::events::{
@@ -512,6 +512,27 @@ pub async fn thread_resume(
                 thread_id: ThreadId::new(thread_id),
                 workspace_root: None,
                 cwd: None,
+            },
+        )
+        .await
+        .map_err(error_string)
+}
+
+#[tauri::command]
+pub async fn thread_compact(
+    state: State<'_, DesktopState>,
+    project_id: String,
+    thread_id: String,
+) -> CommandResult<ThreadCompactResponse> {
+    state
+        .facade
+        .read()
+        .await
+        .compact_thread(
+            &project_id,
+            ThreadCompactParams {
+                thread_id: ThreadId::new(thread_id),
+                workspace_root: None,
             },
         )
         .await

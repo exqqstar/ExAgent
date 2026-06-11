@@ -7,9 +7,10 @@ use tokio::sync::broadcast;
 use crate::app_server::protocol::{
     AgentRunResponse, AgentTreeParams, AgentTreeResponse, ApprovalDecisionParams,
     ApprovalDecisionResponse, BoundaryOp, BoundaryOpResponse, EventsReplayParams,
-    EventsReplayResponse, EventsSubscribeParams, RunParams, ThreadReadParams, ThreadReadResponse,
-    ThreadResumeParams, ThreadResumeResponse, ThreadStartParams, ThreadStartResponse,
-    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    EventsReplayResponse, EventsSubscribeParams, RunParams, ThreadCompactParams,
+    ThreadCompactResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse,
 };
 use crate::app_server::ThreadManager;
 use crate::config::AgentConfig;
@@ -24,6 +25,7 @@ pub trait AppServerBoundary: Send + Sync {
     async fn run(&self, params: RunParams) -> Result<AgentRunResponse>;
     async fn thread_start(&self, params: ThreadStartParams) -> Result<ThreadStartResponse>;
     async fn thread_read(&self, params: ThreadReadParams) -> Result<ThreadReadResponse>;
+    async fn thread_compact(&self, params: ThreadCompactParams) -> Result<ThreadCompactResponse>;
     async fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse>;
     async fn agent_tree(&self, params: AgentTreeParams) -> Result<AgentTreeResponse>;
     async fn turn_start(&self, params: TurnStartParams) -> Result<TurnStartResponse>;
@@ -142,6 +144,13 @@ impl AppServerService {
         self.thread_manager.thread_read(params)
     }
 
+    pub async fn thread_compact(
+        &self,
+        params: ThreadCompactParams,
+    ) -> Result<ThreadCompactResponse> {
+        self.thread_manager.thread_compact(params).await
+    }
+
     pub fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse> {
         self.thread_manager.thread_resume(params)
     }
@@ -214,6 +223,10 @@ impl AppServerBoundary for AppServerService {
 
     async fn thread_read(&self, params: ThreadReadParams) -> Result<ThreadReadResponse> {
         self.thread_read(params)
+    }
+
+    async fn thread_compact(&self, params: ThreadCompactParams) -> Result<ThreadCompactResponse> {
+        self.thread_compact(params).await
     }
 
     async fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse> {

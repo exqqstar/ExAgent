@@ -3,9 +3,9 @@ use async_trait::async_trait;
 use exagent::app_server::protocol::{
     ApprovalDecisionParams, ApprovalDecisionStatus, BoundaryCapability, BoundaryOp,
     BoundaryOpResponse, EventsReplayParams, IgnoredOverrideField, InitializeParams, RunParams,
-    RuntimeEventKindFilter, ThreadItem, ThreadReadParams, ThreadResumeParams, ThreadStartParams,
-    ThreadStatus, ThreadView, TurnContextOverrides, TurnInterruptParams, TurnStartParams,
-    TurnStatus,
+    RuntimeEventKindFilter, ThreadCompactParams, ThreadItem, ThreadReadParams, ThreadResumeParams,
+    ThreadStartParams, ThreadStatus, ThreadView, TurnContextOverrides, TurnInterruptParams,
+    TurnStartParams, TurnStatus,
 };
 use exagent::app_server::{AppServerError, AppServerService};
 use exagent::config::{AgentConfig, PermissionProfile, ThinkingMode};
@@ -235,6 +235,7 @@ async fn initialize_boundary_advertises_v2_protocol_surface() {
             BoundaryCapability::ThreadStart,
             BoundaryCapability::ThreadResume,
             BoundaryCapability::ThreadRead,
+            BoundaryCapability::ThreadCompact,
             BoundaryCapability::ThreadGoal,
             BoundaryCapability::AgentTree,
             BoundaryCapability::TurnStart,
@@ -281,6 +282,14 @@ fn boundary_capabilities_match_boundary_op_type_names() {
         (
             BoundaryCapability::ThreadRead,
             serde_json::to_value(BoundaryOp::ThreadRead(ThreadReadParams {
+                thread_id: ThreadId::new("session_123"),
+                workspace_root: None,
+            }))
+            .unwrap(),
+        ),
+        (
+            BoundaryCapability::ThreadCompact,
+            serde_json::to_value(BoundaryOp::ThreadCompact(ThreadCompactParams {
                 thread_id: ThreadId::new("session_123"),
                 workspace_root: None,
             }))
@@ -2010,6 +2019,115 @@ async fn events_replay_snapshot_includes_latest_compaction_after_auto_compact() 
             .map(|summary| summary.summary.as_str()),
         Some("summary after first")
     );
+}
+
+#[tokio::test]
+async fn thread_compact_writes_compaction_event_and_replay_snapshot() {
+    let dir = tempdir().unwrap();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![
+            AssistantTurn {
+                text: Some("seed turn done".into()),
+                tool_calls: vec![],
+                reasoning: vec![],
+            },
+            AssistantTurn {
+                text: Some("manual compact summary".into()),
+                tool_calls: vec![],
+                reasoning: vec![],
+            },
+        ])),
+        ToolRegistry::new,
+    );
+
+    let thread = service
+        .thread_start(ThreadStartParams {
+            workspace_root: None,
+            cwd: None,
+            permission_profile: None,
+        })
+        .unwrap();
+    let turn = service
+        .turn_start(TurnStartParams {
+            thread_id: thread.thread.id.clone(),
+            prompt: "seed manual compaction history".into(),
+            input: vec![],
+            workspace_root: None,
+            turn_mode: Default::default(),
+            turn_context: None,
+        })
+        .await
+        .unwrap();
+    wait_for_turn_completed(&service, &thread.thread.id, &turn.turn.id).await;
+
+    let compacted = service
+        .thread_compact(ThreadCompactParams {
+            thread_id: thread.thread.id.clone(),
+            workspace_root: None,
+        })
+        .await
+        .unwrap();
+
+    let replay = service
+        .events_replay(EventsReplayParams {
+            thread_id: thread.thread.id.clone(),
+            workspace_root: None,
+            after_event_id: None,
+            limit: None,
+            include_snapshot: true,
+            event_kinds: vec![],
+        })
+        .unwrap();
+    let snapshot = replay.snapshot.expect("snapshot should be included");
+
+    assert!(replay
+        .events
+        .iter()
+        .any(|event| matches!(event.kind, RuntimeEventKind::CompactionWritten { .. })));
+    assert_eq!(compacted.thread_id, thread.thread.id);
+    assert_eq!(
+        compacted
+            .latest_compaction
+            .as_ref()
+            .map(|summary| summary.summary.as_str()),
+        Some("manual compact summary")
+    );
+    assert_eq!(
+        snapshot
+            .latest_compaction
+            .as_ref()
+            .map(|summary| summary.summary.as_str()),
+        Some("manual compact summary")
+    );
+}
+
+#[tokio::test]
+async fn thread_compact_rejects_missing_thread() {
+    let dir = tempdir().unwrap();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![])),
+        ToolRegistry::new,
+    );
+
+    let err = service
+        .thread_compact(ThreadCompactParams {
+            thread_id: ThreadId::new("missing-thread"),
+            workspace_root: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("thread not found: missing-thread"));
 }
 
 #[tokio::test]

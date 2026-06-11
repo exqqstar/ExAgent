@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   ArrowUp,
@@ -8,6 +8,7 @@ import {
   ChevronRight,
   Chrome,
   CircleAlert,
+  Database,
   ImagePlus,
   ListChecks,
   Plug,
@@ -34,6 +35,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   applyRuntimePreset,
   addComposerAttachments,
+  compactActiveThread,
   interruptActiveTurn,
   openThreadGoalEditor,
   removeComposerAttachment,
@@ -54,6 +56,7 @@ type WorkbenchState = ReturnType<typeof getWorkbenchState>;
 type NonDefaultThinkingMode = Exclude<ThinkingMode, "auto">;
 type ThinkingModeOption = { value: ThinkingMode | null; label: string; aria: string };
 type ComposerVariant = "dock" | "hero";
+type SlashCommandId = "compact" | "goal" | "plan";
 
 const defaultThinkingModeOption: ThinkingModeOption = { value: null, label: "Default", aria: "Thinking default" };
 const backendThinkingModeOptions: Array<{ value: NonDefaultThinkingMode; label: string; aria: string }> = [
@@ -184,10 +187,22 @@ type ComposerModelOption = {
   capabilities: ModelCapabilities;
 };
 
+type SlashCommand = {
+  id: SlashCommandId;
+  command: string;
+  label: string;
+  detail: string;
+  icon: LucideIcon;
+  disabled: boolean;
+};
+
 export function Composer({ state, variant = "dock" }: { state: WorkbenchState; variant?: ComposerVariant }) {
   const { t } = useI18n();
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
+  const [slashDismissedValue, setSlashDismissedValue] = useState<string | null>(null);
+  const [selectedSlashCommandIndex, setSelectedSlashCommandIndex] = useState(0);
+  const slashMenuId = useId();
   const [draggingImages, setDraggingImages] = useState(false);
   const [imageAttachRejected, setImageAttachRejected] = useState(false);
   const [imageAttachError, setImageAttachError] = useState<string | null>(null);
@@ -218,6 +233,25 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
   const imageInputWarningMessage = imageInputUnavailableWarning
     ? t("composer.attachments.imageInputUnavailable")
     : imageAttachError;
+  const slashQuery = slashCommandQueryFor(state.composerValue);
+  const slashCommands = buildSlashCommands({
+    activeProjectId: state.activeProjectId,
+    activeSessionId: state.activeSessionId,
+    busy,
+    planMode: state.composerPlanMode
+  });
+  const filteredSlashCommands =
+    slashQuery !== null
+      ? slashCommands.filter((command) => slashCommandMatches(command, slashQuery))
+      : [];
+  const slashMenuOpen =
+    slashQuery !== null &&
+    state.composerValue !== slashDismissedValue &&
+    filteredSlashCommands.length > 0;
+  const selectedSlashCommand = slashMenuOpen ? filteredSlashCommands[selectedSlashCommandIndex] : undefined;
+  const activeSlashCommandId = selectedSlashCommand
+    ? slashCommandItemId(slashMenuId, selectedSlashCommand.id)
+    : undefined;
   const modelButtonLabel = providerConfigurationRequired
     ? t("composer.model.configureProvider")
     : selectedOption?.label ?? selectedModelRef?.model_id ?? "Choose model";
@@ -283,6 +317,49 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
     addComposerAttachments(paths);
   }
 
+  function runSlashCommand(command: SlashCommand) {
+    if (command.disabled) {
+      return;
+    }
+    setSlashDismissedValue(null);
+    setComposerValue("");
+    switch (command.id) {
+      case "compact":
+        void compactActiveThread();
+        break;
+      case "goal":
+        openThreadGoalEditor();
+        break;
+      case "plan":
+        setComposerPlanMode(!state.composerPlanMode);
+        break;
+    }
+  }
+
+  function runExactSlashCommand() {
+    if (slashQuery === null) {
+      return false;
+    }
+    const exactCommand = filteredSlashCommands.find((command) => command.command.slice(1) === slashQuery);
+    if (!exactCommand || exactCommand.disabled) {
+      return false;
+    }
+    runSlashCommand(exactCommand);
+    return true;
+  }
+
+  function runSelectedSlashCommand() {
+    const selected = filteredSlashCommands[selectedSlashCommandIndex];
+    const command = selected && !selected.disabled
+      ? selected
+      : filteredSlashCommands.find((item) => !item.disabled);
+    if (!command) {
+      return false;
+    }
+    runSlashCommand(command);
+    return true;
+  }
+
   useEffect(() => {
     const owner = Symbol("composer-drag-drop-owner");
     registerDragDropComposer(owner, {
@@ -304,6 +381,10 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
     // The shared native subscription is managed at module scope; callbacks read model support from a ref.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    setSelectedSlashCommandIndex(firstEnabledSlashCommandIndex(filteredSlashCommands));
+  }, [slashMenuOpen, slashQuery]);
 
   return (
     <form
@@ -333,27 +414,71 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
         }
       }}
     >
-      <Textarea
-        className={variant === "hero" ? "min-h-[96px] border-transparent bg-transparent px-2 py-1 focus:border-transparent focus:ring-0" : undefined}
-        value={state.composerValue}
-        onChange={(event) => setComposerValue(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
-            return;
-          }
-          event.preventDefault();
-          if (imageInputBlocked) {
-            return;
-          }
-          if (busy) {
-            void interruptActiveTurn();
-          } else {
+      <div className="relative">
+        <Textarea
+          className={variant === "hero" ? "min-h-[96px] border-transparent bg-transparent px-2 py-1 focus:border-transparent focus:ring-0" : undefined}
+          value={state.composerValue}
+          onChange={(event) => {
+            setSlashDismissedValue(null);
+            setComposerValue(event.target.value);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && slashMenuOpen) {
+              event.preventDefault();
+              setSlashDismissedValue(state.composerValue);
+              return;
+            }
+            if ((event.key === "ArrowDown" || event.key === "ArrowUp") && slashMenuOpen) {
+              event.preventDefault();
+              setSelectedSlashCommandIndex((current) =>
+                nextEnabledSlashCommandIndex(
+                  filteredSlashCommands,
+                  current,
+                  event.key === "ArrowDown" ? 1 : -1
+                )
+              );
+              return;
+            }
+            if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
+              return;
+            }
+            event.preventDefault();
+            if (busy) {
+              void interruptActiveTurn();
+              return;
+            }
+            if (runExactSlashCommand()) {
+              return;
+            }
+            if (slashMenuOpen && runSelectedSlashCommand()) {
+              return;
+            }
+            if (imageInputBlocked) {
+              return;
+            }
             void sendPrompt();
-          }
-        }}
-        placeholder={variant === "hero" ? "Ask ExAgent to build, fix, or explain..." : "Message ExAgent"}
-        aria-label="Message ExAgent"
-      />
+          }}
+          placeholder={variant === "hero" ? "Ask ExAgent to build, fix, or explain..." : "Message ExAgent"}
+          aria-label="Message ExAgent"
+          aria-haspopup={slashQuery !== null ? "menu" : undefined}
+          aria-expanded={slashQuery !== null ? slashMenuOpen : undefined}
+          aria-controls={slashMenuOpen ? slashMenuId : undefined}
+          aria-activedescendant={slashMenuOpen ? activeSlashCommandId : undefined}
+        />
+        {slashMenuOpen ? (
+          <SlashCommandMenu
+            id={slashMenuId}
+            activeCommandId={selectedSlashCommand?.id}
+            commands={filteredSlashCommands}
+            onSelect={runSlashCommand}
+            onHighlight={(command) =>
+              setSelectedSlashCommandIndex(
+                Math.max(0, filteredSlashCommands.findIndex((item) => item.id === command.id))
+              )
+            }
+          />
+        ) : null}
+      </div>
       {state.composerAttachments.length > 0 ? (
         <AttachmentTray attachments={state.composerAttachments} label={t("composer.attachments.selectedImages")} />
       ) : null}
@@ -520,6 +645,139 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
       </div>
     </form>
   );
+}
+
+function SlashCommandMenu({
+  id,
+  activeCommandId,
+  commands,
+  onSelect,
+  onHighlight
+}: {
+  id: string;
+  activeCommandId?: SlashCommandId;
+  commands: SlashCommand[];
+  onSelect: (command: SlashCommand) => void;
+  onHighlight: (command: SlashCommand) => void;
+}) {
+  return (
+    <div
+      id={id}
+      role="menu"
+      aria-label="Slash commands"
+      className="absolute bottom-full left-0 z-40 mb-2 w-[min(360px,calc(100vw-32px))] rounded-md border border-border bg-surface-2 p-1.5 text-ink shadow-panel"
+    >
+      {commands.map((command) => {
+        const Icon = command.icon;
+        return (
+          <button
+            key={command.id}
+            id={slashCommandItemId(id, command.id)}
+            type="button"
+            role="menuitem"
+            disabled={command.disabled}
+            data-highlighted={command.id === activeCommandId ? "true" : undefined}
+            className="flex min-h-11 w-full items-center gap-3 rounded px-2.5 py-2 text-left outline-none transition-colors hover:bg-surface-3 focus:bg-surface-3 data-[highlighted=true]:bg-surface-3 disabled:pointer-events-none disabled:opacity-45"
+            onClick={() => onSelect(command)}
+            onMouseEnter={() => onHighlight(command)}
+          >
+            <Icon className="h-4 w-4 shrink-0 text-muted" />
+            <span className="min-w-0 flex-1">
+              <span className="type-label-md block truncate text-ink">
+                <span className="type-code-sm mr-2 text-muted">{command.command}</span>
+                {command.label}
+              </span>
+              <span className="type-label-sm block truncate text-subtle">{command.detail}</span>
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function slashCommandItemId(menuId: string, commandId: SlashCommandId) {
+  return `${menuId}-${commandId}`;
+}
+
+function slashCommandQueryFor(value: string) {
+  if (!value.startsWith("/")) {
+    return null;
+  }
+  const query = value.slice(1);
+  if (/\s/.test(query)) {
+    return null;
+  }
+  return query.toLowerCase();
+}
+
+function buildSlashCommands({
+  activeProjectId,
+  activeSessionId,
+  busy,
+  planMode
+}: {
+  activeProjectId: string | null;
+  activeSessionId: string | null;
+  busy: boolean;
+  planMode: boolean;
+}): SlashCommand[] {
+  const hasActiveThread = Boolean(activeProjectId && activeSessionId);
+  return [
+    {
+      id: "compact",
+      command: "/compact",
+      label: "Compact conversation",
+      detail: busy ? "Available when the thread is idle" : "Summarize history and shrink context",
+      icon: Database,
+      disabled: !hasActiveThread || busy
+    },
+    {
+      id: "goal",
+      command: "/goal",
+      label: "Set goal",
+      detail: "Create or edit the thread goal",
+      icon: Target,
+      disabled: !activeProjectId
+    },
+    {
+      id: "plan",
+      command: "/plan",
+      label: planMode ? "Disable plan mode" : "Enable plan mode",
+      detail: "Toggle planning for the next prompt",
+      icon: ListChecks,
+      disabled: false
+    }
+  ];
+}
+
+function slashCommandMatches(command: SlashCommand, query: string) {
+  if (!query) {
+    return true;
+  }
+  return (
+    command.command.slice(1).includes(query) ||
+    command.label.toLowerCase().includes(query) ||
+    command.detail.toLowerCase().includes(query)
+  );
+}
+
+function firstEnabledSlashCommandIndex(commands: SlashCommand[]) {
+  const index = commands.findIndex((command) => !command.disabled);
+  return index >= 0 ? index : 0;
+}
+
+function nextEnabledSlashCommandIndex(commands: SlashCommand[], currentIndex: number, direction: 1 | -1) {
+  if (commands.length === 0) {
+    return 0;
+  }
+  for (let offset = 1; offset <= commands.length; offset += 1) {
+    const index = (currentIndex + offset * direction + commands.length) % commands.length;
+    if (!commands[index]?.disabled) {
+      return index;
+    }
+  }
+  return currentIndex;
 }
 
 const supportedImageExtensions = new Set(["png", "jpg", "jpeg", "webp", "gif"]);

@@ -24,6 +24,7 @@ import type {
   ThinkingMode,
   ThreadReadResponse,
   ThreadRecord,
+  ThreadCompactResponse,
   ThreadGoalClearResponse,
   ThreadGoalGetResponse,
   ThreadGoalSetResponse,
@@ -942,6 +943,17 @@ export async function resumeThread(projectId: string, threadId: string): Promise
   return invokeCommand<ThreadReadResponse>("thread_resume", { projectId, threadId });
 }
 
+export async function compactThread(projectId: string, threadId: string): Promise<ThreadCompactResponse> {
+  if (!isTauriRuntime()) {
+    return {
+      thread_id: threadId,
+      latest_compaction: null
+    };
+  }
+
+  return invokeCommand<ThreadCompactResponse>("thread_compact", { projectId, threadId });
+}
+
 export async function setThreadGoal(
   projectId: string,
   threadId: string,
@@ -1525,6 +1537,7 @@ export const exagentClient = {
   reindexProject,
   renameProject,
   renameThread,
+  compactThread,
   replayEvents,
   resumeThread,
   saveProviderSettings,

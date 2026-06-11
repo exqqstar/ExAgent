@@ -24,6 +24,7 @@ pub enum BoundaryCapability {
     ThreadStart,
     ThreadResume,
     ThreadRead,
+    ThreadCompact,
     ThreadGoal,
     AgentTree,
     TurnStart,
@@ -316,6 +317,18 @@ pub struct ThreadReadResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadCompactParams {
+    pub thread_id: ThreadId,
+    pub workspace_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ThreadCompactResponse {
+    pub thread_id: ThreadId,
+    pub latest_compaction: Option<CompactionSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadResumeParams {
     pub thread_id: ThreadId,
     pub workspace_root: Option<String>,
@@ -486,6 +499,7 @@ pub enum BoundaryOp {
     Initialize(InitializeParams),
     ThreadStart(ThreadStartParams),
     ThreadRead(ThreadReadParams),
+    ThreadCompact(ThreadCompactParams),
     ThreadResume(ThreadResumeParams),
     ThreadGoalSet(ThreadGoalSetParams),
     ThreadGoalGet(ThreadGoalGetParams),
@@ -503,6 +517,7 @@ pub enum BoundaryOpResponse {
     Initialized(InitializeResponse),
     ThreadStarted(ThreadStartResponse),
     ThreadRead(ThreadReadResponse),
+    ThreadCompacted(ThreadCompactResponse),
     ThreadResumed(ThreadResumeResponse),
     ThreadGoalSet(ThreadGoalSetResponse),
     ThreadGoalGet(ThreadGoalGetResponse),

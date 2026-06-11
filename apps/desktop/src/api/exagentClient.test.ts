@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { importImageFiles, pickImageFiles, scanSkillCatalog, setThreadGoal } from "@/api/exagentClient";
+import { compactThread, importImageFiles, pickImageFiles, scanSkillCatalog, setThreadGoal } from "@/api/exagentClient";
 
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn()
@@ -47,6 +47,34 @@ describe("exagentClient", () => {
       tokenBudget: null,
       clearTokenBudget: true
     });
+  });
+
+  it("compacts a thread through the desktop command", async () => {
+    tauriMocks.invoke.mockResolvedValue({
+      thread_id: "thread-root",
+      latest_compaction: { summary: "manual compact summary" }
+    });
+
+    const response = await compactThread("project-exagent", "thread-root");
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("thread_compact", {
+      projectId: "project-exagent",
+      threadId: "thread-root"
+    });
+    expect(response).toEqual({
+      thread_id: "thread-root",
+      latest_compaction: { summary: "manual compact summary" }
+    });
+  });
+
+  it("returns an empty compaction response in browser preview", async () => {
+    delete (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+
+    await expect(compactThread("project-exagent", "thread-root")).resolves.toEqual({
+      thread_id: "thread-root",
+      latest_compaction: null
+    });
+    expect(tauriMocks.invoke).not.toHaveBeenCalled();
   });
 
   it("scans the skill catalog through the desktop command", async () => {

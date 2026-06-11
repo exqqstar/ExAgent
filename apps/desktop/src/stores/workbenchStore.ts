@@ -69,6 +69,7 @@ type WorkbenchState = WorkbenchSnapshot & {
   startSession: (projectId?: string) => Promise<string | null>;
   sendPrompt: () => Promise<void>;
   interruptActiveTurn: () => Promise<void>;
+  compactActiveThread: () => Promise<void>;
   openThreadGoalEditor: () => void;
   closeThreadGoalEditor: () => void;
   saveThreadGoal: (objective: string, tokenBudget?: number | null) => Promise<void>;
@@ -690,6 +691,27 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     }
   },
 
+  async compactActiveThread() {
+    const projectId = get().activeProjectId;
+    const threadId = get().activeSessionId;
+    if (!projectId || !threadId) {
+      return;
+    }
+    try {
+      await exagentClient.compactThread(projectId, threadId);
+      const replay = await exagentClient.replayEvents(projectId, threadId, null);
+      if (get().activeProjectId !== projectId || get().activeSessionId !== threadId) {
+        return;
+      }
+      get().applyRuntimeEvents(replay.events);
+      set({ error: null });
+    } catch (error) {
+      if (get().activeProjectId === projectId && get().activeSessionId === threadId) {
+        set({ error: errorMessage(error) });
+      }
+    }
+  },
+
   openThreadGoalEditor() {
     set({ goalEditorOpen: true });
   },
@@ -1291,6 +1313,7 @@ export const applyRuntimePreset = (presetId: string) =>
   useWorkbenchStore.getState().applyRuntimePreset(presetId);
 export const sendPrompt = () => useWorkbenchStore.getState().sendPrompt();
 export const interruptActiveTurn = () => useWorkbenchStore.getState().interruptActiveTurn();
+export const compactActiveThread = () => useWorkbenchStore.getState().compactActiveThread();
 export const openThreadGoalEditor = () => useWorkbenchStore.getState().openThreadGoalEditor();
 export const closeThreadGoalEditor = () => useWorkbenchStore.getState().closeThreadGoalEditor();
 export const saveThreadGoal = (objective: string, tokenBudget?: number | null) =>
@@ -2366,6 +2389,8 @@ function eventDetail(event: BackendRuntimeEvent) {
       return event.kind.reason;
     case "approval_decision":
       return event.kind.note ?? event.kind.status;
+    case "compaction_written":
+      return event.kind.summary.summary;
     case "runtime_error":
       return event.kind.message;
     default:

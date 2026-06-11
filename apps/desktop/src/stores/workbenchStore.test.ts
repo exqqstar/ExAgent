@@ -278,6 +278,97 @@ describe("workbenchStore runtime events", () => {
 
     expect(useWorkbenchStore.getState().tokenUsageByThreadId["thread-root"]?.total.total_tokens).toBe(200);
   });
+
+  it("compacts the active thread and applies replayed runtime events", async () => {
+    const compactThread = vi.spyOn(exagentClient, "compactThread").mockResolvedValue({
+      thread_id: "thread-root",
+      latest_compaction: { summary: "manual compact summary" }
+    });
+    const replayEvents = vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "thread-root",
+      events: [
+        {
+          event_id: "evt-compact",
+          thread_id: "thread-root",
+          kind: {
+            type: "compaction_written",
+            summary: { summary: "manual compact summary" }
+          }
+        },
+        {
+          event_id: "evt-assistant",
+          thread_id: "thread-root",
+          turn_id: "turn-1",
+          kind: {
+            type: "assistant_turn",
+            turn: {
+              text: "Replayed assistant text",
+              tool_calls: []
+            }
+          }
+        },
+        tokenCountEvent("evt-token-root-after-compact", 300)
+      ]
+    });
+
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      activeProjectId: "project",
+      activeSessionId: "thread-root",
+      sessions: [
+        {
+          id: "thread-root",
+          projectId: "project",
+          title: "Root thread",
+          updatedAt: "now",
+          status: "idle"
+        }
+      ],
+      error: "previous error"
+    });
+
+    await useWorkbenchStore.getState().compactActiveThread();
+
+    expect(compactThread).toHaveBeenCalledWith("project", "thread-root");
+    expect(replayEvents).toHaveBeenCalledWith("project", "thread-root", null);
+    expect(useWorkbenchStore.getState().error).toBeNull();
+    expect(useWorkbenchStore.getState().events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "evt-compact",
+          label: "compaction written",
+          detail: "manual compact summary"
+        })
+      ])
+    );
+    expect(useWorkbenchStore.getState().transcript).toEqual([
+      expect.objectContaining({ id: "evt-assistant", body: "Replayed assistant text" })
+    ]);
+    expect(useWorkbenchStore.getState().tokenUsageByThreadId["thread-root"]?.total.total_tokens).toBe(300);
+  });
+
+  it("sets an error when active thread compaction fails", async () => {
+    vi.spyOn(exagentClient, "compactThread").mockRejectedValue(new Error("manual compaction failed"));
+    const replayEvents = vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "thread-root",
+      events: []
+    });
+
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      activeProjectId: "project",
+      activeSessionId: "thread-root",
+      events: []
+    });
+
+    await useWorkbenchStore.getState().compactActiveThread();
+
+    expect(useWorkbenchStore.getState().error).toBe("manual compaction failed");
+    expect(replayEvents).not.toHaveBeenCalled();
+    expect(useWorkbenchStore.getState().events).toEqual([]);
+  });
 });
 
 function tokenCountEvent(eventId: string, totalTokens: number): BackendRuntimeEvent {

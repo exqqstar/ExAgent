@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::watch;
 
 use crate::config::AgentConfig;
 use crate::exec_session::{ExecOutputEventSink, ExecSessionManager};
@@ -10,6 +9,7 @@ use crate::registry::ToolContext;
 use crate::runtime::agent_profile::AgentToolPolicy;
 use crate::runtime::goal::GoalToolApi;
 use crate::runtime::thread_session::ThreadEventRecorder;
+use crate::runtime::thread_session::ThreadInbox;
 use crate::runtime::tool_hooks::{NoopToolHooks, ToolHooks};
 use crate::runtime::tool_orchestrator::{ToolExecutionOutcome, ToolOrchestrator};
 use crate::runtime::tool_selection::ToolSelection;
@@ -27,7 +27,7 @@ pub(crate) struct ToolCallRuntime {
     agent_tool_policy: AgentToolPolicy,
     thread_id: ThreadId,
     turn_id: TurnId,
-    mailbox_rx: Option<watch::Receiver<()>>,
+    inbox: Option<Arc<ThreadInbox>>,
     goal_api: Option<Arc<GoalToolApi>>,
 }
 
@@ -54,7 +54,7 @@ impl ToolCallRuntime {
             agent_tool_policy,
             thread_id,
             turn_id,
-            mailbox_rx: None,
+            inbox: None,
             goal_api: None,
         }
     }
@@ -64,8 +64,8 @@ impl ToolCallRuntime {
         self
     }
 
-    pub(crate) fn with_mailbox_rx(mut self, mailbox_rx: watch::Receiver<()>) -> Self {
-        self.mailbox_rx = Some(mailbox_rx);
+    pub(crate) fn with_inbox(mut self, inbox: Arc<ThreadInbox>) -> Self {
+        self.inbox = Some(inbox);
         self
     }
 
@@ -109,7 +109,7 @@ impl ToolCallRuntime {
             exec_output_sink: self.exec_output_sink.clone(),
             policy: self.policy.clone(),
             agent_tool_policy: self.agent_tool_policy.clone(),
-            mailbox_rx: self.mailbox_rx.clone(),
+            inbox: self.inbox.clone(),
             goal_api: self.goal_api.clone(),
         }
     }

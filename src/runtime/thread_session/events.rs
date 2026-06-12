@@ -202,6 +202,15 @@ impl ThreadEventRecorder {
         handle.record_live_only(turn_id.cloned(), kind)
     }
 
+    pub(crate) fn publish_snapshot(&self, snapshot: &ThreadSnapshot) -> Result<()> {
+        let mut state = self
+            .live_state
+            .write()
+            .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?;
+        state.snapshot = snapshot.clone();
+        Ok(())
+    }
+
     fn record_snapshot(
         &mut self,
         snapshot: &ThreadSnapshot,

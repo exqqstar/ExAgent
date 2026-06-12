@@ -154,12 +154,12 @@ fn render_profile_for_spawn_schema(profile: &AgentProfile) -> String {
 }
 
 fn tool_policy_summary(policy: &AgentToolPolicy) -> String {
-    match policy {
-        AgentToolPolicy::All => "all tools allowed by the session policy".to_string(),
-        AgentToolPolicy::AllowOnly(names) => names.join(", "),
-    }
+    format!(
+        "workspace={:?}, collaboration={:?}",
+        policy.workspace, policy.collaboration
+    )
 }
 
 fn read_only_policy() -> AgentToolPolicy {
-    AgentToolPolicy::allow_only(["read_file", "search_files", "list_agents"])
+    AgentToolPolicy::read_only_basic_collaboration()
 }

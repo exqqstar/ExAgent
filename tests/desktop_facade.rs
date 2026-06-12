@@ -1,21 +1,70 @@
+use async_trait::async_trait;
 use exagent::app_server::desktop_facade::{DesktopFacade, NewProjectRequest};
 use exagent::app_server::protocol::{
     ApprovalDecisionParams, ApprovalDecisionStatus, ApprovalsListParams, CheckpointRestoreParams,
     CheckpointRestoreStatus, EventsReplayParams, PendingApprovalKind, ThreadForkParams,
-    TurnStartParams,
+    TurnContextOverrides, TurnStartParams,
 };
 use exagent::app_server::AppServerService;
 use exagent::config::AgentConfig;
 use exagent::events::RuntimeEventKind;
 use exagent::index_db::{IndexDb, ThreadListFilter};
-use exagent::llm::MockLlm;
+use exagent::llm::{LlmClient, LlmRequestOptions, MockLlm};
+use exagent::model::factory::SharedLlmFactory;
 use exagent::policy::PolicyMode;
 use exagent::registry::ToolRegistry;
+use exagent::resolved::{ModelRef, ResolvedCredential, ResolvedModelConfig};
+use exagent::resolver::{EnvModelResolver, ModelResolver};
 use exagent::state::fork_edges::fork_edges_path;
 use exagent::tools::run_command::RunCommandTool;
-use exagent::types::{AssistantTurn, ThreadId, ToolCall};
+use exagent::tools::ToolSpec;
+use exagent::types::{AssistantTurn, ConversationMessage, LlmCompletion, ThreadId, ToolCall};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
+
+struct RecordingToolsLlm {
+    observed_tools: Arc<Mutex<Vec<Vec<String>>>>,
+    observed_prompts: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+struct StaticModelResolver {
+    resolved: ResolvedModelConfig,
+}
+
+#[async_trait]
+impl ModelResolver for StaticModelResolver {
+    async fn resolve(&self, _model_ref: &ModelRef) -> anyhow::Result<ResolvedModelConfig> {
+        Ok(self.resolved.clone())
+    }
+}
+
+#[async_trait]
+impl LlmClient for RecordingToolsLlm {
+    async fn complete(
+        &self,
+        _messages: &[ConversationMessage],
+        tools: &[ToolSpec],
+        _options: &LlmRequestOptions,
+    ) -> anyhow::Result<LlmCompletion> {
+        self.observed_tools
+            .lock()
+            .unwrap()
+            .push(tools.iter().map(|tool| tool.name.clone()).collect());
+        self.observed_prompts.lock().unwrap().push(
+            _messages
+                .iter()
+                .map(|message| message.content.clone())
+                .collect(),
+        );
+        Ok(AssistantTurn {
+            text: Some("recorded tools".into()),
+            tool_calls: vec![],
+            reasoning: vec![],
+        }
+        .into_completion())
+    }
+}
 
 #[tokio::test]
 async fn desktop_facade_adds_project_and_starts_thread() {
@@ -179,6 +228,227 @@ async fn desktop_facade_runs_turn_replays_events_and_updates_index() {
         .any(|event| matches!(event.kind, RuntimeEventKind::TurnCompleted)));
     assert_eq!(threads.len(), 1);
     assert_eq!(threads[0].id, started.thread.id);
+}
+
+#[tokio::test]
+async fn desktop_facade_root_turn_exposes_subagent_tools() {
+    let dir = tempdir().unwrap();
+    let project = dir.path().join("project");
+    tokio::fs::create_dir_all(&project).await.unwrap();
+    let db = IndexDb::open(dir.path().join("exagent.sqlite"))
+        .await
+        .unwrap();
+    let observed_tools = Arc::new(Mutex::new(Vec::new()));
+    let observed_prompts = Arc::new(Mutex::new(Vec::new()));
+    let service = AppServerService::with_llm(
+        AgentConfig::default(),
+        Box::new(RecordingToolsLlm {
+            observed_tools: observed_tools.clone(),
+            observed_prompts: observed_prompts.clone(),
+        }),
+        exagent::default_tool_registry,
+    );
+    let facade = DesktopFacade::new(service, db);
+
+    let project_record = facade
+        .add_project(NewProjectRequest {
+            name: "Project".into(),
+            path: project,
+        })
+        .await
+        .unwrap();
+    let started = facade.start_thread(&project_record.id).await.unwrap();
+    facade
+        .start_turn(
+            &project_record.id,
+            TurnStartParams {
+                thread_id: started.thread.id.clone(),
+                prompt: "record visible tools".into(),
+                input: vec![],
+                workspace_root: None,
+                turn_mode: Default::default(),
+                turn_context: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    wait_for_turn_completed(&facade, &project_record.id, started.thread.id.clone()).await;
+
+    let tools = observed_tools.lock().unwrap();
+    let names = tools.first().expect("observed tool names");
+    assert!(names.contains(&"spawn_agent".to_string()));
+    assert!(names.contains(&"list_agents".to_string()));
+    assert!(names.contains(&"send_message".to_string()));
+    assert!(names.contains(&"wait_agent".to_string()));
+
+    let prompts = observed_prompts.lock().unwrap();
+    let prompt = prompts
+        .first()
+        .expect("observed prompt")
+        .join("\n--- message ---\n");
+    assert!(prompt.contains("Subagent collaboration tools are available"));
+    assert!(prompt.contains("spawn_agent"));
+    assert!(prompt.contains("wait_agent"));
+    let guidance_index = prompts
+        .first()
+        .expect("observed prompt")
+        .iter()
+        .position(|message| message.contains("Subagent collaboration tools are available"))
+        .expect("guidance message");
+    let user_index = prompts
+        .first()
+        .expect("observed prompt")
+        .iter()
+        .position(|message| message.contains("record visible tools"))
+        .expect("user message");
+    assert!(guidance_index < user_index);
+}
+
+#[tokio::test]
+async fn desktop_facade_settings_constructor_exposes_subagent_tools() {
+    let dir = tempdir().unwrap();
+    let project = dir.path().join("project");
+    tokio::fs::create_dir_all(&project).await.unwrap();
+    let db = IndexDb::open(dir.path().join("exagent.sqlite"))
+        .await
+        .unwrap();
+    let observed_tools = Arc::new(Mutex::new(Vec::new()));
+    let observed_prompts = Arc::new(Mutex::new(Vec::new()));
+    let llm = RecordingToolsLlm {
+        observed_tools: observed_tools.clone(),
+        observed_prompts: observed_prompts.clone(),
+    };
+    let service = AppServerService::with_config_llm_factory_model_resolver_and_goal_store(
+        AgentConfig::default(),
+        Arc::new(SharedLlmFactory::new(Arc::new(llm))),
+        Arc::new(EnvModelResolver),
+        db.clone(),
+    );
+    let facade = DesktopFacade::new(service, db);
+
+    let project_record = facade
+        .add_project(NewProjectRequest {
+            name: "Project".into(),
+            path: project,
+        })
+        .await
+        .unwrap();
+    let started = facade.start_thread(&project_record.id).await.unwrap();
+    facade
+        .start_turn(
+            &project_record.id,
+            TurnStartParams {
+                thread_id: started.thread.id.clone(),
+                prompt: "record visible tools".into(),
+                input: vec![],
+                workspace_root: None,
+                turn_mode: Default::default(),
+                turn_context: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    wait_for_turn_completed(&facade, &project_record.id, started.thread.id.clone()).await;
+
+    let tools = observed_tools.lock().unwrap();
+    let names = tools.first().expect("observed tool names");
+    assert!(names.contains(&"spawn_agent".to_string()));
+    assert!(names.contains(&"list_agents".to_string()));
+    assert!(names.contains(&"send_message".to_string()));
+    assert!(names.contains(&"wait_agent".to_string()));
+
+    let prompts = observed_prompts.lock().unwrap();
+    let prompt = prompts
+        .first()
+        .expect("observed prompt")
+        .join("\n--- message ---\n");
+    assert!(prompt.contains("Subagent collaboration tools are available"));
+    assert!(prompt.contains("spawn_agent"));
+    assert!(prompt.contains("wait_agent"));
+    let guidance_index = prompts
+        .first()
+        .expect("observed prompt")
+        .iter()
+        .position(|message| message.contains("Subagent collaboration tools are available"))
+        .expect("guidance message");
+    let user_index = prompts
+        .first()
+        .expect("observed prompt")
+        .iter()
+        .position(|message| message.contains("record visible tools"))
+        .expect("user message");
+    assert!(guidance_index < user_index);
+}
+
+#[tokio::test]
+async fn desktop_facade_model_override_preserves_subagent_tools() {
+    let dir = tempdir().unwrap();
+    let project = dir.path().join("project");
+    tokio::fs::create_dir_all(&project).await.unwrap();
+    let db = IndexDb::open(dir.path().join("exagent.sqlite"))
+        .await
+        .unwrap();
+    let observed_tools = Arc::new(Mutex::new(Vec::new()));
+    let observed_prompts = Arc::new(Mutex::new(Vec::new()));
+    let llm = RecordingToolsLlm {
+        observed_tools: observed_tools.clone(),
+        observed_prompts: observed_prompts.clone(),
+    };
+    let deepseek_model = ResolvedModelConfig::from_provider_profile(
+        "deepseek",
+        "deepseek-v4-pro",
+        None,
+        ResolvedCredential::None,
+        Some(1_000_000),
+    );
+    let service = AppServerService::with_config_llm_factory_model_resolver_and_goal_store(
+        AgentConfig::default(),
+        Arc::new(SharedLlmFactory::new(Arc::new(llm))),
+        Arc::new(StaticModelResolver {
+            resolved: deepseek_model,
+        }),
+        db.clone(),
+    );
+    let facade = DesktopFacade::new(service, db);
+
+    let project_record = facade
+        .add_project(NewProjectRequest {
+            name: "Project".into(),
+            path: project,
+        })
+        .await
+        .unwrap();
+    let started = facade.start_thread(&project_record.id).await.unwrap();
+    facade
+        .start_turn(
+            &project_record.id,
+            TurnStartParams {
+                thread_id: started.thread.id.clone(),
+                prompt: "record visible tools with model override".into(),
+                input: vec![],
+                workspace_root: None,
+                turn_mode: Default::default(),
+                turn_context: Some(TurnContextOverrides {
+                    cwd: None,
+                    model: Some(ModelRef::new("deepseek", "deepseek-v4-pro")),
+                    thinking_mode: None,
+                    clear_thinking_mode: false,
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    wait_for_turn_completed(&facade, &project_record.id, started.thread.id.clone()).await;
+
+    let tools = observed_tools.lock().unwrap();
+    let names = tools.first().expect("observed tool names");
+    assert!(names.contains(&"spawn_agent".to_string()));
+    assert!(names.contains(&"list_agents".to_string()));
+    assert!(names.contains(&"send_message".to_string()));
+    assert!(names.contains(&"wait_agent".to_string()));
 }
 
 #[tokio::test]

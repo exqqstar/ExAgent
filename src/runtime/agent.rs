@@ -14,12 +14,12 @@ use crate::registry::ToolRegistry;
 use crate::runtime::agent_profile::AgentToolPolicy;
 use crate::runtime::goal::GoalToolApi;
 use crate::runtime::subagent::AgentControl;
+use crate::runtime::thread_session::ThreadInbox;
 use crate::runtime::tool_call_runtime::ToolCallRuntime;
 use crate::runtime::tool_hooks::{NoopToolHooks, ToolHooks};
 use crate::runtime::tool_selection::{build_tool_selection, ToolSelectionInput};
 use crate::tools::ToolSpec;
 use crate::types::{ConversationMessage, LlmCompletion, ThreadId, TurnId};
-use tokio::sync::watch;
 
 pub struct Agent {
     config: AgentConfig,
@@ -159,7 +159,7 @@ impl Agent {
         cwd: PathBuf,
         exec_output_sink: Option<ExecOutputEventSink>,
         agent_tool_policy: AgentToolPolicy,
-        mailbox_rx: Option<watch::Receiver<()>>,
+        inbox: Option<Arc<ThreadInbox>>,
     ) -> Result<ToolCallRuntime> {
         let mut turn_config = self.config.clone();
         turn_config.workspace_root = workspace_root;
@@ -188,8 +188,8 @@ impl Agent {
             turn_id,
         )
         .with_tool_hooks(self.tool_hooks.clone());
-        if let Some(mailbox_rx) = mailbox_rx {
-            runtime = runtime.with_mailbox_rx(mailbox_rx);
+        if let Some(inbox) = inbox {
+            runtime = runtime.with_inbox(inbox);
         }
         runtime = runtime.with_goal_api(self.goal_api.clone());
         Ok(runtime)
@@ -397,7 +397,7 @@ mod tests {
                 agent.config.workspace_root.clone(),
                 agent.config.cwd.clone(),
                 None,
-                AgentToolPolicy::allow_only(["read_file", "search_files"]),
+                AgentToolPolicy::read_only_basic_collaboration(),
                 None,
             )
             .await

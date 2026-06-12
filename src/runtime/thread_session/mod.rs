@@ -1,11 +1,12 @@
 pub mod events;
+mod inbox;
 pub(crate) mod overlay;
 pub mod turn;
 
 pub(crate) use events::{LiveEventSink, ThreadEventRecorder};
+pub use inbox::ThreadInbox;
 pub(crate) use overlay::{ActiveToolInvocation, RuntimeOverlay};
 
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -17,7 +18,10 @@ use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::policy::PolicyManager;
 use crate::runtime::context::ContextManager;
 use crate::runtime::goal::{runtime::GoalRuntime, GoalToolApi};
-use crate::runtime::subagent::{AgentControl, InterAgentCommunication};
+use crate::runtime::subagent::{
+    parent_agent_path, terminal_completion_content, AgentControl, AgentTurnTerminalStatus,
+    SendMessageRequest,
+};
 use crate::runtime::thread_runtime::{
     AgentFactory, ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus,
 };
@@ -107,8 +111,8 @@ pub struct ThreadSession {
     status_tx: watch::Sender<ThreadRuntimeStatus>,
     live_state: Arc<RwLock<ThreadSessionLiveState>>,
     policy: Arc<PolicyManager>,
-    pending_mails: VecDeque<InterAgentCommunication>,
-    mailbox_tx: watch::Sender<()>,
+    inbox: Arc<ThreadInbox>,
+    subagent_control: Option<Arc<AgentControl>>,
     next_turn_index_seed: u64,
     goal_runtime: Option<Arc<GoalRuntime>>,
 }
@@ -199,10 +203,11 @@ impl ThreadSession {
         let goal_api = goal_runtime
             .as_ref()
             .map(|runtime| Arc::new(GoalToolApi::new(runtime.clone())));
+        let session_subagent_control = subagent_control.clone();
         let agent = agent_factory(runtime_config.clone())?
             .with_subagent_control(subagent_control)
             .with_goal_api(goal_api);
-        let (mailbox_tx, _) = watch::channel(());
+        let inbox = Arc::new(ThreadInbox::new(thread_id.clone()));
         let live_state = Arc::new(RwLock::new(ThreadSessionLiveState {
             snapshot: snapshot.clone(),
             overlay,
@@ -229,8 +234,8 @@ impl ThreadSession {
             status_tx,
             live_state,
             policy,
-            pending_mails: VecDeque::new(),
-            mailbox_tx,
+            inbox,
+            subagent_control: session_subagent_control,
             next_turn_index_seed,
             goal_runtime,
         })
@@ -242,6 +247,10 @@ impl ThreadSession {
 
     pub(crate) fn live_state_handle(&self) -> Arc<RwLock<ThreadSessionLiveState>> {
         self.live_state.clone()
+    }
+
+    pub(crate) fn inbox_handle(&self) -> Arc<ThreadInbox> {
+        self.inbox.clone()
     }
 
     pub(crate) fn stopped_guard(&self) -> ThreadSessionStoppedGuard {
@@ -275,28 +284,45 @@ impl ThreadSession {
         self.agent.shutdown().await;
     }
 
-    pub(crate) fn handle_inter_agent_communication(
-        &mut self,
-        mail: InterAgentCommunication,
-    ) -> anyhow::Result<ThreadOpResult> {
-        if mail.recipient_thread_id != self.thread_id {
-            return Err(ThreadRuntimeError::TurnRejected {
-                thread_id: self.thread_id.clone(),
-                reason: format!(
-                    "mail recipient {} does not match thread {}",
-                    mail.recipient_thread_id.as_str(),
-                    self.thread_id.as_str()
-                ),
-            }
-            .into());
+    pub(crate) async fn notify_parent_of_terminal_turn(
+        &self,
+        turn_id: &TurnId,
+        status: AgentTurnTerminalStatus,
+        message: String,
+    ) {
+        let Some(control) = self.subagent_control.clone() else {
+            return;
+        };
+        let lineage = {
+            let state = self
+                .live_state
+                .read()
+                .expect("thread session live state rwlock poisoned");
+            state.snapshot.lineage.clone()
+        };
+        let Some(lineage) = lineage else {
+            return;
+        };
+        let Some(parent_path) = parent_agent_path(&lineage.agent_path) else {
+            return;
+        };
+        let content = terminal_completion_content(&lineage.agent_path, turn_id, status, &message);
+        let request = SendMessageRequest {
+            author_thread_id: self.thread_id.clone(),
+            config: self.base_config.clone(),
+            recipient_path: parent_path,
+            message: content,
+            source_turn_id: Some(turn_id.clone()),
+            followup: true,
+        };
+        if let Err(err) = control.send_message(request).await {
+            tracing::debug!(
+                error = %err,
+                thread_id = %self.thread_id.as_str(),
+                turn_id = %turn_id.as_str(),
+                "failed to notify parent of subagent terminal turn"
+            );
         }
-        self.pending_mails.push_back(mail);
-        let _ = self.mailbox_tx.send(());
-        Ok(ThreadOpResult::Ack)
-    }
-
-    pub(crate) fn has_pending_inter_agent_mail(&self) -> bool {
-        !self.pending_mails.is_empty()
     }
 
     pub(crate) fn live_view_from_state(

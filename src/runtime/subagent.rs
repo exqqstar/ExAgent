@@ -197,6 +197,39 @@ pub enum AgentStatus {
     Running,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTurnTerminalStatus {
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+pub fn terminal_completion_content(
+    agent_path: &str,
+    turn_id: &TurnId,
+    status: AgentTurnTerminalStatus,
+    message: &str,
+) -> String {
+    serde_json::json!({
+        "type": "subagent_turn_completed",
+        "agent_path": agent_path,
+        "turn_id": turn_id.as_str(),
+        "status": status,
+        "message": message,
+    })
+    .to_string()
+}
+
+pub fn parent_agent_path(agent_path: &str) -> Option<String> {
+    let trimmed = agent_path.trim_end_matches('/');
+    let (parent, child) = trimmed.rsplit_once('/')?;
+    if child.is_empty() || parent.is_empty() {
+        return None;
+    }
+    Some(parent.to_string())
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ListedAgent {
     pub thread_id: Option<ThreadId>,
@@ -933,6 +966,16 @@ mod tests {
         let ancestor_path =
             control.close_targets_for_path(&ThreadId::new("thread_audit"), "/root/research");
         assert!(ancestor_path.is_err());
+    }
+
+    #[test]
+    fn parent_agent_path_returns_direct_parent() {
+        assert_eq!(parent_agent_path("/root/planner").as_deref(), Some("/root"));
+        assert_eq!(
+            parent_agent_path("/root/research/audit").as_deref(),
+            Some("/root/research")
+        );
+        assert_eq!(parent_agent_path("/root"), None);
     }
 
     struct NoopLifecycle;

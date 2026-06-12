@@ -1,8 +1,9 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
-use super::{LiveEventSink, RuntimeInterrupt, ThreadEventRecorder, ThreadSession};
+use super::{LiveEventSink, RuntimeInterrupt, ThreadEventRecorder, ThreadInbox, ThreadSession};
 use crate::agent::Agent;
 use crate::config::{AgentConfig, ThinkingMode};
 use crate::events::RuntimeEventKind;
@@ -28,7 +29,10 @@ use crate::runtime::tool_orchestrator::ToolExecutionOutcome;
 use crate::runtime::turn_mode::TurnMode;
 use crate::session::{ApprovalId, ApprovalStatus, CompactionSummary, ThreadSnapshot};
 use crate::state::rollout::{CompactedItem, RolloutItem};
-use crate::types::{AssistantTurn, ConversationMessage, MessageRole, ToolCall, TurnId, UserInput};
+use crate::tools::ToolSpec;
+use crate::types::{
+    AssistantTurn, ConversationMessage, InputModality, MessageRole, ToolCall, TurnId, UserInput,
+};
 use tokio::sync::oneshot;
 
 impl ThreadSession {
@@ -195,7 +199,7 @@ impl ThreadSession {
         )?;
 
         let final_turn = if let Some(mut interrupt) = interrupt {
-            let mailbox_rx = self.mailbox_tx.subscribe();
+            let inbox = self.inbox.clone();
             let Self {
                 agent,
                 recorder,
@@ -218,7 +222,7 @@ impl ThreadSession {
                     None,
                     TurnThinkingModeOverride::Inherit,
                     TurnMode::Default,
-                    mailbox_rx,
+                    inbox,
                 ) => result?,
                 _ = &mut interrupt.interrupt_rx => {
                     self.record_turn_interrupted(&mut snapshot, &turn_id, &interrupt.interrupted)?;
@@ -229,7 +233,7 @@ impl ThreadSession {
                 }
             }
         } else {
-            let mailbox_rx = self.mailbox_tx.subscribe();
+            let inbox = self.inbox.clone();
             let Self {
                 agent,
                 recorder,
@@ -250,7 +254,7 @@ impl ThreadSession {
                 None,
                 TurnThinkingModeOverride::Inherit,
                 TurnMode::Default,
-                mailbox_rx,
+                inbox,
             )
             .await?
         };
@@ -372,7 +376,7 @@ impl ThreadSession {
                 self.record_runtime_error(&snapshot, &turn_id, &err)?;
                 return Err(err);
             }
-            let mailbox_rx = self.mailbox_tx.subscribe();
+            let inbox = self.inbox.clone();
             let Self {
                 agent,
                 recorder,
@@ -383,7 +387,7 @@ impl ThreadSession {
             } = self;
             let runtime_turn_id = turn_id.clone();
             tokio::select! {
-                result = run_session_turn(agent, recorder, rollout_store, context_manager, goal_runtime.as_deref(), &mut snapshot, runtime_turn_id, runtime_turn_cwd, turn_resolved_model.as_ref(), turn_thinking_mode, turn_mode, mailbox_rx) => {
+                result = run_session_turn(agent, recorder, rollout_store, context_manager, goal_runtime.as_deref(), &mut snapshot, runtime_turn_id, runtime_turn_cwd, turn_resolved_model.as_ref(), turn_thinking_mode, turn_mode, inbox) => {
                     match result {
                         Ok(turn) => turn,
                         Err(err) => {
@@ -429,7 +433,7 @@ impl ThreadSession {
                 self.record_runtime_error(&snapshot, &turn_id, &err)?;
                 return Err(err);
             }
-            let mailbox_rx = self.mailbox_tx.subscribe();
+            let inbox = self.inbox.clone();
             let Self {
                 agent,
                 recorder,
@@ -450,7 +454,7 @@ impl ThreadSession {
                 turn_resolved_model.as_ref(),
                 turn_thinking_mode,
                 turn_mode,
-                mailbox_rx,
+                inbox,
             )
             .await
             {
@@ -525,7 +529,9 @@ impl ThreadSession {
         let goal_api = self.goal_runtime.as_ref().map(|runtime| {
             std::sync::Arc::new(crate::runtime::goal::GoalToolApi::new(runtime.clone()))
         });
-        self.agent = (self.agent_factory)(config)?.with_goal_api(goal_api);
+        self.agent = (self.agent_factory)(config)?
+            .with_subagent_control(self.subagent_control.clone())
+            .with_goal_api(goal_api);
         Ok(())
     }
 
@@ -692,7 +698,7 @@ impl ThreadSession {
         }
         let mailbox_messages = self
             .context_manager
-            .record_inter_agent_communications(self.pending_mails.drain(..));
+            .record_inter_agent_communications(self.inbox.drain().await);
         self.context_manager.record_items([user_message.clone()]);
         self.context_manager.sync_snapshot(snapshot);
         let mut rollout_items =
@@ -968,7 +974,7 @@ async fn run_session_turn(
     turn_model: Option<&ResolvedModelConfig>,
     turn_thinking_mode: TurnThinkingModeOverride,
     turn_mode: TurnMode,
-    mailbox_rx: tokio::sync::watch::Receiver<()>,
+    inbox: Arc<ThreadInbox>,
 ) -> Result<AssistantTurn> {
     let cwd = turn_cwd.clone().unwrap_or_else(|| snapshot.cwd.clone());
     let effective_profile_agent_type = effective_profile_agent_type_for_turn(snapshot, turn_mode);
@@ -986,7 +992,7 @@ async fn run_session_turn(
             cwd,
             Some(recorder.exec_output_event_sink()),
             agent_tool_policy(snapshot, turn_mode),
-            Some(mailbox_rx),
+            Some(inbox.clone()),
         )
         .await?;
     let llm_options = LlmRequestOptions {
@@ -999,8 +1005,21 @@ async fn run_session_turn(
     };
 
     loop {
-        let prompt = context_manager.for_prompt(&turn_config.model.capabilities.input_modalities);
+        drain_inbox_into_turn_context(
+            inbox.as_ref(),
+            recorder,
+            rollout_store,
+            context_manager,
+            snapshot,
+            &runtime_turn_id,
+        )
+        .await?;
         let tool_specs = tool_runtime.visible_specs();
+        let prompt = prompt_for_sampling(
+            context_manager,
+            &turn_config.model.capabilities.input_modalities,
+            tool_specs,
+        );
         let completion = match stream_assistant_turn(
             agent,
             recorder,
@@ -1030,9 +1049,12 @@ async fn run_session_turn(
                     turn_mode,
                 )
                 .await?;
-                let prompt =
-                    context_manager.for_prompt(&turn_config.model.capabilities.input_modalities);
                 let tool_specs = tool_runtime.visible_specs();
+                let prompt = prompt_for_sampling(
+                    context_manager,
+                    &turn_config.model.capabilities.input_modalities,
+                    tool_specs,
+                );
                 stream_assistant_turn(
                     agent,
                     recorder,
@@ -1065,6 +1087,9 @@ async fn run_session_turn(
         }
 
         if turn.tool_calls.is_empty() {
+            if inbox.has_pending().await {
+                continue;
+            }
             return Ok(turn);
         }
 
@@ -1131,6 +1156,89 @@ async fn run_session_turn(
     }
 }
 
+fn prompt_for_sampling(
+    context_manager: &ContextManager,
+    input_modalities: &[InputModality],
+    tool_specs: &[ToolSpec],
+) -> Vec<ConversationMessage> {
+    let mut prompt = context_manager.for_prompt(input_modalities);
+    let Some(guidance) = subagent_tool_guidance_message(tool_specs) else {
+        return prompt;
+    };
+    let insert_index = prompt
+        .iter()
+        .rposition(|message| matches!(message.role, MessageRole::User) && !message.injected)
+        .unwrap_or(prompt.len());
+    prompt.insert(insert_index, guidance);
+    prompt
+}
+
+fn subagent_tool_guidance_message(tool_specs: &[ToolSpec]) -> Option<ConversationMessage> {
+    let has_tool = |name: &str| tool_specs.iter().any(|spec| spec.name == name);
+    let available = [
+        "spawn_agent",
+        "list_agents",
+        "send_message",
+        "wait_agent",
+        "followup_task",
+        "close_agent",
+    ]
+    .into_iter()
+    .filter(|name| has_tool(name))
+    .collect::<Vec<_>>();
+
+    if available.is_empty() {
+        return None;
+    }
+
+    let mut content = format!(
+        "Subagent collaboration tools are available in this turn: {}.",
+        available.join(", ")
+    );
+    if has_tool("spawn_agent") {
+        content.push_str(" Use spawn_agent to start a native subagent thread for a focused task.");
+    }
+    if has_tool("wait_agent") {
+        content.push_str(
+            " Use wait_agent when you need to wait for subagent mailbox activity or completion messages.",
+        );
+    }
+    if has_tool("send_message") {
+        content.push_str(
+            " Use send_message for direct inter-agent communication within the current agent tree.",
+        );
+    }
+    if has_tool("list_agents") {
+        content.push_str(" Use list_agents to inspect the current agent tree.");
+    }
+
+    Some(ConversationMessage::injected_system(content))
+}
+
+async fn drain_inbox_into_turn_context(
+    inbox: &ThreadInbox,
+    recorder: &ThreadEventRecorder,
+    rollout_store: &crate::state::rollout::RolloutStore,
+    context_manager: &mut ContextManager,
+    snapshot: &mut ThreadSnapshot,
+    turn_id: &TurnId,
+) -> Result<usize> {
+    let mails = inbox.drain().await;
+    if mails.is_empty() {
+        return Ok(0);
+    }
+
+    let mailbox_messages = context_manager.record_inter_agent_communications(mails);
+    let rollout_items = mailbox_messages
+        .into_iter()
+        .map(|message| RolloutItem::response_item_for_turn(turn_id.clone(), message))
+        .collect::<Vec<_>>();
+    rollout_store.append_items_blocking(&rollout_items)?;
+    context_manager.sync_snapshot(snapshot);
+    recorder.publish_snapshot(snapshot)?;
+    Ok(rollout_items.len())
+}
+
 async fn record_goal_turn_started_marker(
     goal_runtime: &GoalRuntime,
     recorder: &mut ThreadEventRecorder,
@@ -1156,7 +1264,7 @@ async fn stream_assistant_turn(
     _snapshot: &ThreadSnapshot,
     turn_id: &TurnId,
     prompt: &[ConversationMessage],
-    tool_specs: &[crate::tools::ToolSpec],
+    tool_specs: &[ToolSpec],
     llm_options: &LlmRequestOptions,
 ) -> Result<crate::types::LlmCompletion> {
     let mut sink = RuntimeLlmStreamSink { recorder, turn_id };

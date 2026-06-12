@@ -15,6 +15,7 @@ use exagent::runtime::thread_session::{ThreadSession, ThreadSessionOptions};
 use exagent::runtime::turn_mode::TurnMode;
 use exagent::session::TurnContextItem;
 use exagent::state::rollout::{rollout_paths, RolloutItem, RolloutStore, ThreadMeta};
+use exagent::tools::wait_agent::WaitAgentTool;
 use exagent::tools::ToolSpec;
 use exagent::types::{
     AssistantTurn, ConversationMessage, EventId, LlmCompletion, ReasoningBlock, ReasoningSignature,
@@ -22,9 +23,11 @@ use exagent::types::{
 };
 use std::collections::VecDeque;
 use std::fs;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::tempdir;
+use tokio::sync::Notify;
 
 fn write_rollout_meta(config: &AgentConfig, thread_id: &ThreadId) {
     let rollout_paths = rollout_paths(&config.workspace_root, thread_id);
@@ -942,7 +945,7 @@ async fn thread_runtime_delivers_mailbox_messages_on_next_turn() {
     .expect("spawn runtime");
 
     runtime
-        .submit_inter_agent_communication(InterAgentCommunication {
+        .enqueue_inter_agent_communication(InterAgentCommunication {
             author_thread_id: ThreadId::new("thread_author"),
             author_path: "/root/research".to_string(),
             recipient_thread_id: thread_id.clone(),
@@ -1000,6 +1003,157 @@ async fn thread_runtime_delivers_mailbox_messages_on_next_turn() {
 }
 
 #[tokio::test]
+async fn active_turn_drains_mail_after_wait_agent_wakeup() {
+    let dir = tempdir().unwrap();
+    let thread_id = ThreadId::new("active_turn_drains_mail_after_wait");
+    let config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        ..AgentConfig::default()
+    };
+    write_rollout_meta(&config, &thread_id);
+
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let prompts_for_llm = prompts.clone();
+    let factory: AgentFactory = Arc::new(move |config| {
+        let mut registry = ToolRegistry::new();
+        registry.register(WaitAgentTool);
+        Ok(Agent::new(
+            config,
+            Box::new(RecordingPromptLlm {
+                turns: Mutex::new(VecDeque::from([
+                    AssistantTurn {
+                        text: None,
+                        tool_calls: vec![exagent::types::ToolCall {
+                            id: "call_wait".into(),
+                            name: "wait_agent".into(),
+                            arguments: serde_json::json!({ "timeout_ms": 5_000 }),
+                            thought_signature: None,
+                        }],
+                        reasoning: vec![],
+                    },
+                    AssistantTurn {
+                        text: Some("saw child result".into()),
+                        tool_calls: vec![],
+                        reasoning: vec![],
+                    },
+                ])),
+                prompts: prompts_for_llm.clone(),
+            }),
+            registry,
+        ))
+    });
+    let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
+        thread_id.clone(),
+        config,
+        factory,
+    ))
+    .expect("spawn runtime");
+
+    let runtime_for_mail = runtime.clone();
+    let thread_for_mail = thread_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        runtime_for_mail
+            .enqueue_inter_agent_communication(InterAgentCommunication {
+                author_thread_id: ThreadId::new("thread_child"),
+                author_path: "/root/child".into(),
+                recipient_thread_id: thread_for_mail,
+                recipient_path: "/root".into(),
+                other_recipients: Vec::new(),
+                content: "child result".into(),
+                trigger_turn: false,
+                source_turn_id: Some(TurnId::new("turn_child")),
+                created_at: "2026-06-12T00:00:00Z".into(),
+            })
+            .await
+            .expect("enqueue mail");
+    });
+
+    let result = runtime
+        .submit_user_input_and_wait("parent waits".into(), None)
+        .await
+        .expect("run parent turn");
+    let ThreadOpResult::UserInput { final_turn, .. } = result else {
+        panic!("expected user input result");
+    };
+    assert_eq!(final_turn.text.as_deref(), Some("saw child result"));
+
+    let prompts = prompts.lock().expect("prompts");
+    let second_prompt = prompts.last().expect("second prompt");
+    assert!(second_prompt.contains("inter_agent_communication"));
+    assert!(second_prompt.contains("child result"));
+}
+
+#[tokio::test]
+async fn active_turn_continues_when_mail_arrives_during_no_tool_sampling() {
+    let dir = tempdir().unwrap();
+    let thread_id = ThreadId::new("active_turn_continues_for_sampling_mail");
+    let config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        ..AgentConfig::default()
+    };
+    write_rollout_meta(&config, &thread_id);
+
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let first_started = Arc::new(Notify::new());
+    let release_first = Arc::new(Notify::new());
+    let factory = blocking_no_tool_then_prompt_factory(
+        prompts.clone(),
+        first_started.clone(),
+        release_first.clone(),
+    );
+    let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
+        thread_id.clone(),
+        config,
+        factory,
+    ))
+    .expect("spawn runtime");
+
+    let runtime_for_turn = runtime.clone();
+    let pending_turn = tokio::spawn(async move {
+        runtime_for_turn
+            .submit_user_input_and_wait("parent starts".into(), None)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), first_started.notified())
+        .await
+        .expect("first model request should start");
+
+    runtime
+        .enqueue_inter_agent_communication(InterAgentCommunication {
+            author_thread_id: ThreadId::new("thread_child"),
+            author_path: "/root/child".into(),
+            recipient_thread_id: thread_id.clone(),
+            recipient_path: "/root".into(),
+            other_recipients: Vec::new(),
+            content: "mail during sampling".into(),
+            trigger_turn: false,
+            source_turn_id: Some(TurnId::new("turn_child")),
+            created_at: "2026-06-12T00:00:00Z".into(),
+        })
+        .await
+        .expect("enqueue mail");
+    release_first.notify_one();
+
+    let result = pending_turn
+        .await
+        .expect("turn task joins")
+        .expect("run parent turn");
+    let ThreadOpResult::UserInput { final_turn, .. } = result else {
+        panic!("expected user input result");
+    };
+    assert_eq!(final_turn.text.as_deref(), Some("processed pending mail"));
+
+    let prompts = prompts.lock().expect("prompts");
+    assert_eq!(prompts.len(), 2);
+    let second_prompt = prompts.last().expect("second prompt");
+    assert!(second_prompt.contains("inter_agent_communication"));
+    assert!(second_prompt.contains("mail during sampling"));
+}
+
+#[tokio::test]
 async fn thread_runtime_rejects_mail_for_a_different_recipient() {
     let dir = tempdir().unwrap();
     let thread_id = ThreadId::new("session_runtime_mailbox_wrong_recipient");
@@ -1017,7 +1171,7 @@ async fn thread_runtime_rejects_mail_for_a_different_recipient() {
     .expect("spawn runtime");
 
     let err = runtime
-        .submit_inter_agent_communication(InterAgentCommunication {
+        .enqueue_inter_agent_communication(InterAgentCommunication {
             author_thread_id: ThreadId::new("thread_author"),
             author_path: "/root/research".to_string(),
             recipient_thread_id: ThreadId::new("thread_other"),
@@ -1047,6 +1201,32 @@ fn agent_factory(turns: Vec<AssistantTurn>) -> AgentFactory {
 struct RecordingPromptLlm {
     turns: Mutex<VecDeque<AssistantTurn>>,
     prompts: Arc<Mutex<Vec<String>>>,
+}
+
+struct BlockingNoToolThenPromptLlm {
+    calls: AtomicUsize,
+    prompts: Arc<Mutex<Vec<String>>>,
+    first_started: Arc<Notify>,
+    release_first: Arc<Notify>,
+}
+
+fn blocking_no_tool_then_prompt_factory(
+    prompts: Arc<Mutex<Vec<String>>>,
+    first_started: Arc<Notify>,
+    release_first: Arc<Notify>,
+) -> AgentFactory {
+    Arc::new(move |config| {
+        Ok(Agent::new(
+            config,
+            Box::new(BlockingNoToolThenPromptLlm {
+                calls: AtomicUsize::new(0),
+                prompts: prompts.clone(),
+                first_started: first_started.clone(),
+                release_first: release_first.clone(),
+            }),
+            ToolRegistry::new(),
+        ))
+    })
 }
 
 fn recording_agent_factory(
@@ -1083,6 +1263,38 @@ impl LlmClient for RecordingPromptLlm {
             .pop_front()
             .map(AssistantTurn::into_completion)
             .ok_or_else(|| anyhow::anyhow!("RecordingPromptLlm is out of scripted turns"))
+    }
+}
+
+#[async_trait]
+impl LlmClient for BlockingNoToolThenPromptLlm {
+    async fn complete(
+        &self,
+        messages: &[ConversationMessage],
+        _tools: &[ToolSpec],
+        _options: &LlmRequestOptions,
+    ) -> anyhow::Result<LlmCompletion> {
+        self.prompts
+            .lock()
+            .expect("prompts")
+            .push(serde_json::to_string(messages).expect("serialize prompt"));
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call_index == 0 {
+            self.first_started.notify_one();
+            self.release_first.notified().await;
+            return Ok(AssistantTurn {
+                text: Some("premature answer".into()),
+                tool_calls: vec![],
+                reasoning: vec![],
+            }
+            .into_completion());
+        }
+        Ok(AssistantTurn {
+            text: Some("processed pending mail".into()),
+            tool_calls: vec![],
+            reasoning: vec![],
+        }
+        .into_completion())
     }
 }
 

@@ -28,7 +28,7 @@ fn test_context() -> (tempfile::TempDir, ThreadId, ToolContext) {
         exec_output_sink: None,
         policy: Arc::new(PolicyManager::default()),
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        mailbox_rx: None,
+        inbox: None,
         goal_api: None,
     };
     (dir, thread_id, ctx)

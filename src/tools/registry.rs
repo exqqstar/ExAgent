@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::watch;
-
 use crate::config::AgentConfig;
 use crate::exec_session::{ExecOutputEventSink, ExecSessionManager};
 use crate::policy::PolicyManager;
 use crate::runtime::agent_profile::AgentToolPolicy;
 use crate::runtime::goal::GoalToolApi;
+use crate::runtime::thread_session::ThreadInbox;
 use crate::tools::{ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
 use crate::types::{ThreadId, ToolCall, ToolResult, ToolStatus, TurnId};
 
@@ -21,7 +20,7 @@ pub struct ToolContext {
     pub exec_output_sink: Option<ExecOutputEventSink>,
     pub policy: Arc<PolicyManager>,
     pub agent_tool_policy: AgentToolPolicy,
-    pub mailbox_rx: Option<watch::Receiver<()>>,
+    pub inbox: Option<Arc<ThreadInbox>>,
     pub goal_api: Option<Arc<GoalToolApi>>,
 }
 

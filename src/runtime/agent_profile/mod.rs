@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub use catalog::{
     all_profiles, profile_for_type, render_spawn_agent_type_description, AgentProfile,
 };
-pub use policy::AgentToolPolicy;
+pub use policy::{AgentToolPolicy, CollaborationToolCapability, WorkspaceToolCapability};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -68,7 +68,7 @@ mod tests {
 
         assert_eq!(profile.id, AgentType::Worker);
         assert_eq!(profile.display_name, "Worker");
-        assert_eq!(profile.tool_policy, AgentToolPolicy::All);
+        assert_eq!(profile.tool_policy, AgentToolPolicy::all());
     }
 
     #[test]
@@ -89,8 +89,12 @@ mod tests {
             assert!(profile.tool_policy.allows("read_file"));
             assert!(profile.tool_policy.allows("search_files"));
             assert!(profile.tool_policy.allows("list_agents"));
+            assert!(profile.tool_policy.allows("send_message"));
+            assert!(profile.tool_policy.allows("wait_agent"));
             assert!(!profile.tool_policy.allows("write_file"));
             assert!(!profile.tool_policy.allows("run_command"));
+            assert!(!profile.tool_policy.allows("spawn_agent"));
+            assert!(!profile.tool_policy.allows("close_agent"));
         }
     }
 
@@ -112,7 +116,7 @@ mod tests {
         assert!(description.contains("reviewer (Reviewer):"));
         assert!(description.contains("worker (Worker):"));
         assert!(description.contains("When to spawn:"));
-        assert!(description.contains("Visible tools: read_file, search_files, list_agents"));
+        assert!(description.contains("Visible tools: workspace=ReadOnly, collaboration=Basic"));
         assert!(description.contains("Defaults: fork_turns=all, thinking_mode=high"));
         assert!(
             !description.to_lowercase().contains("locked"),

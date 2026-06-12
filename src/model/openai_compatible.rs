@@ -193,7 +193,53 @@ pub(crate) fn build_openai_chat_completion_request_value(
         request["stream"] = Value::Bool(true);
         request["stream_options"] = json!({ "include_usage": true });
     }
+    log_debug_request_shape(&request);
     Ok(request)
+}
+
+fn log_debug_request_shape(request: &Value) {
+    if std::env::var_os("EXAGENT_DEBUG_LLM_REQUEST").is_none() {
+        return;
+    }
+
+    let tool_names = request
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| {
+                    tool.get("function")
+                        .and_then(|function| function.get("name"))
+                        .and_then(Value::as_str)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let has_subagent_guidance = request
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|content| {
+                        content.contains("Subagent collaboration tools are available")
+                    })
+            })
+        });
+    let model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>");
+
+    eprintln!(
+        "exagent debug llm request model={} subagent_guidance={} tools={}",
+        model,
+        has_subagent_guidance,
+        tool_names.join(",")
+    );
 }
 
 #[async_trait]

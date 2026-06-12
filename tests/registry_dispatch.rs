@@ -43,8 +43,8 @@ async fn registry_execute_denies_tool_blocked_by_agent_policy() {
         exec_sessions: Arc::new(ExecSessionManager::default()),
         exec_output_sink: None,
         policy: Arc::new(PolicyManager::default()),
-        agent_tool_policy: AgentToolPolicy::allow_only(["read_file"]),
-        mailbox_rx: None,
+        agent_tool_policy: AgentToolPolicy::read_only_basic_collaboration(),
+        inbox: None,
         goal_api: None,
     };
 

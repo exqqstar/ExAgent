@@ -11,9 +11,9 @@ use crate::events::RuntimeEvent;
 use crate::policy::PolicyManager;
 use crate::resolved::ResolvedModelConfig;
 use crate::runtime::goal::runtime::{GoalRuntime, GoalRuntimeEffect, GoalRuntimeEvent};
-use crate::runtime::subagent::{AgentControl, InterAgentCommunication};
+use crate::runtime::subagent::{AgentControl, AgentTurnTerminalStatus, InterAgentCommunication};
 use crate::runtime::thread_session::{
-    RuntimeInterrupt, ThreadSession, ThreadSessionLiveState, ThreadSessionLiveView,
+    RuntimeInterrupt, ThreadInbox, ThreadSession, ThreadSessionLiveState, ThreadSessionLiveView,
     ThreadSessionOptions,
 };
 use crate::runtime::turn_mode::TurnMode;
@@ -22,6 +22,7 @@ use crate::types::{AssistantTurn, ThreadId, TurnId, UserInput};
 
 const THREAD_OP_CHANNEL_CAPACITY: usize = 64;
 const THREAD_EVENT_CHANNEL_CAPACITY: usize = 256;
+const PENDING_MAIL_TURN_PROMPT: &str = "Process the pending inter-agent messages in your mailbox.";
 
 pub type AgentFactory = Arc<dyn Fn(AgentConfig) -> Result<Agent> + Send + Sync>;
 pub(crate) type WorkspaceRuntimeOpPermit = Box<dyn Send + 'static>;
@@ -80,9 +81,6 @@ pub(crate) enum ThreadOp {
         approval_id: ApprovalId,
         status: ApprovalStatus,
         note: Option<String>,
-    },
-    InterAgentCommunication {
-        mail: InterAgentCommunication,
     },
     GoalRuntimeEffect {
         effect: GoalRuntimeEffect,
@@ -170,6 +168,7 @@ pub struct ThreadRuntime {
     status_rx: watch::Receiver<ThreadRuntimeStatus>,
     turn_reservation: Arc<Mutex<TurnReservationState>>,
     live_state: Arc<RwLock<ThreadSessionLiveState>>,
+    inbox: Arc<ThreadInbox>,
     goal_runtime: Option<Arc<GoalRuntime>>,
 }
 
@@ -191,6 +190,7 @@ impl ThreadRuntime {
         )?;
         let next_turn_index = session.next_turn_index_seed();
         let live_state = session.live_state_handle();
+        let inbox = session.inbox_handle();
 
         let runtime = Arc::new(Self {
             thread_id: session.thread_id().clone(),
@@ -202,6 +202,7 @@ impl ThreadRuntime {
                 active_turn: None,
             })),
             live_state,
+            inbox,
             goal_runtime,
         });
 
@@ -297,37 +298,11 @@ impl ThreadRuntime {
         }
     }
 
-    pub async fn submit_inter_agent_communication(
-        &self,
-        mail: InterAgentCommunication,
-    ) -> Result<()> {
-        match self
-            .submit_control_and_wait(ThreadOp::InterAgentCommunication { mail })
-            .await?
-        {
-            ThreadOpResult::Ack => Ok(()),
-            _ => Err(anyhow!(
-                "mailbox submission returned non-ack runtime result"
-            )),
-        }
-    }
-
     pub async fn enqueue_inter_agent_communication(
         &self,
         mail: InterAgentCommunication,
     ) -> Result<()> {
-        self.op_tx
-            .send(ThreadSubmission {
-                op: ThreadOp::InterAgentCommunication { mail },
-                start_tx: None,
-                completion_tx: None,
-                interrupt: None,
-                _active_turn_guard: None,
-                _workspace_runtime_op_guard: None,
-            })
-            .await
-            .map_err(|_| anyhow!("thread runtime is stopped"))?;
-        Ok(())
+        self.inbox.enqueue(mail).await
     }
 
     pub async fn compact_now(&self) -> Result<()> {
@@ -707,6 +682,7 @@ impl ThreadRuntimeLoop {
                     input,
                     turn_context,
                 } => {
+                    let notify_turn_id = turn_id.clone();
                     let result = self
                         .session
                         .handle_user_input_parts_with_start_ack(
@@ -717,16 +693,31 @@ impl ThreadRuntimeLoop {
                             submission.start_tx,
                         )
                         .await;
+                    if let Some((turn_id_for_notify, status, message)) =
+                        terminal_notification_from_user_input_result(&notify_turn_id, &result)
+                    {
+                        self.session
+                            .notify_parent_of_terminal_turn(&turn_id_for_notify, status, message)
+                            .await;
+                    }
                     drop(submission._active_turn_guard.take());
                     drop(submission._workspace_runtime_op_guard.take());
                     complete(submission.completion_tx, result);
                     check_goal_continuation = true;
                 }
                 ThreadOp::GoalContinuation { turn_id, goal_id } => {
+                    let notify_turn_id = turn_id.clone();
                     let result = self
                         .session
                         .handle_goal_continuation(turn_id, goal_id, submission.interrupt)
                         .await;
+                    if let Some((turn_id_for_notify, status, message)) =
+                        terminal_notification_from_user_input_result(&notify_turn_id, &result)
+                    {
+                        self.session
+                            .notify_parent_of_terminal_turn(&turn_id_for_notify, status, message)
+                            .await;
+                    }
                     drop(submission._active_turn_guard.take());
                     drop(submission._workspace_runtime_op_guard.take());
                     complete(submission.completion_tx, result);
@@ -746,10 +737,6 @@ impl ThreadRuntimeLoop {
                         .session
                         .handle_approval_decision(turn_id, approval_id, status, note)
                         .await;
-                    complete(submission.completion_tx, result);
-                }
-                ThreadOp::InterAgentCommunication { mail } => {
-                    let result = self.session.handle_inter_agent_communication(mail);
                     complete(submission.completion_tx, result);
                 }
                 ThreadOp::ManualCompaction => {
@@ -773,6 +760,7 @@ impl ThreadRuntimeLoop {
                     }
                 }
             }
+            let _ = self.maybe_start_turn_for_pending_mail().await;
             if check_goal_continuation {
                 let _ = self.maybe_enqueue_goal_continuation().await;
             }
@@ -780,6 +768,61 @@ impl ThreadRuntimeLoop {
         if !shut_down {
             self.session.shutdown().await;
         }
+    }
+
+    async fn maybe_start_turn_for_pending_mail(&mut self) -> Result<()> {
+        if !self.op_rx.is_empty() {
+            return Ok(());
+        }
+        if self.active_turn_id().is_some() {
+            return Ok(());
+        }
+        if !self.session.inbox_handle().has_trigger_turn_pending().await {
+            return Ok(());
+        }
+        let workspace_runtime_op_guard = match self.workspace_runtime_op_gate.as_ref() {
+            Some(gate) => match gate.begin_runtime_op(&self.session.workspace_root()) {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        thread_id = %self.thread_id.as_str(),
+                        "skipping pending-mail turn while workspace runtime operation is gated"
+                    );
+                    return Ok(());
+                }
+            },
+            None => None,
+        };
+        let (interrupt_tx, interrupt_rx) = oneshot::channel();
+        let interrupted = Arc::new(Notify::new());
+        let (turn_id, guard) = reserve_next_turn_from_state(
+            &self.turn_reservation,
+            &self.thread_id,
+            interrupt_tx,
+            interrupted.clone(),
+        )?;
+        self.op_tx
+            .send(ThreadSubmission {
+                op: ThreadOp::UserInput {
+                    turn_id,
+                    input: vec![UserInput::Text {
+                        text: PENDING_MAIL_TURN_PROMPT.to_string(),
+                    }],
+                    turn_context: None,
+                },
+                start_tx: None,
+                completion_tx: None,
+                interrupt: Some(RuntimeInterrupt {
+                    interrupt_rx,
+                    interrupted,
+                }),
+                _active_turn_guard: Some(guard),
+                _workspace_runtime_op_guard: workspace_runtime_op_guard,
+            })
+            .await
+            .map_err(|_| anyhow!("thread runtime is stopped"))?;
+        Ok(())
     }
 
     async fn maybe_enqueue_goal_continuation(&mut self) -> Result<()> {
@@ -804,9 +847,6 @@ impl ThreadRuntimeLoop {
             None => None,
         };
         if self.active_turn_id().is_some() {
-            return Ok(());
-        }
-        if self.session.has_pending_inter_agent_mail() {
             return Ok(());
         }
         let effect = goal_runtime
@@ -872,6 +912,45 @@ fn complete(
     }
 }
 
+fn terminal_notification_from_user_input_result(
+    turn_id: &TurnId,
+    result: &Result<ThreadOpResult>,
+) -> Option<(TurnId, AgentTurnTerminalStatus, String)> {
+    match result {
+        Ok(ThreadOpResult::UserInput { final_turn, .. }) => Some((
+            turn_id.clone(),
+            AgentTurnTerminalStatus::Completed,
+            final_turn
+                .text
+                .clone()
+                .unwrap_or_else(|| "Subagent turn completed without final text.".to_string()),
+        )),
+        Ok(ThreadOpResult::Interrupted { .. }) => Some((
+            turn_id.clone(),
+            AgentTurnTerminalStatus::Interrupted,
+            "Subagent turn was interrupted.".to_string(),
+        )),
+        Err(err)
+            if matches!(
+                err.downcast_ref::<ThreadRuntimeError>(),
+                Some(ThreadRuntimeError::TurnInterrupted { .. })
+            ) =>
+        {
+            Some((
+                turn_id.clone(),
+                AgentTurnTerminalStatus::Interrupted,
+                err.to_string(),
+            ))
+        }
+        Err(err) => Some((
+            turn_id.clone(),
+            AgentTurnTerminalStatus::Failed,
+            err.to_string(),
+        )),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -896,6 +975,10 @@ mod tests {
         calls: AtomicUsize,
         started: Arc<Notify>,
         release: Arc<Notify>,
+    }
+
+    struct PromptRecordingLlm {
+        prompts: Arc<Mutex<Vec<String>>>,
     }
 
     struct RestoreGateProbe {
@@ -933,6 +1016,27 @@ mod tests {
             }
             Ok(AssistantTurn {
                 text: Some(format!("turn {} complete", call_index + 1)),
+                tool_calls: vec![],
+                reasoning: vec![],
+            }
+            .into_completion())
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for PromptRecordingLlm {
+        async fn complete(
+            &self,
+            messages: &[ConversationMessage],
+            _tools: &[ToolSpec],
+            _options: &LlmRequestOptions,
+        ) -> Result<LlmCompletion> {
+            self.prompts
+                .lock()
+                .expect("prompts")
+                .push(serde_json::to_string(messages).expect("serialize prompt"));
+            Ok(AssistantTurn {
+                text: Some("processed mail".to_string()),
                 tool_calls: vec![],
                 reasoning: vec![],
             }
@@ -1179,6 +1283,63 @@ VALUES (?, ?, ?, 'Goal thread', 'Goal preview', 'test', 0, 'idle', 1, 1)
         .await
         .expect("continuation started");
         wait_for_goal_status(&db, &thread_id, ThreadGoalStatus::Complete).await;
+        runtime.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn pending_trigger_mail_starts_turn_after_op_completes() {
+        let dir = tempdir().expect("tempdir");
+        let thread_id = ThreadId::new("thread_pending_trigger_mail_starts_turn");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let prompts_for_factory = prompts.clone();
+        let factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(PromptRecordingLlm {
+                    prompts: prompts_for_factory.clone(),
+                }),
+                ToolRegistry::new(),
+            ))
+        });
+        let runtime = ThreadRuntime::spawn(ThreadRuntimeOptions::new(
+            thread_id.clone(),
+            config,
+            factory,
+        ))
+        .expect("runtime");
+        let mut events = runtime.subscribe_events();
+
+        runtime
+            .enqueue_inter_agent_communication(InterAgentCommunication {
+                author_thread_id: ThreadId::new("thread_child"),
+                author_path: "/root/child".to_string(),
+                recipient_thread_id: thread_id.clone(),
+                recipient_path: "/root".to_string(),
+                other_recipients: Vec::new(),
+                content: "trigger child result".to_string(),
+                trigger_turn: true,
+                source_turn_id: Some(TurnId::new("turn_child")),
+                created_at: "2026-06-12T00:00:00Z".to_string(),
+            })
+            .await
+            .expect("enqueue mail");
+
+        let _ = runtime
+            .submit_control_and_wait(ThreadOp::Interrupt { turn_id: None })
+            .await;
+        wait_for_turn_completed(&mut events, &TurnId::new("turn_1")).await;
+
+        let prompts = prompts.lock().expect("prompts");
+        let prompt = prompts.first().expect("mail turn prompt");
+        assert!(prompt.contains("inter_agent_communication"));
+        assert!(prompt.contains("trigger child result"));
+        assert!(prompt.contains(PENDING_MAIL_TURN_PROMPT));
         runtime.shutdown().await.expect("shutdown");
     }
 

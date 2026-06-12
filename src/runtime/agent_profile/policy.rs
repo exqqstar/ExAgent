@@ -1,26 +1,47 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AgentToolPolicy {
-    All,
-    AllowOnly(Vec<String>),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceToolCapability {
+    ReadOnly,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollaborationToolCapability {
+    Basic,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentToolPolicy {
+    pub workspace: WorkspaceToolCapability,
+    pub collaboration: CollaborationToolCapability,
 }
 
 impl AgentToolPolicy {
     pub fn all() -> Self {
-        Self::All
+        Self {
+            workspace: WorkspaceToolCapability::Full,
+            collaboration: CollaborationToolCapability::Full,
+        }
     }
 
-    pub fn allow_only<I, S>(names: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        Self::AllowOnly(names.into_iter().map(Into::into).collect())
+    pub fn read_only_basic_collaboration() -> Self {
+        Self {
+            workspace: WorkspaceToolCapability::ReadOnly,
+            collaboration: CollaborationToolCapability::Basic,
+        }
     }
 
     pub fn allows(&self, tool_name: &str) -> bool {
-        match self {
-            Self::All => true,
-            Self::AllowOnly(names) => names.iter().any(|name| name == tool_name),
+        match tool_name {
+            "read_file" | "search_files" => true,
+            "write_file" | "run_command" | "apply_patch" | "exec_command" | "write_stdin" => {
+                self.workspace == WorkspaceToolCapability::Full
+            }
+            "list_agents" | "send_message" | "wait_agent" => true,
+            "followup_task" | "spawn_agent" | "close_agent" => {
+                self.collaboration == CollaborationToolCapability::Full
+            }
+            _ => self.workspace == WorkspaceToolCapability::Full,
         }
     }
 }

@@ -195,20 +195,29 @@ mod tests {
             &ToolVisibilityContext {
                 permission_profile: PermissionProfile::FullAccess,
                 provider_supports_tools: true,
-                agent_tool_policy: AgentToolPolicy::allow_only(["read_file"]),
+                agent_tool_policy: AgentToolPolicy::read_only_basic_collaboration(),
             },
         );
 
-        assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].name, "read_file");
+        let names = visible
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"search_files"));
+        assert!(!names.contains(&"write_file"));
+        assert!(!names.contains(&"run_command"));
     }
 
     #[test]
     fn authorize_tool_is_the_shared_agent_policy_predicate() {
-        let policy = AgentToolPolicy::allow_only(["read_file"]);
+        let policy = AgentToolPolicy::read_only_basic_collaboration();
 
         assert!(authorize_tool("read_file", &policy));
+        assert!(authorize_tool("send_message", &policy));
+        assert!(authorize_tool("wait_agent", &policy));
         assert!(!authorize_tool("run_command", &policy));
+        assert!(!authorize_tool("spawn_agent", &policy));
     }
 
     #[tokio::test]
@@ -287,11 +296,7 @@ mod tests {
             mcp_runtime,
             subagent_control: Some(subagent_control()),
             goal_api: None,
-            agent_tool_policy: AgentToolPolicy::allow_only([
-                "read_file",
-                "search_files",
-                "list_agents",
-            ]),
+            agent_tool_policy: AgentToolPolicy::read_only_basic_collaboration(),
         })
         .await
         .expect("read-only selection");
@@ -304,13 +309,9 @@ mod tests {
         assert!(read_only_names.contains(&"read_file"));
         assert!(read_only_names.contains(&"search_files"));
         assert!(read_only_names.contains(&"list_agents"));
-        for tool_name in [
-            "spawn_agent",
-            "close_agent",
-            "send_message",
-            "followup_task",
-            "wait_agent",
-        ] {
+        assert!(read_only_names.contains(&"send_message"));
+        assert!(read_only_names.contains(&"wait_agent"));
+        for tool_name in ["spawn_agent", "close_agent", "followup_task"] {
             assert!(
                 !read_only_names.contains(&tool_name),
                 "expected {tool_name} to be hidden by agent policy"

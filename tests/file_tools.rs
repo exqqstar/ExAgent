@@ -32,7 +32,7 @@ async fn read_file_limits_to_requested_range() {
         exec_output_sink: None,
         policy: Arc::new(PolicyManager::default()),
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        mailbox_rx: None,
+        inbox: None,
         goal_api: None,
     };
 
@@ -73,7 +73,7 @@ async fn write_file_creates_parent_directories() {
         exec_output_sink: None,
         policy: Arc::new(PolicyManager::default()),
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        mailbox_rx: None,
+        inbox: None,
         goal_api: None,
     };
 
@@ -118,7 +118,7 @@ async fn apply_patch_updates_existing_file_with_begin_patch_format() {
         exec_output_sink: None,
         policy: Arc::new(PolicyManager::default()),
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        mailbox_rx: None,
+        inbox: None,
         goal_api: None,
     };
 
@@ -166,7 +166,7 @@ async fn apply_patch_rejects_multi_file_patch_without_partial_mutation() {
         exec_output_sink: None,
         policy: Arc::new(PolicyManager::default()),
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        mailbox_rx: None,
+        inbox: None,
         goal_api: None,
     };
 
@@ -217,7 +217,7 @@ async fn apply_patch_rejects_move_to_existing_file_without_clobbering() {
         exec_output_sink: None,
         policy: Arc::new(PolicyManager::default()),
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        mailbox_rx: None,
+        inbox: None,
         goal_api: None,
     };
 
@@ -273,7 +273,7 @@ async fn search_files_returns_matching_lines_under_workspace() {
         exec_output_sink: None,
         policy: Arc::new(PolicyManager::default()),
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        mailbox_rx: None,
+        inbox: None,
         goal_api: None,
     };
 
@@ -426,7 +426,7 @@ async fn execute_search_files(
         exec_output_sink: None,
         policy: Arc::new(PolicyManager::default()),
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        mailbox_rx: None,
+        inbox: None,
         goal_api: None,
     };
 
@@ -465,7 +465,7 @@ async fn read_file_accepts_absolute_path_inside_workspace() {
         exec_output_sink: None,
         policy: Arc::new(PolicyManager::default()),
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        mailbox_rx: None,
+        inbox: None,
         goal_api: None,
     };
 
@@ -516,7 +516,7 @@ async fn read_file_accepts_absolute_path_that_normalizes_from_root_parent() {
         exec_output_sink: None,
         policy: Arc::new(PolicyManager::default()),
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        mailbox_rx: None,
+        inbox: None,
         goal_api: None,
     };
 
@@ -557,7 +557,7 @@ async fn write_file_accepts_absolute_missing_path_inside_workspace() {
         exec_output_sink: None,
         policy: Arc::new(PolicyManager::default()),
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        mailbox_rx: None,
+        inbox: None,
         goal_api: None,
     };
 
@@ -605,7 +605,7 @@ async fn read_file_rejects_escape_outside_workspace() {
         exec_output_sink: None,
         policy: Arc::new(PolicyManager::default()),
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        mailbox_rx: None,
+        inbox: None,
         goal_api: None,
     };
 
@@ -649,7 +649,7 @@ async fn read_file_rejects_absolute_path_outside_workspace() {
         exec_output_sink: None,
         policy: Arc::new(PolicyManager::default()),
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        mailbox_rx: None,
+        inbox: None,
         goal_api: None,
     };
 
@@ -694,7 +694,7 @@ async fn read_file_rejects_symlink_escape_outside_workspace() {
         exec_output_sink: None,
         policy: Arc::new(PolicyManager::default()),
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        mailbox_rx: None,
+        inbox: None,
         goal_api: None,
     };
 

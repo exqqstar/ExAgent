@@ -705,7 +705,7 @@ mod tests {
             exec_output_sink: None,
             policy: Arc::new(PolicyManager::default()),
             agent_tool_policy: AgentToolPolicy::all(),
-            mailbox_rx: None,
+            inbox: None,
             goal_api: None,
         };
         (dir, ctx)
@@ -910,7 +910,7 @@ mod tests {
     #[tokio::test]
     async fn orchestrator_denies_tool_blocked_by_agent_policy() {
         let (_dir, mut ctx) = tool_context(PolicyMode::Off);
-        ctx.agent_tool_policy = AgentToolPolicy::allow_only(["read_file"]);
+        ctx.agent_tool_policy = AgentToolPolicy::read_only_basic_collaboration();
         let called = Arc::new(AtomicBool::new(false));
         let mut registry = ToolRegistry::new();
         registry.register(RecordingTool {

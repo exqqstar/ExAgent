@@ -469,6 +469,10 @@ mod tests {
         release_child: Arc<tokio::sync::Notify>,
     }
 
+    struct CompletionForwardingSubagentLlm {
+        parent_prompts: Arc<Mutex<Vec<Vec<ConversationMessage>>>>,
+    }
+
     struct StaticModelResolver {
         resolved: ResolvedModelConfig,
         requests: Arc<Mutex<Vec<ModelRef>>>,
@@ -1173,6 +1177,48 @@ mod tests {
                         "recipient_path": "/root/research",
                         "message": "busy follow-up research update"
                     }),
+                ));
+            }
+            Ok(spawn_research_turn())
+        }
+    }
+
+    #[async_trait]
+    impl crate::llm::LlmClient for CompletionForwardingSubagentLlm {
+        async fn complete(
+            &self,
+            messages: &[ConversationMessage],
+            _tools: &[ToolSpec],
+            _options: &LlmRequestOptions,
+        ) -> Result<LlmCompletion> {
+            if is_child_prompt(messages) {
+                return Ok(AssistantTurn {
+                    text: Some("child final answer".into()),
+                    tool_calls: vec![],
+                    reasoning: vec![],
+                }
+                .into_completion());
+            }
+
+            self.parent_prompts.lock().unwrap().push(messages.to_vec());
+            if messages.iter().any(|message| {
+                message.injected
+                    && message.content.contains("subagent_turn_completed")
+                    && message.content.contains("child final answer")
+                    && message.content.contains("completed")
+            }) {
+                return Ok(AssistantTurn {
+                    text: Some("parent saw child completion".into()),
+                    tool_calls: vec![],
+                    reasoning: vec![],
+                }
+                .into_completion());
+            }
+            if has_tool_after_last_user(messages, "\"thread_id\"") {
+                return Ok(tool_turn(
+                    "call_wait_child_completion",
+                    "wait_agent",
+                    json!({ "timeout_ms": 5_000 }),
                 ));
             }
             Ok(spawn_research_turn())
@@ -4225,19 +4271,6 @@ mod tests {
         wait_for_child_prompt_count(&child_prompts, 1).await;
         release_child.notify_waiters();
         wait_for_turn_completed_for_manager(&manager, &child_thread_id).await;
-        assert_eq!(child_prompts.lock().unwrap().len(), 1);
-
-        let (_thread_id, _workspace_root, _child_turn) = manager
-            .run_turn_through_runtime(TurnStartParams {
-                thread_id: child_thread_id,
-                prompt: "drain queued busy follow-up mail".into(),
-                input: vec![],
-                workspace_root: None,
-                turn_mode: Default::default(),
-                turn_context: None,
-            })
-            .await
-            .expect("manual child turn drains queued busy followup");
         wait_for_child_prompt_count(&child_prompts, 2).await;
         let prompts = child_prompts.lock().unwrap();
         let second_prompt = prompts.get(1).expect("second child prompt");
@@ -4248,6 +4281,58 @@ mod tests {
                         && mail.trigger_turn
                         && mail.source_turn_id.is_some()
                 })
+        }));
+    }
+
+    #[tokio::test]
+    async fn child_turn_completion_notifies_parent_wait_agent() {
+        let dir = tempdir().unwrap();
+        let parent_prompts = Arc::new(Mutex::new(Vec::new()));
+        let manager = ThreadManager::with_llm(
+            AgentConfig {
+                workspace_root: dir.path().to_path_buf(),
+                cwd: dir.path().to_path_buf(),
+                ..AgentConfig::default()
+            },
+            Box::new(CompletionForwardingSubagentLlm {
+                parent_prompts: parent_prompts.clone(),
+            }),
+            || ToolRegistry::new(),
+        );
+        let started = manager
+            .thread_start(ThreadStartParams {
+                workspace_root: None,
+                cwd: None,
+                permission_profile: None,
+            })
+            .expect("thread start");
+
+        let (_thread_id, _workspace_root, final_turn) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            manager.run_turn_through_runtime(TurnStartParams {
+                thread_id: started.thread.id.clone(),
+                prompt: "spawn child and wait".into(),
+                input: vec![],
+                workspace_root: None,
+                turn_mode: Default::default(),
+                turn_context: None,
+            }),
+        )
+        .await
+        .expect("parent wait should complete")
+        .expect("parent turn");
+
+        assert_eq!(
+            final_turn.text.as_deref(),
+            Some("parent saw child completion")
+        );
+        let prompts = parent_prompts.lock().unwrap();
+        let final_prompt = prompts.last().expect("parent final prompt");
+        assert!(final_prompt.iter().any(|message| {
+            message.injected
+                && message.content.contains("subagent_turn_completed")
+                && message.content.contains("child final answer")
+                && message.content.contains("completed")
         }));
     }
 

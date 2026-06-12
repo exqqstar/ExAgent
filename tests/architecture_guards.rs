@@ -68,8 +68,8 @@ fn turn_loop_does_not_sample_from_session_snapshot_conversation() {
 
     assert!(!source.contains("snapshot.conversation.clone()"));
     assert!(!source.contains("ContextManager::for_prompt(snapshot)"));
-    assert!(source
-        .contains("context_manager.for_prompt(&turn_config.model.capabilities.input_modalities)"));
+    assert!(source.contains("let prompt = prompt_for_sampling("));
+    assert!(source.contains("let mut prompt = context_manager.for_prompt(input_modalities);"));
 }
 
 #[test]

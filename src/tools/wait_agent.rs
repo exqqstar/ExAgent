@@ -56,15 +56,17 @@ impl ToolHandler for WaitAgentTool {
             }
         };
 
-        let Some(mut mailbox_rx) = ctx.mailbox_rx.clone() else {
+        let Some(inbox) = ctx.inbox.clone() else {
             return error_result(call.id, call.name, "mailbox context missing");
         };
+        let mut mailbox_watch = inbox.subscribe_mailbox().await;
         let timeout_ms = args
             .timeout_ms
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .clamp(1, MAX_TIMEOUT_MS);
 
-        let result = match timeout(Duration::from_millis(timeout_ms), mailbox_rx.changed()).await {
+        let result = match timeout(Duration::from_millis(timeout_ms), mailbox_watch.changed()).await
+        {
             Ok(Ok(())) => json!({
                 "message": "Wait completed.",
                 "timed_out": false
@@ -112,16 +114,17 @@ mod tests {
     use std::sync::Arc;
 
     use serde_json::Value;
-    use tokio::sync::watch;
     use tokio::time::{sleep, Duration};
 
     use super::*;
     use crate::config::AgentConfig;
     use crate::exec_session::ExecSessionManager;
     use crate::policy::PolicyManager;
-    use crate::types::ToolCall;
+    use crate::runtime::subagent::InterAgentCommunication;
+    use crate::runtime::thread_session::ThreadInbox;
+    use crate::types::{ThreadId, ToolCall, TurnId};
 
-    fn tool_context(mailbox_rx: Option<watch::Receiver<()>>) -> ToolContext {
+    fn tool_context(inbox: Option<Arc<ThreadInbox>>) -> ToolContext {
         ToolContext {
             config: AgentConfig::default(),
             thread_id: None,
@@ -131,8 +134,26 @@ mod tests {
             exec_output_sink: None,
             policy: Arc::new(PolicyManager::default()),
             agent_tool_policy: crate::runtime::agent_profile::AgentToolPolicy::all(),
-            mailbox_rx,
+            inbox,
             goal_api: None,
+        }
+    }
+
+    fn inbox() -> Arc<ThreadInbox> {
+        Arc::new(ThreadInbox::new(ThreadId::new("thread_parent")))
+    }
+
+    fn mail(content: &str) -> InterAgentCommunication {
+        InterAgentCommunication {
+            author_thread_id: ThreadId::new("thread_child"),
+            author_path: "/root/child".into(),
+            recipient_thread_id: ThreadId::new("thread_parent"),
+            recipient_path: "/root".into(),
+            other_recipients: Vec::new(),
+            content: content.into(),
+            trigger_turn: false,
+            source_turn_id: Some(TurnId::new("turn_child")),
+            created_at: "2026-06-12T00:00:00Z".into(),
         }
     }
 
@@ -162,8 +183,8 @@ mod tests {
 
     #[tokio::test]
     async fn wait_agent_completes_on_mailbox_activity() {
-        let (mailbox_tx, mailbox_rx) = watch::channel(());
-        let ctx = tool_context(Some(mailbox_rx));
+        let inbox = inbox();
+        let ctx = tool_context(Some(inbox.clone()));
         let tool = WaitAgentTool;
 
         let wait = tokio::spawn(async move {
@@ -176,7 +197,7 @@ mod tests {
             .await
         });
         sleep(Duration::from_millis(10)).await;
-        mailbox_tx.send(()).expect("mailbox activity send");
+        inbox.enqueue(mail("done")).await.expect("enqueue mail");
 
         let outcome = wait.await.expect("wait task joins");
 
@@ -186,9 +207,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wait_agent_observes_mail_that_arrived_before_subscription() {
+        let inbox = inbox();
+        inbox
+            .enqueue(mail("done before wait"))
+            .await
+            .expect("enqueue mail");
+        let ctx = tool_context(Some(inbox));
+
+        let outcome = WaitAgentTool
+            .handle(
+                invocation(json!({
+                    "timeout_ms": 1_000
+                })),
+                &ctx,
+            )
+            .await;
+
+        assert_eq!(outcome.model_result.status, ToolStatus::Success);
+        let output: Value = serde_json::from_str(&outcome.model_result.content).unwrap();
+        assert_eq!(output["timed_out"], false);
+    }
+
+    #[tokio::test]
     async fn wait_agent_reports_timeout() {
-        let (_mailbox_tx, mailbox_rx) = watch::channel(());
-        let ctx = tool_context(Some(mailbox_rx));
+        let ctx = tool_context(Some(inbox()));
         let outcome = WaitAgentTool
             .handle(
                 invocation(json!({

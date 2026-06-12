@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use crate::registry::ToolContext;
 use crate::tools::{Tool, ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
 use crate::types::{ToolCall, ToolResult, ToolStatus};
-use crate::workspace::{resolve_workspace_path, ResolvedWorkspacePath};
+use crate::workspace::{resolve_readable_path, ResolvedWorkspacePath};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadFileArgs {
@@ -22,7 +22,7 @@ impl ToolHandler for ReadFileTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec::function(
             "read_file",
-            "Read a UTF-8 text file from the workspace",
+            "Read a UTF-8 text file from the workspace or a configured skill root",
             serde_json::to_value(schemars::schema_for!(ReadFileArgs)).unwrap(),
         )
     }
@@ -46,7 +46,11 @@ impl ToolHandler for ReadFileTool {
             }
         };
 
-        match read_file(&ctx.config.workspace_root, &args) {
+        match read_file(
+            &ctx.config.workspace_root,
+            &ctx.config.skills_user_roots,
+            &args,
+        ) {
             Ok((resolved, content)) => ToolOutcome::from_result(ToolResult {
                 tool_call_id: call.id,
                 tool_name: call.name,
@@ -72,7 +76,7 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a UTF-8 text file from the workspace"
+        "Read a UTF-8 text file from the workspace or a configured skill root"
     }
 
     fn input_schema(&self) -> Value {
@@ -90,10 +94,11 @@ impl Tool for ReadFileTool {
 
 fn read_file(
     workspace_root: &std::path::Path,
+    extra_read_roots: &[std::path::PathBuf],
     args: &ReadFileArgs,
 ) -> Result<(ResolvedWorkspacePath, String), String> {
-    let resolved =
-        resolve_workspace_path(workspace_root, &args.path).map_err(|err| err.to_string())?;
+    let resolved = resolve_readable_path(workspace_root, extra_read_roots, &args.path)
+        .map_err(|err| err.to_string())?;
     let body = std::fs::read_to_string(&resolved.canonical_path).map_err(|err| err.to_string())?;
     let start_line = args.start_line.unwrap_or(1);
     let end_line = args.end_line.unwrap_or(usize::MAX);

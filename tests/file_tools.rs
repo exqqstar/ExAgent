@@ -8,6 +8,7 @@ use exagent::tools::{
 };
 use exagent::types::{ToolCall, ToolStatus};
 use serde_json::json;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -19,22 +20,7 @@ async fn read_file_limits_to_requested_range() {
     let mut registry = ToolRegistry::new();
     registry.register(ReadFileTool);
 
-    let ctx = ToolContext {
-        config: AgentConfig {
-            workspace_root: dir.path().to_path_buf(),
-            cwd: dir.path().to_path_buf(),
-            ..AgentConfig::default()
-        },
-        thread_id: None,
-        turn_id: None,
-        tool_invocation_id: None,
-        exec_sessions: Arc::new(ExecSessionManager::default()),
-        exec_output_sink: None,
-        policy: Arc::new(PolicyManager::default()),
-        agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        inbox: None,
-        goal_api: None,
-    };
+    let ctx = tool_context(dir.path());
 
     let result = registry
         .execute(
@@ -54,28 +40,109 @@ async fn read_file_limits_to_requested_range() {
 }
 
 #[tokio::test]
+async fn read_file_accepts_absolute_path_under_configured_skill_root() {
+    let workspace = tempdir().unwrap();
+    let root_parent = tempdir().unwrap();
+    let skill_root = root_parent.path().join("skills");
+    let skill_path = skill_root.join("my-skill").join("SKILL.md");
+    std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+    std::fs::write(&skill_path, "skill body").unwrap();
+
+    let mut registry = ToolRegistry::new();
+    registry.register(ReadFileTool);
+
+    let ctx = tool_context_with_skill_roots(workspace.path(), vec![skill_root]);
+
+    let result = registry
+        .execute(
+            ToolCall {
+                id: "call_skill_read".into(),
+                name: "read_file".into(),
+                arguments: json!({"path": skill_path.display().to_string()}),
+                thought_signature: None,
+            },
+            Some(&ctx),
+        )
+        .await;
+
+    assert_eq!(result.status, ToolStatus::Success);
+    assert_eq!(result.content, "skill body");
+}
+
+#[tokio::test]
+async fn read_file_rejects_path_outside_workspace_and_skill_roots() {
+    let workspace = tempdir().unwrap();
+    let root_parent = tempdir().unwrap();
+    let skill_root = root_parent.path().join("skills");
+    let outside_dir = root_parent.path().join("outside");
+    let outside_path = outside_dir.join("secret.txt");
+    std::fs::create_dir_all(&skill_root).unwrap();
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    std::fs::write(&outside_path, "secret").unwrap();
+
+    let mut registry = ToolRegistry::new();
+    registry.register(ReadFileTool);
+
+    let ctx = tool_context_with_skill_roots(workspace.path(), vec![skill_root]);
+
+    let result = registry
+        .execute(
+            ToolCall {
+                id: "call_skill_read_escape".into(),
+                name: "read_file".into(),
+                arguments: json!({"path": outside_path.display().to_string()}),
+                thought_signature: None,
+            },
+            Some(&ctx),
+        )
+        .await;
+
+    assert_eq!(result.status, ToolStatus::Error);
+    assert!(result.content.contains("workspace"));
+}
+
+#[tokio::test]
+async fn write_file_rejects_configured_skill_root_path() {
+    let workspace = tempdir().unwrap();
+    let root_parent = tempdir().unwrap();
+    let skill_root = root_parent.path().join("skills");
+    let skill_path = skill_root.join("my-skill").join("SKILL.md");
+    std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+    std::fs::write(&skill_path, "original").unwrap();
+
+    let mut registry = ToolRegistry::new();
+    registry.register(WriteFileTool);
+
+    let ctx = tool_context_with_skill_roots(workspace.path(), vec![skill_root]);
+
+    let result = registry
+        .execute(
+            ToolCall {
+                id: "call_skill_write".into(),
+                name: "write_file".into(),
+                arguments: json!({
+                    "path": skill_path.display().to_string(),
+                    "content": "changed"
+                }),
+                thought_signature: None,
+            },
+            Some(&ctx),
+        )
+        .await;
+
+    assert_eq!(result.status, ToolStatus::Error);
+    assert!(result.content.contains("workspace"));
+    assert_eq!(std::fs::read_to_string(skill_path).unwrap(), "original");
+}
+
+#[tokio::test]
 async fn write_file_creates_parent_directories() {
     let dir = tempdir().unwrap();
 
     let mut registry = ToolRegistry::new();
     registry.register(WriteFileTool);
 
-    let ctx = ToolContext {
-        config: AgentConfig {
-            workspace_root: dir.path().to_path_buf(),
-            cwd: dir.path().to_path_buf(),
-            ..AgentConfig::default()
-        },
-        thread_id: None,
-        turn_id: None,
-        tool_invocation_id: None,
-        exec_sessions: Arc::new(ExecSessionManager::default()),
-        exec_output_sink: None,
-        policy: Arc::new(PolicyManager::default()),
-        agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        inbox: None,
-        goal_api: None,
-    };
+    let ctx = tool_context(dir.path());
 
     let result = registry
         .execute(
@@ -105,22 +172,7 @@ async fn apply_patch_updates_existing_file_with_begin_patch_format() {
     let mut registry = ToolRegistry::new();
     registry.register(ApplyPatchTool);
 
-    let ctx = ToolContext {
-        config: AgentConfig {
-            workspace_root: dir.path().to_path_buf(),
-            cwd: dir.path().to_path_buf(),
-            ..AgentConfig::default()
-        },
-        thread_id: None,
-        turn_id: None,
-        tool_invocation_id: None,
-        exec_sessions: Arc::new(ExecSessionManager::default()),
-        exec_output_sink: None,
-        policy: Arc::new(PolicyManager::default()),
-        agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        inbox: None,
-        goal_api: None,
-    };
+    let ctx = tool_context(dir.path());
 
     let result = registry
         .execute(
@@ -153,22 +205,7 @@ async fn apply_patch_rejects_multi_file_patch_without_partial_mutation() {
     let mut registry = ToolRegistry::new();
     registry.register(ApplyPatchTool);
 
-    let ctx = ToolContext {
-        config: AgentConfig {
-            workspace_root: dir.path().to_path_buf(),
-            cwd: dir.path().to_path_buf(),
-            ..AgentConfig::default()
-        },
-        thread_id: None,
-        turn_id: None,
-        tool_invocation_id: None,
-        exec_sessions: Arc::new(ExecSessionManager::default()),
-        exec_output_sink: None,
-        policy: Arc::new(PolicyManager::default()),
-        agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        inbox: None,
-        goal_api: None,
-    };
+    let ctx = tool_context(dir.path());
 
     let result = registry
         .execute(
@@ -204,22 +241,7 @@ async fn apply_patch_rejects_move_to_existing_file_without_clobbering() {
     let mut registry = ToolRegistry::new();
     registry.register(ApplyPatchTool);
 
-    let ctx = ToolContext {
-        config: AgentConfig {
-            workspace_root: dir.path().to_path_buf(),
-            cwd: dir.path().to_path_buf(),
-            ..AgentConfig::default()
-        },
-        thread_id: None,
-        turn_id: None,
-        tool_invocation_id: None,
-        exec_sessions: Arc::new(ExecSessionManager::default()),
-        exec_output_sink: None,
-        policy: Arc::new(PolicyManager::default()),
-        agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        inbox: None,
-        goal_api: None,
-    };
+    let ctx = tool_context(dir.path());
 
     let result = registry
         .execute(
@@ -260,22 +282,7 @@ async fn search_files_returns_matching_lines_under_workspace() {
     let mut registry = ToolRegistry::new();
     registry.register(SearchFilesTool);
 
-    let ctx = ToolContext {
-        config: AgentConfig {
-            workspace_root: dir.path().to_path_buf(),
-            cwd: dir.path().to_path_buf(),
-            ..AgentConfig::default()
-        },
-        thread_id: None,
-        turn_id: None,
-        tool_invocation_id: None,
-        exec_sessions: Arc::new(ExecSessionManager::default()),
-        exec_output_sink: None,
-        policy: Arc::new(PolicyManager::default()),
-        agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        inbox: None,
-        goal_api: None,
-    };
+    let ctx = tool_context(dir.path());
 
     let result = registry
         .execute(
@@ -297,6 +304,66 @@ async fn search_files_returns_matching_lines_under_workspace() {
     assert!(result.content.contains("src/auth.rs:1"));
     assert!(result.content.contains("fn login()"));
     assert!(!result.content.contains("fn logout()"));
+}
+
+#[tokio::test]
+async fn search_files_accepts_configured_skill_root_path() {
+    let workspace = tempdir().unwrap();
+    let root_parent = tempdir().unwrap();
+    let skill_root = root_parent.path().join("skills");
+    let skill_path = skill_root.join("my-skill").join("SKILL.md");
+    std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+    std::fs::write(&skill_path, "alpha\nskill-marker line\n").unwrap();
+
+    let result = execute_search_files_with_skill_roots(
+        workspace.path(),
+        vec![skill_root.clone()],
+        json!({
+            "query": "skill-marker",
+            "path": skill_root.display().to_string(),
+            "max_results": 10
+        }),
+    )
+    .await;
+
+    let canonical_skill_path = std::fs::canonicalize(skill_path).unwrap();
+    assert_eq!(result.status, ToolStatus::Success);
+    assert!(result.content.contains(&format!(
+        "{}:2: skill-marker line",
+        canonical_skill_path.display()
+    )));
+}
+
+#[tokio::test]
+async fn search_files_workspace_query_does_not_include_skill_roots() {
+    let workspace = tempdir().unwrap();
+    let root_parent = tempdir().unwrap();
+    let skill_root = root_parent.path().join("skills");
+    let skill_path = skill_root.join("my-skill").join("SKILL.md");
+    std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        workspace.path().join("notes.txt"),
+        "skill-marker workspace\n",
+    )
+    .unwrap();
+    std::fs::write(&skill_path, "skill-marker skill\n").unwrap();
+
+    let result = execute_search_files_with_skill_roots(
+        workspace.path(),
+        vec![skill_root],
+        json!({
+            "query": "skill-marker",
+            "path": ".",
+            "max_results": 10
+        }),
+    )
+    .await;
+
+    assert_eq!(result.status, ToolStatus::Success);
+    assert!(result
+        .content
+        .contains("notes.txt:1: skill-marker workspace"));
+    assert!(!result.content.contains("skill-marker skill"));
 }
 
 #[cfg(unix)]
@@ -410,25 +477,18 @@ async fn execute_search_files(
     workspace_root: &std::path::Path,
     arguments: serde_json::Value,
 ) -> exagent::types::ToolResult {
+    execute_search_files_with_skill_roots(workspace_root, Vec::new(), arguments).await
+}
+
+async fn execute_search_files_with_skill_roots(
+    workspace_root: &std::path::Path,
+    skills_user_roots: Vec<PathBuf>,
+    arguments: serde_json::Value,
+) -> exagent::types::ToolResult {
     let mut registry = ToolRegistry::new();
     registry.register(SearchFilesTool);
 
-    let ctx = ToolContext {
-        config: AgentConfig {
-            workspace_root: workspace_root.to_path_buf(),
-            cwd: workspace_root.to_path_buf(),
-            ..AgentConfig::default()
-        },
-        thread_id: None,
-        turn_id: None,
-        tool_invocation_id: None,
-        exec_sessions: Arc::new(ExecSessionManager::default()),
-        exec_output_sink: None,
-        policy: Arc::new(PolicyManager::default()),
-        agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        inbox: None,
-        goal_api: None,
-    };
+    let ctx = tool_context_with_skill_roots(workspace_root, skills_user_roots);
 
     registry
         .execute(
@@ -443,19 +503,19 @@ async fn execute_search_files(
         .await
 }
 
-#[tokio::test]
-async fn read_file_accepts_absolute_path_inside_workspace() {
-    let dir = tempdir().unwrap();
-    let file = dir.path().join("notes.txt");
-    std::fs::write(&file, "inside").unwrap();
+fn tool_context(workspace_root: &Path) -> ToolContext {
+    tool_context_with_skill_roots(workspace_root, Vec::new())
+}
 
-    let mut registry = ToolRegistry::new();
-    registry.register(ReadFileTool);
-
-    let ctx = ToolContext {
+fn tool_context_with_skill_roots(
+    workspace_root: &Path,
+    skills_user_roots: Vec<PathBuf>,
+) -> ToolContext {
+    ToolContext {
         config: AgentConfig {
-            workspace_root: dir.path().to_path_buf(),
-            cwd: dir.path().to_path_buf(),
+            workspace_root: workspace_root.to_path_buf(),
+            cwd: workspace_root.to_path_buf(),
+            skills_user_roots,
             ..AgentConfig::default()
         },
         thread_id: None,
@@ -467,7 +527,19 @@ async fn read_file_accepts_absolute_path_inside_workspace() {
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
         inbox: None,
         goal_api: None,
-    };
+    }
+}
+
+#[tokio::test]
+async fn read_file_accepts_absolute_path_inside_workspace() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("notes.txt");
+    std::fs::write(&file, "inside").unwrap();
+
+    let mut registry = ToolRegistry::new();
+    registry.register(ReadFileTool);
+
+    let ctx = tool_context(dir.path());
 
     let result = registry
         .execute(
@@ -503,22 +575,7 @@ async fn read_file_accepts_absolute_path_that_normalizes_from_root_parent() {
     let mut registry = ToolRegistry::new();
     registry.register(ReadFileTool);
 
-    let ctx = ToolContext {
-        config: AgentConfig {
-            workspace_root: dir.path().to_path_buf(),
-            cwd: dir.path().to_path_buf(),
-            ..AgentConfig::default()
-        },
-        thread_id: None,
-        turn_id: None,
-        tool_invocation_id: None,
-        exec_sessions: Arc::new(ExecSessionManager::default()),
-        exec_output_sink: None,
-        policy: Arc::new(PolicyManager::default()),
-        agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        inbox: None,
-        goal_api: None,
-    };
+    let ctx = tool_context(dir.path());
 
     let result = registry
         .execute(
@@ -544,22 +601,7 @@ async fn write_file_accepts_absolute_missing_path_inside_workspace() {
     let mut registry = ToolRegistry::new();
     registry.register(WriteFileTool);
 
-    let ctx = ToolContext {
-        config: AgentConfig {
-            workspace_root: dir.path().to_path_buf(),
-            cwd: dir.path().to_path_buf(),
-            ..AgentConfig::default()
-        },
-        thread_id: None,
-        turn_id: None,
-        tool_invocation_id: None,
-        exec_sessions: Arc::new(ExecSessionManager::default()),
-        exec_output_sink: None,
-        policy: Arc::new(PolicyManager::default()),
-        agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        inbox: None,
-        goal_api: None,
-    };
+    let ctx = tool_context(dir.path());
 
     let result = registry
         .execute(
@@ -592,22 +634,7 @@ async fn read_file_rejects_escape_outside_workspace() {
     let mut registry = ToolRegistry::new();
     registry.register(ReadFileTool);
 
-    let ctx = ToolContext {
-        config: AgentConfig {
-            workspace_root: dir.path().to_path_buf(),
-            cwd: dir.path().to_path_buf(),
-            ..AgentConfig::default()
-        },
-        thread_id: None,
-        turn_id: None,
-        tool_invocation_id: None,
-        exec_sessions: Arc::new(ExecSessionManager::default()),
-        exec_output_sink: None,
-        policy: Arc::new(PolicyManager::default()),
-        agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        inbox: None,
-        goal_api: None,
-    };
+    let ctx = tool_context(dir.path());
 
     let result = registry
         .execute(
@@ -636,22 +663,7 @@ async fn read_file_rejects_absolute_path_outside_workspace() {
     let mut registry = ToolRegistry::new();
     registry.register(ReadFileTool);
 
-    let ctx = ToolContext {
-        config: AgentConfig {
-            workspace_root: dir.path().to_path_buf(),
-            cwd: dir.path().to_path_buf(),
-            ..AgentConfig::default()
-        },
-        thread_id: None,
-        turn_id: None,
-        tool_invocation_id: None,
-        exec_sessions: Arc::new(ExecSessionManager::default()),
-        exec_output_sink: None,
-        policy: Arc::new(PolicyManager::default()),
-        agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        inbox: None,
-        goal_api: None,
-    };
+    let ctx = tool_context(dir.path());
 
     let result = registry
         .execute(
@@ -681,22 +693,7 @@ async fn read_file_rejects_symlink_escape_outside_workspace() {
     let mut registry = ToolRegistry::new();
     registry.register(ReadFileTool);
 
-    let ctx = ToolContext {
-        config: AgentConfig {
-            workspace_root: dir.path().to_path_buf(),
-            cwd: dir.path().to_path_buf(),
-            ..AgentConfig::default()
-        },
-        thread_id: None,
-        turn_id: None,
-        tool_invocation_id: None,
-        exec_sessions: Arc::new(ExecSessionManager::default()),
-        exec_output_sink: None,
-        policy: Arc::new(PolicyManager::default()),
-        agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
-        inbox: None,
-        goal_api: None,
-    };
+    let ctx = tool_context(dir.path());
 
     let result = registry
         .execute(

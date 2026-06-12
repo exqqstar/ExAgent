@@ -8,7 +8,9 @@ use serde_json::{json, Value};
 use crate::registry::ToolContext;
 use crate::tools::{Tool, ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
 use crate::types::{ToolCall, ToolResult, ToolStatus};
-use crate::workspace::{resolve_workspace_path, ResolvedWorkspacePath};
+use crate::workspace::{
+    canonical_read_roots, path_stays_within_roots, resolve_readable_path, ResolvedWorkspacePath,
+};
 
 const DEFAULT_MAX_RESULTS: usize = 50;
 const HARD_MAX_RESULTS: usize = 200;
@@ -31,7 +33,7 @@ impl ToolHandler for SearchFilesTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec::function(
             "search_files",
-            "Search UTF-8 text files in the workspace and return matching lines",
+            "Search UTF-8 text files in the workspace or configured skill roots and return matching lines",
             serde_json::to_value(schemars::schema_for!(SearchFilesArgs)).unwrap(),
         )
     }
@@ -55,7 +57,11 @@ impl ToolHandler for SearchFilesTool {
             }
         };
 
-        match search_files(&ctx.config.workspace_root, &args) {
+        match search_files(
+            &ctx.config.workspace_root,
+            &ctx.config.skills_user_roots,
+            &args,
+        ) {
             Ok((resolved, matches)) => {
                 let formatted = format_matches(&matches);
                 ToolOutcome::from_result(ToolResult {
@@ -89,7 +95,7 @@ impl Tool for SearchFilesTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search UTF-8 text files in the workspace"
+        "Search UTF-8 text files in the workspace or configured skill roots"
     }
 
     fn input_schema(&self) -> Value {
@@ -107,7 +113,7 @@ impl Tool for SearchFilesTool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SearchMatch {
-    relative_path: PathBuf,
+    display_path: PathBuf,
     line_number: usize,
     line: String,
 }
@@ -120,6 +126,7 @@ struct FormattedMatches {
 
 fn search_files(
     workspace_root: &Path,
+    extra_read_roots: &[PathBuf],
     args: &SearchFilesArgs,
 ) -> Result<(ResolvedWorkspacePath, Vec<SearchMatch>), String> {
     let query = args.query.trim();
@@ -127,19 +134,25 @@ fn search_files(
         return Err("query must not be empty".to_string());
     }
     let search_path = args.path.as_deref().unwrap_or(".");
-    let resolved =
-        resolve_workspace_path(workspace_root, search_path).map_err(|err| err.to_string())?;
+    let resolved = resolve_readable_path(workspace_root, extra_read_roots, search_path)
+        .map_err(|err| err.to_string())?;
     let metadata = std::fs::metadata(&resolved.canonical_path).map_err(|err| err.to_string())?;
     let max_results = args
         .max_results
         .unwrap_or(DEFAULT_MAX_RESULTS)
         .clamp(1, HARD_MAX_RESULTS);
-    let workspace_root = std::fs::canonicalize(workspace_root).map_err(|err| err.to_string())?;
+    let readable_roots =
+        canonical_read_roots(workspace_root, extra_read_roots).map_err(|err| err.to_string())?;
+    let workspace_root = readable_roots
+        .first()
+        .ok_or_else(|| "workspace_root does not exist or is not accessible".to_string())?
+        .clone();
     let mut matches = Vec::new();
 
     if metadata.is_file() {
         search_file(
             &workspace_root,
+            &readable_roots,
             &resolved.canonical_path,
             query,
             max_results,
@@ -148,6 +161,7 @@ fn search_files(
     } else if metadata.is_dir() {
         search_dir(
             &workspace_root,
+            &readable_roots,
             &resolved.canonical_path,
             query,
             max_results,
@@ -162,6 +176,7 @@ fn search_files(
 
 fn search_dir(
     workspace_root: &Path,
+    readable_roots: &[PathBuf],
     dir: &Path,
     query: &str,
     max_results: usize,
@@ -190,9 +205,23 @@ fn search_dir(
             continue;
         }
         if file_type.is_dir() {
-            search_dir(workspace_root, &path, query, max_results, matches)?;
+            search_dir(
+                workspace_root,
+                readable_roots,
+                &path,
+                query,
+                max_results,
+                matches,
+            )?;
         } else if file_type.is_file() {
-            search_file(workspace_root, &path, query, max_results, matches)?;
+            search_file(
+                workspace_root,
+                readable_roots,
+                &path,
+                query,
+                max_results,
+                matches,
+            )?;
         }
     }
 
@@ -201,6 +230,7 @@ fn search_dir(
 
 fn search_file(
     workspace_root: &Path,
+    readable_roots: &[PathBuf],
     file: &Path,
     query: &str,
     max_results: usize,
@@ -210,7 +240,7 @@ fn search_file(
         return Ok(());
     }
     let canonical_file = std::fs::canonicalize(file).map_err(|err| err.to_string())?;
-    if !canonical_file.starts_with(workspace_root) {
+    if !path_stays_within_roots(&canonical_file, readable_roots) {
         return Ok(());
     }
     let metadata = std::fs::metadata(&canonical_file).map_err(|err| err.to_string())?;
@@ -221,7 +251,7 @@ fn search_file(
         Ok(body) => body,
         Err(_) => return Ok(()),
     };
-    let relative_path = canonical_file
+    let display_path = canonical_file
         .strip_prefix(workspace_root)
         .unwrap_or(&canonical_file);
     for (index, line) in body.lines().enumerate() {
@@ -230,7 +260,7 @@ fn search_file(
         }
         if line.contains(query) {
             matches.push(SearchMatch {
-                relative_path: relative_path.to_path_buf(),
+                display_path: display_path.to_path_buf(),
                 line_number: index + 1,
                 line: line.to_string(),
             });
@@ -255,7 +285,7 @@ fn format_matches(matches: &[SearchMatch]) -> FormattedMatches {
         truncated |= line.truncated;
         let formatted = format!(
             "{}:{}: {}",
-            entry.relative_path.display(),
+            entry.display_path.display(),
             entry.line_number,
             line.content
         );

@@ -741,8 +741,17 @@ fn is_valid_skill_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AgentConfig;
+    use crate::runtime::agent_profile::AgentToolPolicy;
+    use crate::runtime::exec_session::ExecSessionManager;
+    use crate::runtime::policy::PolicyManager;
+    use crate::tools::read_file::ReadFileTool;
+    use crate::tools::registry::{ToolContext, ToolRegistry};
+    use crate::types::{ToolCall, ToolStatus};
+    use serde_json::json;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -826,6 +835,71 @@ mod tests {
         let path = skill_dir.join("SKILL.md");
         fs::write(&path, format!("---\n{frontmatter}\n---\n\nbody\n")).unwrap();
         path
+    }
+
+    #[tokio::test]
+    async fn catalog_user_skill_path_is_readable_by_read_file_tool() {
+        let temp = TempDir::new("catalog-read-file-contract");
+        let user_root = temp.path.join("user-skills");
+        write_skill(
+            &user_root,
+            "alpha",
+            "alpha",
+            "Alpha skill description",
+            "Full body should be readable through read_file.",
+        );
+        let config = AgentConfig {
+            workspace_root: temp.path.join("workspace"),
+            cwd: temp.path.join("workspace"),
+            skills_user_roots: vec![user_root],
+            ..AgentConfig::default()
+        };
+        fs::create_dir_all(&config.workspace_root).unwrap();
+
+        let catalog = load_skills(
+            &config.workspace_root,
+            &config.skills_user_roots,
+            &SkillConfig::default(),
+        );
+        let skill_path = catalog
+            .skills
+            .iter()
+            .find(|skill| skill.name == "alpha")
+            .expect("catalog contains user skill")
+            .path
+            .clone();
+
+        let mut registry = ToolRegistry::new();
+        registry.register(ReadFileTool);
+        let ctx = ToolContext {
+            config,
+            thread_id: None,
+            turn_id: None,
+            tool_invocation_id: None,
+            exec_sessions: Arc::new(ExecSessionManager::default()),
+            exec_output_sink: None,
+            policy: Arc::new(PolicyManager::default()),
+            agent_tool_policy: AgentToolPolicy::all(),
+            inbox: None,
+            goal_api: None,
+        };
+
+        let result = registry
+            .execute(
+                ToolCall {
+                    id: "call_catalog_skill_read".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path": skill_path.display().to_string()}),
+                    thought_signature: None,
+                },
+                Some(&ctx),
+            )
+            .await;
+
+        assert_eq!(result.status, ToolStatus::Success);
+        assert!(result
+            .content
+            .contains("Full body should be readable through read_file."));
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub fn default_tool_registry() -> tools::registry::ToolRegistry {
     registry.register(tools::search_files::SearchFilesTool);
     registry.register(tools::list_dir::ListDirTool);
     registry.register(tools::view_image::ViewImageTool);
+    registry.register(tools::web_fetch::WebFetchTool);
     registry.register(tools::apply_patch::ApplyPatchTool);
     registry.register(tools::write_file::WriteFileTool);
     registry.register(tools::exec_command::ExecCommandTool);

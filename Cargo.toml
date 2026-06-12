@@ -24,6 +24,7 @@ axum = "0.8"
 base64 = "0.22"
 futures-util = "0.3"
 globset = "0.4"
+htmd = "0.5"
 ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 lru = "0.12"

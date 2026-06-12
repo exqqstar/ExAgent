@@ -7,17 +7,137 @@ use exagent::config::AgentConfig;
 use exagent::events::RuntimeEventKind;
 use exagent::llm::MockLlm;
 use exagent::policy::PolicyMode;
-use exagent::registry::ToolRegistry;
-use exagent::session::ApprovalId;
+use exagent::registry::{ToolContext, ToolRegistry};
+use exagent::session::{ApprovalId, ApprovalStatus};
 use exagent::state::rollout::{RolloutItem, RolloutStore};
 use exagent::tools::run_command::RunCommandTool;
-use exagent::types::{AssistantTurn, MessageRole, ThreadId, ToolCall};
+use exagent::tools::{
+    ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolRuntimeEffect, ToolSpec,
+};
+use exagent::types::{AssistantTurn, MessageRole, ThreadId, ToolCall, ToolResult, ToolStatus};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use tempfile::tempdir;
 
 fn registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry.register(RunCommandTool);
     registry
+}
+
+#[derive(Clone)]
+struct ApprovalProbeTool {
+    reentry_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl ToolHandler for ApprovalProbeTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec::function(
+            "approval_probe",
+            "Test-only approval re-entry probe",
+            serde_json::json!({"type": "object", "additionalProperties": true}),
+        )
+    }
+
+    fn capabilities(&self) -> ToolCapabilities {
+        ToolCapabilities {
+            mutating: false,
+            requires_approval: true,
+            parallel_safe: true,
+        }
+    }
+
+    async fn handle(&self, invocation: ToolInvocation, ctx: &ToolContext) -> ToolOutcome {
+        let call = invocation.call;
+        let approval_id = call
+            .arguments
+            .get("approval_id")
+            .and_then(|value| value.as_str())
+            .map(ApprovalId::new);
+        if let Some(approval_id) = approval_id {
+            self.reentry_calls.fetch_add(1, Ordering::SeqCst);
+            let decision = call
+                .arguments
+                .get("decision")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let status = match decision {
+                "approved" => ApprovalStatus::Approved,
+                "denied" => ApprovalStatus::Denied,
+                other => {
+                    return ToolOutcome::from_result(ToolResult {
+                        tool_call_id: call.id,
+                        tool_name: call.name,
+                        status: ToolStatus::Error,
+                        content: format!("unsupported approval decision: {other}"),
+                        meta: None,
+                        parts: Vec::new(),
+                    });
+                }
+            };
+            let _pending = ctx.policy.take_pending_command(&approval_id).await.unwrap();
+            let effect = match status {
+                ApprovalStatus::Approved => ToolRuntimeEffect::ApprovalApproved {
+                    approval_id,
+                    note: None,
+                },
+                ApprovalStatus::Denied => ToolRuntimeEffect::ApprovalDenied {
+                    approval_id,
+                    note: None,
+                },
+                ApprovalStatus::Pending => unreachable!("pending was not accepted"),
+            };
+            return ToolOutcome::from_result(ToolResult {
+                tool_call_id: call.id,
+                tool_name: call.name,
+                status: ToolStatus::Success,
+                content: "probe approval handled".into(),
+                meta: None,
+                parts: Vec::new(),
+            })
+            .with_effect(effect);
+        }
+
+        let thread_id = ctx.thread_id.clone().unwrap();
+        let approval = ctx
+            .policy
+            .create_command_approval(
+                thread_id,
+                "approval_probe",
+                "https://example.test/probe",
+                ctx.config.workspace_root.clone(),
+                None,
+                false,
+                "probe approval required".into(),
+            )
+            .await;
+        ToolOutcome::from_result(ToolResult {
+            tool_call_id: call.id,
+            tool_name: call.name,
+            status: ToolStatus::ReviewRequired,
+            content: "probe approval required".into(),
+            meta: Some(serde_json::json!({
+                "approval_id": approval.approval_id.as_str(),
+                "approval_status": "pending",
+                "policy_decision": "review_required"
+            })),
+            parts: Vec::new(),
+        })
+        .with_effect(ToolRuntimeEffect::ApprovalRequested {
+            approval_id: approval.approval_id,
+            tool_name: "approval_probe".to_string(),
+            reason: "probe approval required".to_string(),
+            checkpoint_id: None,
+            permission_profile: exagent::config::PermissionProfile::FullAccess,
+            filesystem_sandbox: "none".to_string(),
+            network_sandbox: "none".to_string(),
+            env_isolation: "none".to_string(),
+            command: None,
+        })
+    }
 }
 
 fn events_replay_params(thread_id: exagent::types::ThreadId) -> EventsReplayParams {
@@ -174,6 +294,80 @@ async fn approval_decision_clears_waiting_approval() {
         RuntimeEventKind::ApprovalDecision { note, .. }
             if note.as_deref() == Some("desktop denied")
     )));
+}
+
+#[tokio::test]
+async fn approval_decision_reenters_original_tool_name() {
+    let dir = tempdir().unwrap();
+    let reentry_calls = Arc::new(AtomicUsize::new(0));
+    let registry_reentry_calls = reentry_calls.clone();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            policy_mode: PolicyMode::Enforced,
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![
+            AssistantTurn {
+                text: Some("request probe approval".into()),
+                tool_calls: vec![ToolCall {
+                    id: "call_probe".into(),
+                    name: "approval_probe".into(),
+                    arguments: serde_json::json!({}),
+                    thought_signature: None,
+                }],
+                reasoning: vec![],
+            },
+            AssistantTurn {
+                text: Some("waiting for probe approval".into()),
+                tool_calls: vec![],
+                reasoning: vec![],
+            },
+        ])),
+        move || {
+            let mut registry = ToolRegistry::new();
+            registry.register(ApprovalProbeTool {
+                reentry_calls: registry_reentry_calls.clone(),
+            });
+            registry
+        },
+    );
+    let thread = service
+        .thread_start(ThreadStartParams {
+            workspace_root: None,
+            cwd: None,
+            permission_profile: None,
+        })
+        .unwrap()
+        .thread;
+    let turn = service
+        .turn_start(TurnStartParams {
+            thread_id: thread.id.clone(),
+            prompt: "run approval probe".into(),
+            input: vec![],
+            workspace_root: None,
+            turn_mode: Default::default(),
+            turn_context: None,
+        })
+        .await
+        .unwrap()
+        .turn;
+    let approval_id = wait_for_approval_id(&service, &thread.id).await;
+
+    service
+        .approval_decision(ApprovalDecisionParams {
+            thread_id: thread.id.clone(),
+            turn_id: Some(turn.id),
+            approval_id,
+            decision: ApprovalDecisionStatus::Approved,
+            note: Some("approve probe".into()),
+            workspace_root: None,
+        })
+        .await
+        .expect("probe approval decision should be accepted");
+
+    assert_eq!(reentry_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

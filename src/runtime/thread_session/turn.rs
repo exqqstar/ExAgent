@@ -774,8 +774,8 @@ impl ThreadSession {
             .into());
         }
 
-        let (turn_id, mut snapshot) =
-            self.resolve_pending_approval_turn(requested_turn_id, &approval_id)?;
+        let (turn_id, mut snapshot, tool_name) =
+            self.resolve_pending_approval(requested_turn_id, &approval_id)?;
         let cwd = snapshot.cwd.clone();
         let tool_runtime = self
             .agent
@@ -796,7 +796,7 @@ impl ThreadSession {
         };
         let call = ToolCall {
             id: format!("approval_decision_{}", approval_id.as_str()),
-            name: "run_command".to_string(),
+            name: tool_name,
             arguments: serde_json::json!({
                 "approval_id": approval_id.as_str(),
                 "decision": decision,
@@ -823,27 +823,28 @@ impl ThreadSession {
         })
     }
 
-    fn resolve_pending_approval_turn(
+    fn resolve_pending_approval(
         &self,
         requested_turn_id: Option<TurnId>,
         approval_id: &ApprovalId,
-    ) -> Result<(TurnId, ThreadSnapshot)> {
+    ) -> Result<(TurnId, ThreadSnapshot, String)> {
         let state = self
             .live_state
             .read()
             .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?;
-        if !state
+        let tool_name = state
             .overlay
             .pending_approvals
             .iter()
-            .any(|approval| &approval.approval_id == approval_id)
-        {
+            .find(|approval| &approval.approval_id == approval_id)
+            .map(|approval| approval.tool_name.clone());
+        let Some(tool_name) = tool_name else {
             return Err(ThreadRuntimeError::TurnRejected {
                 thread_id: self.thread_id.clone(),
                 reason: format!("unknown approval id: {}", approval_id.as_str()),
             }
             .into());
-        }
+        };
         let approval_turn_id = state
             .events
             .iter()
@@ -888,7 +889,7 @@ impl ThreadSession {
             }
         }
 
-        Ok((resolved_turn_id, state.snapshot.clone()))
+        Ok((resolved_turn_id, state.snapshot.clone(), tool_name))
     }
 
     async fn compact_before_turn_if_needed(

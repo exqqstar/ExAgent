@@ -340,7 +340,10 @@ async fn initialize_route_returns_protocol_capabilities() {
                 "thread_resume",
                 "thread_read",
                 "thread_compact",
+                "thread_goal",
                 "agent_tree",
+                "approvals_list",
+                "checkpoint_restore",
                 "turn_start",
                 "turn_interrupt",
                 "approval_decision",
@@ -807,7 +810,10 @@ fn sample_initialize_response() -> InitializeResponse {
             BoundaryCapability::ThreadResume,
             BoundaryCapability::ThreadRead,
             BoundaryCapability::ThreadCompact,
+            BoundaryCapability::ThreadGoal,
             BoundaryCapability::AgentTree,
+            BoundaryCapability::ApprovalsList,
+            BoundaryCapability::CheckpointRestore,
             BoundaryCapability::TurnStart,
             BoundaryCapability::TurnInterrupt,
             BoundaryCapability::ApprovalDecision,
@@ -832,6 +838,8 @@ fn sample_agent_tree_response() -> AgentTreeResponse {
             agent_nickname: None,
             last_task_message: None,
             last_activity: None,
+            current_tool: None,
+            tokens_used: None,
             children: vec![AgentTreeNode {
                 thread_id: Some(ThreadId::new("thread_child")),
                 parent_thread_id: Some(ThreadId::new("thread_123")),
@@ -844,6 +852,8 @@ fn sample_agent_tree_response() -> AgentTreeResponse {
                 agent_nickname: Some("Rhea".into()),
                 last_task_message: Some("map the inspector state".into()),
                 last_activity: Some("also check activeSessionId consumers".into()),
+                current_tool: Some("search_files".into()),
+                tokens_used: Some(12_345),
                 children: vec![],
             }],
         },
@@ -968,7 +978,9 @@ fn sample_agent_tree_json() -> Value {
                 "agent_role": "research role",
                 "agent_nickname": "Rhea",
                 "last_task_message": "map the inspector state",
-                "last_activity": "also check activeSessionId consumers"
+                "last_activity": "also check activeSessionId consumers",
+                "current_tool": "search_files",
+                "tokens_used": 12345
             }
         ]
     })

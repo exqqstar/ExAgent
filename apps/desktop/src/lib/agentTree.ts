@@ -107,17 +107,23 @@ function agentPathName(agentPath: string | null | undefined): string | null {
 
 function statusFromTreeStatus(status: AgentTreeNode["status"]): AgentRunStatus {
   switch (status) {
+    case "idle":
+      return "idle";
     case "running":
       return "running";
+    case "waiting_approval":
+      return "waiting_approval";
     case "done":
       return "done";
     case "failed":
       return "failed";
-    case "idle":
-      return "idle";
     default:
-      return "idle";
+      return assertNever(status);
   }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled agent tree status: ${String(value)}`);
 }
 
 function nodeName(node: AgentTreeNode, isRoot: boolean): string {
@@ -268,12 +274,15 @@ export function buildAgentForest(
   return [root];
 }
 
-/** Count agents that are still live (spawning or running) across the forest. */
+/** Count agents that are still live or actionable across the forest. */
 export function countLiveAgents(agents: AgentNode[]): number {
   let live = 0;
   const walk = (nodes: AgentNode[]) => {
     for (const node of nodes) {
-      if (!node.isRoot && (node.status === "running" || node.status === "spawning")) {
+      if (
+        !node.isRoot &&
+        (node.status === "running" || node.status === "spawning" || node.status === "waiting_approval")
+      ) {
         live += 1;
       }
       walk(node.children);
@@ -311,6 +320,8 @@ export function agentForestFromTreeResponse(response: AgentTreeResponse): AgentN
       agentType: node.agent_type ?? null,
       role: node.agent_role ?? null,
       nickname: node.agent_nickname ?? null,
+      currentTool: node.current_tool ?? null,
+      tokensUsed: node.tokens_used ?? null,
       isRoot,
       children: (node.children ?? []).map((child) => convert(child, threadId, false))
     };

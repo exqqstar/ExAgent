@@ -8,9 +8,7 @@ use serde_json::json;
 use crate::app_server::protocol::{validate_thread_goal_objective, ThreadGoal, ThreadGoalStatus};
 use crate::registry::ToolContext;
 use crate::runtime::goal::GoalToolApi;
-use crate::tools::{
-    ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolRuntimeEffect, ToolSpec,
-};
+use crate::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
 use crate::types::{ToolResult, ToolStatus};
 
 #[derive(Clone)]
@@ -183,8 +181,7 @@ impl ToolHandler for UpdateGoalTool {
                     "goal": goal,
                     "message": update_goal_message(&goal),
                 }),
-            )
-            .with_effect(ToolRuntimeEffect::ThreadGoalUpdated { goal }),
+            ),
             Err(err) => error(call.id, call.name, err.to_string()),
         }
     }

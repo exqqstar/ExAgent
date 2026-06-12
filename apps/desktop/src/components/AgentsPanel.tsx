@@ -1,5 +1,5 @@
-import { ChevronRight, MessageSquareText } from "lucide-react";
-import { useState } from "react";
+import { ChevronRight, CircleAlert, MessageSquareText } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import type { AgentNode, AgentRunStatus } from "@/types";
 import { cn } from "@/lib/utils";
@@ -7,14 +7,16 @@ import { cn } from "@/lib/utils";
 const statusLabel: Record<AgentRunStatus, string> = {
   running: "running",
   spawning: "spawning",
+  waiting_approval: "needs approval",
   done: "done",
   idle: "idle",
   failed: "failed"
 };
 
-const statusBadgeVariant: Record<AgentRunStatus, "success" | "info" | "neutral" | "danger"> = {
+const statusBadgeVariant: Record<AgentRunStatus, "success" | "info" | "neutral" | "warning" | "danger"> = {
   running: "success",
   spawning: "info",
+  waiting_approval: "warning",
   done: "neutral",
   idle: "neutral",
   failed: "danger"
@@ -23,6 +25,7 @@ const statusBadgeVariant: Record<AgentRunStatus, "success" | "info" | "neutral" 
 const statusDotClass: Record<AgentRunStatus, string> = {
   running: "bg-success motion-safe:animate-pulse",
   spawning: "bg-info motion-safe:animate-pulse",
+  waiting_approval: "bg-warning ring-2 ring-warning/25 motion-safe:animate-pulse",
   done: "bg-subtle",
   idle: "bg-muted",
   failed: "bg-danger"
@@ -31,11 +34,13 @@ const statusDotClass: Record<AgentRunStatus, string> = {
 export function AgentsPanel({
   root,
   selectedThreadId,
-  onSelectAgent
+  onSelectAgent,
+  expandWaitingSignal = 0
 }: {
   root: AgentNode;
   selectedThreadId?: string | null;
   onSelectAgent?: (threadId: string) => void;
+  expandWaitingSignal?: number;
 }) {
   return (
     <ul role="tree" aria-label="Running agents" className="min-w-0 space-y-1 overflow-hidden">
@@ -44,6 +49,7 @@ export function AgentsPanel({
         level={1}
         selectedThreadId={selectedThreadId}
         onSelectAgent={onSelectAgent}
+        expandWaitingSignal={expandWaitingSignal}
       />
     </ul>
   );
@@ -53,15 +59,43 @@ function AgentTreeItem({
   node,
   level,
   selectedThreadId,
-  onSelectAgent
+  onSelectAgent,
+  expandWaitingSignal
 }: {
   node: AgentNode;
   level: number;
   selectedThreadId?: string | null;
   onSelectAgent?: (threadId: string) => void;
+  expandWaitingSignal: number;
 }) {
-  const [open, setOpen] = useState(false);
-  const hasChildren = node.children.length > 0;
+  const sortedChildren = useMemo(() => sortChildrenForPanel(node.children), [node.children]);
+  const descendantWaitingIds = useMemo(() => collectWaitingApprovalIds(sortedChildren), [sortedChildren]);
+  const descendantWaitingKey = descendantWaitingIds.join("|");
+  const hasChildren = sortedChildren.length > 0;
+  const [open, setOpen] = useState(() => hasChildren && descendantWaitingIds.length > 0);
+  const previousWaitingIds = useRef(new Set(descendantWaitingIds));
+  const activity = getNodeActivity(node);
+  const tokenCount = formatCompactTokenCount(node.tokensUsed);
+  const ariaLabel = agentAriaLabel(node, activity, tokenCount);
+
+  useEffect(() => {
+    if (!hasChildren) {
+      previousWaitingIds.current = new Set();
+      return;
+    }
+
+    const previous = previousWaitingIds.current;
+    if (descendantWaitingIds.some((threadId) => !previous.has(threadId))) {
+      setOpen(true);
+    }
+    previousWaitingIds.current = new Set(descendantWaitingIds);
+  }, [descendantWaitingIds, descendantWaitingKey, hasChildren]);
+
+  useEffect(() => {
+    if (expandWaitingSignal > 0 && descendantWaitingIds.length > 0) {
+      setOpen(true);
+    }
+  }, [descendantWaitingIds.length, descendantWaitingKey, expandWaitingSignal]);
 
   if (node.isRoot) {
     return (
@@ -69,34 +103,38 @@ function AgentTreeItem({
         role="treeitem"
         aria-level={level}
         aria-expanded={hasChildren ? true : undefined}
-        aria-label={`${node.name}, ${statusLabel[node.status]}`}
+        aria-label={ariaLabel}
         className="min-w-0"
       >
-        <div className="flex items-center gap-2 px-1.5 py-1">
+        <div className="flex min-w-0 items-center gap-2 px-1.5 py-1">
           <StatusDot status={node.status} />
           <span className="type-label-md min-w-0 flex-1 truncate text-ink">{node.name}</span>
           <StatusBadge status={node.status} />
         </div>
         {hasChildren ? (
-          <ChildGroup>{renderChildren(node, level, selectedThreadId, onSelectAgent)}</ChildGroup>
+          <ChildGroup>
+            {renderChildren(sortedChildren, level, selectedThreadId, onSelectAgent, expandWaitingSignal)}
+          </ChildGroup>
         ) : null}
       </li>
     );
   }
 
   const selected = selectedThreadId === node.threadId;
+  const needsApproval = node.status === "waiting_approval";
   return (
     <li
       role="treeitem"
       aria-level={level}
       aria-expanded={hasChildren ? open : undefined}
       aria-selected={selected}
-      aria-label={`${node.name}, ${statusLabel[node.status]}`}
+      aria-label={ariaLabel}
       className="min-w-0"
     >
       <div
         className={cn(
-          "flex w-full min-w-0 items-start gap-1 overflow-hidden rounded-md",
+          "flex w-full min-w-0 items-start gap-1 overflow-hidden rounded-md border border-transparent",
+          needsApproval && "border-warning bg-warning/8",
           selected && "bg-surface-2 ring-1 ring-border"
         )}
       >
@@ -117,7 +155,7 @@ function AgentTreeItem({
         )}
         <button
           type="button"
-          aria-label={`Open ${node.name} agent thread`}
+          aria-label={openAgentLabel(node, activity, tokenCount)}
           onClick={() => {
             setOpen(true);
             onSelectAgent?.(node.threadId);
@@ -127,18 +165,34 @@ function AgentTreeItem({
           )}
         >
           <StatusDot status={node.status} className="mt-[5px]" />
-          <span className="min-w-0 flex-1">
-            <span className="flex items-center gap-2">
+          <span className="min-w-0 flex-1 overflow-hidden">
+            <span className="flex min-w-0 items-center gap-2">
               <span className="type-label-md min-w-0 flex-1 truncate text-ink">{node.name}</span>
               {node.agentType && node.agentType !== "worker" ? (
                 <Badge variant="neutral">{node.agentType}</Badge>
               ) : null}
               <StatusBadge status={node.status} />
             </span>
-            {node.task ? (
-              <span className="type-body-sm mt-0.5 block truncate text-muted">{node.task}</span>
+            {activity ? (
+              <span
+                title={activity.text}
+                className={cn(
+                  "mt-0.5 block min-w-0 truncate",
+                  activity.kind === "tool" ? "type-code-sm text-ink/80" : "type-body-sm text-muted"
+                )}
+              >
+                {activity.text}
+              </span>
             ) : null}
           </span>
+          {tokenCount ? (
+            <span
+              title={`${node.tokensUsed?.toLocaleString() ?? tokenCount} tokens`}
+              className="type-code-sm mt-0.5 w-[3.5rem] shrink-0 text-right text-muted"
+            >
+              {tokenCount}
+            </span>
+          ) : null}
         </button>
         <button
           type="button"
@@ -153,15 +207,7 @@ function AgentTreeItem({
         <div className="agent-reveal ml-[7px] border-l border-border pl-2.5">
           {hasChildren ? (
             <ul role="group" className="space-y-1 py-1">
-              {node.children.map((child) => (
-                <AgentTreeItem
-                  key={child.threadId}
-                  node={child}
-                  level={level + 1}
-                  selectedThreadId={selectedThreadId}
-                  onSelectAgent={onSelectAgent}
-                />
-              ))}
+              {renderChildren(sortedChildren, level, selectedThreadId, onSelectAgent, expandWaitingSignal)}
             </ul>
           ) : null}
         </div>
@@ -171,23 +217,25 @@ function AgentTreeItem({
 }
 
 function renderChildren(
-  node: AgentNode,
+  children: AgentNode[],
   level: number,
   selectedThreadId?: string | null,
-  onSelectAgent?: (threadId: string) => void
+  onSelectAgent?: (threadId: string) => void,
+  expandWaitingSignal = 0
 ) {
-  return node.children.map((child) => (
+  return children.map((child) => (
     <AgentTreeItem
       key={child.threadId}
       node={child}
       level={level + 1}
       selectedThreadId={selectedThreadId}
       onSelectAgent={onSelectAgent}
+      expandWaitingSignal={expandWaitingSignal}
     />
   ));
 }
 
-function ChildGroup({ children }: { children: React.ReactNode }) {
+function ChildGroup({ children }: { children: ReactNode }) {
   return (
     <ul role="group" className="ml-[7px] min-w-0 space-y-1 overflow-hidden border-l border-border pl-2.5">
       {children}
@@ -202,5 +250,98 @@ function StatusDot({ status, className }: { status: AgentRunStatus; className?: 
 }
 
 function StatusBadge({ status }: { status: AgentRunStatus }) {
-  return <Badge variant={statusBadgeVariant[status]}>{statusLabel[status]}</Badge>;
+  const needsApproval = status === "waiting_approval";
+  return (
+    <Badge variant={statusBadgeVariant[status]} className={needsApproval ? "gap-1" : undefined}>
+      {needsApproval ? (
+        <CircleAlert aria-hidden data-testid="waiting-approval-icon" className="h-3 w-3 shrink-0" />
+      ) : null}
+      <span>{statusLabel[status]}</span>
+    </Badge>
+  );
+}
+
+type NodeActivity = {
+  kind: "tool" | "activity";
+  text: string;
+};
+
+function getNodeActivity(node: AgentNode): NodeActivity | null {
+  const currentTool = normalizedText(node.currentTool);
+  if (currentTool) {
+    return { kind: "tool", text: currentTool };
+  }
+
+  const lastActivity = normalizedText(node.lastActivity);
+  if (lastActivity) {
+    return { kind: "activity", text: lastActivity };
+  }
+
+  const task = normalizedText(node.task);
+  if (task) {
+    return { kind: "activity", text: task };
+  }
+
+  return null;
+}
+
+function normalizedText(value: string | null | undefined): string | null {
+  const text = value?.trim();
+  return text ? text : null;
+}
+
+function agentAriaLabel(
+  node: AgentNode,
+  activity: NodeActivity | null,
+  tokenCount: string | null
+) {
+  const parts = [`${node.name}, ${statusLabel[node.status]}`];
+  if (activity) {
+    parts.push(`${activity.kind} ${activity.text}`);
+  }
+  if (tokenCount) {
+    parts.push(`${tokenCount} tokens`);
+  }
+  return parts.join(", ");
+}
+
+function openAgentLabel(node: AgentNode, activity: NodeActivity | null, tokenCount: string | null) {
+  const details = agentAriaLabel(node, activity, tokenCount);
+  return `Open ${node.name} agent thread, ${details}`;
+}
+
+function formatCompactTokenCount(tokensUsed: number | null | undefined): string | null {
+  if (tokensUsed == null) {
+    return null;
+  }
+
+  return new Intl.NumberFormat("en", {
+    notation: "compact",
+    maximumFractionDigits: 1
+  })
+    .format(tokensUsed)
+    .toLowerCase();
+}
+
+function sortChildrenForPanel(children: AgentNode[]): AgentNode[] {
+  return children
+    .map((child, index) => ({ child, index }))
+    .sort((left, right) => {
+      const leftWaiting = left.child.status === "waiting_approval" ? 1 : 0;
+      const rightWaiting = right.child.status === "waiting_approval" ? 1 : 0;
+      return rightWaiting - leftWaiting || left.index - right.index;
+    })
+    .map(({ child }) => child);
+}
+
+function collectWaitingApprovalIds(nodes: AgentNode[]): string[] {
+  const ids: string[] = [];
+  const visit = (node: AgentNode) => {
+    if (node.status === "waiting_approval") {
+      ids.push(node.threadId);
+    }
+    node.children.forEach(visit);
+  };
+  nodes.forEach(visit);
+  return ids.sort();
 }

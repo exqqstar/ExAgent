@@ -2,12 +2,14 @@ use base64::{engine::general_purpose, Engine as _};
 use exagent::app_server::desktop_facade::NewProjectRequest;
 use exagent::app_server::protocol::{
     AgentTreeParams, AgentTreeResponse, ApprovalDecisionParams, ApprovalDecisionResponse,
-    ApprovalDecisionStatus, EventsReplayParams, EventsReplayResponse, EventsSubscribeParams,
-    ThreadCompactParams, ThreadCompactResponse, ThreadGoalClearParams, ThreadGoalClearResponse,
-    ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse,
-    ThreadGoalStatus, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadStartResponse, TurnContextOverrides, TurnInterruptParams,
-    TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    ApprovalDecisionStatus, ApprovalsListParams, ApprovalsListResponse, CheckpointRestoreParams,
+    CheckpointRestoreResponse, EventsReplayParams, EventsReplayResponse, EventsSubscribeParams,
+    ThreadCompactParams, ThreadCompactResponse, ThreadForkParams, ThreadForkResponse,
+    ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse,
+    ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartResponse,
+    TurnContextOverrides, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
+    TurnStartResponse,
 };
 use exagent::config::ThinkingMode;
 use exagent::events::{
@@ -519,6 +521,29 @@ pub async fn thread_resume(
 }
 
 #[tauri::command]
+pub async fn thread_fork(
+    state: State<'_, DesktopState>,
+    project_id: String,
+    thread_id: String,
+    at_turn_id: String,
+) -> CommandResult<ThreadForkResponse> {
+    state
+        .facade
+        .read()
+        .await
+        .fork_thread(
+            &project_id,
+            ThreadForkParams {
+                thread_id: ThreadId::new(thread_id),
+                at_turn_id: TurnId::new(at_turn_id),
+                workspace_root: None,
+            },
+        )
+        .await
+        .map_err(error_string)
+}
+
+#[tauri::command]
 pub async fn thread_compact(
     state: State<'_, DesktopState>,
     project_id: String,
@@ -789,6 +814,46 @@ pub async fn approval_decision(
                 decision,
                 note,
                 workspace_root: None,
+            },
+        )
+        .await
+        .map_err(error_string)
+}
+
+#[tauri::command]
+pub async fn approvals_list(
+    state: State<'_, DesktopState>,
+    project_id: String,
+) -> CommandResult<ApprovalsListResponse> {
+    state
+        .facade
+        .read()
+        .await
+        .approvals_list(
+            &project_id,
+            ApprovalsListParams {
+                workspace_root: None,
+            },
+        )
+        .await
+        .map_err(error_string)
+}
+
+#[tauri::command]
+pub async fn checkpoint_restore(
+    state: State<'_, DesktopState>,
+    project_id: String,
+    checkpoint_id: String,
+) -> CommandResult<CheckpointRestoreResponse> {
+    state
+        .facade
+        .read()
+        .await
+        .checkpoint_restore(
+            &project_id,
+            CheckpointRestoreParams {
+                workspace_root: String::new(),
+                checkpoint_id,
             },
         )
         .await

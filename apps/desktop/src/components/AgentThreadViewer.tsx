@@ -1,8 +1,9 @@
-import { Activity, Bot, Brain, CircleAlert, Gauge, MessageSquareText, Wrench } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Activity, ArrowDownToLine, Bot, Brain, CircleAlert, Gauge, MessageSquareText, Wrench } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { TokenUsagePanel, tokenUsageSummary } from "@/components/TokenUsagePanel";
 import { TranscriptList } from "@/components/TranscriptList";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -15,6 +16,8 @@ import type { AgentNode, AgentRunStatus, AgentThreadView, RuntimeEvent, ThreadTo
 import { cn } from "@/lib/utils";
 
 type AgentThreadTab = "conversation" | "reasoning" | "tools" | "events";
+
+const FOLLOW_SCROLL_TOLERANCE_PX = 48;
 
 const tabs: Array<{
   id: AgentThreadTab;
@@ -30,14 +33,16 @@ const tabs: Array<{
 const statusLabel: Record<AgentRunStatus, string> = {
   running: "running",
   spawning: "spawning",
+  waiting_approval: "needs approval",
   done: "done",
   idle: "idle",
   failed: "failed"
 };
 
-const statusBadgeVariant: Record<AgentRunStatus, "success" | "info" | "neutral" | "danger"> = {
+const statusBadgeVariant: Record<AgentRunStatus, "success" | "info" | "neutral" | "warning" | "danger"> = {
   running: "success",
   spawning: "info",
+  waiting_approval: "warning",
   done: "neutral",
   idle: "neutral",
   failed: "danger"
@@ -63,9 +68,78 @@ export function AgentThreadViewer({
   onClose: () => void;
 }) {
   const [activeTab, setActiveTab] = useState<AgentThreadTab>("conversation");
+  const [following, setFollowing] = useState(true);
+  const scrollAreaRef = useRef<HTMLDivElement | null>(null);
+  const detachScrollListenerRef = useRef<(() => void) | null>(null);
+  const latestRef = useRef<HTMLDivElement | null>(null);
   const threadId = view?.threadId ?? agent?.threadId ?? null;
   const open = Boolean(threadId);
   const groups = useMemo(() => groupTranscript(view?.transcript ?? []), [view?.transcript]);
+  const activeScrollSignature = useMemo(() => {
+    if (activeTab === "conversation") {
+      return transcriptScrollSignature(groups.conversation);
+    }
+    if (activeTab === "reasoning") {
+      return transcriptScrollSignature(groups.reasoning);
+    }
+    if (activeTab === "tools") {
+      return transcriptScrollSignature(groups.tools);
+    }
+    return eventScrollSignature(view?.events ?? []);
+  }, [activeTab, groups.conversation, groups.reasoning, groups.tools, view?.events]);
+
+  const scrollToLatest = useCallback(() => {
+    const viewport = scrollViewport(scrollAreaRef.current);
+    if (viewport) {
+      viewport.scrollTop = viewport.scrollHeight;
+    }
+    latestRef.current?.scrollIntoView?.({ block: "end" });
+  }, []);
+  const setScrollAreaRoot = useCallback((node: HTMLDivElement | null) => {
+    detachScrollListenerRef.current?.();
+    detachScrollListenerRef.current = null;
+    scrollAreaRef.current = node;
+
+    const viewport = scrollViewport(node);
+    if (!viewport) {
+      return;
+    }
+
+    const handleScroll = () => {
+      setFollowing(isNearScrollEnd(viewport));
+    };
+    viewport.addEventListener("scroll", handleScroll, { passive: true });
+    detachScrollListenerRef.current = () => viewport.removeEventListener("scroll", handleScroll);
+  }, []);
+  const setLatestMarker = useCallback(
+    (node: HTMLDivElement | null) => {
+      latestRef.current = node;
+      if (node && following) {
+        scrollToLatest();
+      }
+    },
+    [following, scrollToLatest]
+  );
+
+  useEffect(() => {
+    setFollowing(true);
+  }, [threadId]);
+
+  useEffect(() => {
+    return () => detachScrollListenerRef.current?.();
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open || !following) {
+      return;
+    }
+    scrollToLatest();
+  }, [activeScrollSignature, activeTab, following, open, scrollToLatest, view?.loading]);
+
+  const jumpToLatest = () => {
+    setFollowing(true);
+    scrollToLatest();
+  };
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
@@ -81,9 +155,7 @@ export function AgentThreadViewer({
                 {agent?.agentType && agent.agentType !== "worker" ? (
                   <Badge variant="neutral">{agent.agentType}</Badge>
                 ) : null}
-                {agent ? (
-                  <Badge variant={statusBadgeVariant[agent.status]}>{statusLabel[agent.status]}</Badge>
-                ) : null}
+                {agent ? <AgentStatusBadge status={agent.status} /> : null}
               </div>
               <DialogDescription className="mt-1.5 min-w-0 truncate">
                 {agent?.task || agent?.agentPath || threadId || "Agent thread"}
@@ -138,19 +210,45 @@ export function AgentThreadViewer({
           </div>
         ) : null}
 
-        <ScrollArea className="min-h-0 flex-1">
-          <div className="min-w-0 px-5 py-4">
-            <AgentThreadTabPanel
-              activeTab={activeTab}
-              view={view}
-              conversation={groups.conversation}
-              reasoning={groups.reasoning}
-              tools={groups.tools}
-            />
-          </div>
-        </ScrollArea>
+        <div className="relative min-h-0 flex-1">
+          <ScrollArea ref={setScrollAreaRoot} className="h-full">
+            <div className="min-w-0 px-5 py-4">
+              <AgentThreadTabPanel
+                activeTab={activeTab}
+                view={view}
+                conversation={groups.conversation}
+                reasoning={groups.reasoning}
+                tools={groups.tools}
+              />
+              <div ref={setLatestMarker} aria-hidden="true" />
+            </div>
+          </ScrollArea>
+          {!following ? (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              aria-label="Jump to latest"
+              className="absolute bottom-3 right-5 z-10 shadow-panel"
+              onClick={jumpToLatest}
+            >
+              <ArrowDownToLine className="h-3.5 w-3.5" />
+              Jump to latest
+            </Button>
+          ) : null}
+        </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function AgentStatusBadge({ status }: { status: AgentRunStatus }) {
+  const needsApproval = status === "waiting_approval";
+  return (
+    <Badge variant={statusBadgeVariant[status]} className={needsApproval ? "gap-1" : undefined}>
+      {needsApproval ? <CircleAlert aria-hidden className="h-3 w-3 shrink-0" /> : null}
+      <span>{statusLabel[status]}</span>
+    </Badge>
   );
 }
 
@@ -261,4 +359,36 @@ function MetaRow({
 function compactThreadId(threadId: string) {
   const tail = threadId.split(/[_-]/).filter(Boolean).pop() ?? threadId;
   return tail.length > 12 ? `...${tail.slice(-12)}` : tail;
+}
+
+function scrollViewport(root: HTMLDivElement | null) {
+  return root?.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]") ?? null;
+}
+
+function isNearScrollEnd(viewport: HTMLElement) {
+  return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= FOLLOW_SCROLL_TOLERANCE_PX;
+}
+
+function transcriptScrollSignature(messages: TranscriptMessage[]) {
+  return JSON.stringify(
+    messages.map((message) => [
+      message.id,
+      message.role,
+      message.title ?? "",
+      message.body,
+      message.timestamp,
+      message.status ?? "",
+      message.toolStatus ?? "",
+      message.mutating ?? false,
+      message.approvalId ?? "",
+      message.invocationId ?? "",
+      message.toolCallId ?? ""
+    ])
+  );
+}
+
+function eventScrollSignature(events: RuntimeEvent[]) {
+  return JSON.stringify(
+    events.map((event) => [event.id, event.label, event.detail, event.timestamp, event.tone ?? ""])
+  );
 }

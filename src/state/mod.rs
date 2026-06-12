@@ -1,4 +1,5 @@
 pub mod events;
+pub mod fork_edges;
 pub mod fork_history;
 pub mod index_db;
 pub mod rollout;

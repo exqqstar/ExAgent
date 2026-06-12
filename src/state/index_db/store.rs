@@ -170,6 +170,8 @@ ON CONFLICT(path) DO UPDATE SET
                     created_at: row.try_get("created_at")?,
                     updated_at: row.try_get("updated_at")?,
                     last_opened_at: row.try_get("last_opened_at")?,
+                    fork_parent_thread_id: None,
+                    fork_point_turn_id: None,
                 })
             })
             .collect()

@@ -184,6 +184,8 @@ describe("agentForestFromTreeResponse", () => {
             agent_role: "research role",
             last_task_message: "map the inspector state",
             last_activity: "also check activeSessionId consumers",
+            current_tool: "search_files",
+            tokens_used: 12345,
             children: [
               {
                 thread_id: "thread_scraper",
@@ -209,6 +211,37 @@ describe("agentForestFromTreeResponse", () => {
     expect(root.children[0].role).toBe("research role");
     expect(root.children[0].task).toBe("map the inspector state");
     expect(root.children[0].lastActivity).toBe("also check activeSessionId consumers");
+    expect(root.children[0].currentTool).toBe("search_files");
+    expect(root.children[0].tokensUsed).toBe(12345);
     expect(root.children[0].children[0].name).toBe("scraper");
+  });
+
+  it("counts waiting-approval child agents as live", () => {
+    const response: AgentTreeResponse = {
+      root: {
+        thread_id: "thread_root",
+        root_thread_id: "thread_root",
+        depth: 0,
+        agent_path: "root",
+        status: "idle",
+        children: [
+          {
+            thread_id: "thread_reviewer",
+            parent_thread_id: "thread_root",
+            root_thread_id: "thread_root",
+            depth: 1,
+            agent_path: "root/reviewer",
+            status: "waiting_approval",
+            last_task_message: "approve the command",
+            children: []
+          }
+        ]
+      }
+    };
+
+    const forest = agentForestFromTreeResponse(response);
+
+    expect(forest[0].children[0].status).toBe("waiting_approval");
+    expect(countLiveAgents(forest)).toBe(1);
   });
 });

@@ -8,7 +8,7 @@ use crate::policy::PolicyMode;
 use crate::resolved::ModelRef;
 use crate::runtime::agent_profile::AgentType;
 use crate::runtime::turn_mode::TurnMode;
-use crate::types::{ConversationMessage, EventId, ThreadId, TurnId};
+use crate::types::{ConversationMessage, EventId, ThreadId, TokenUsageInfo, TurnId};
 
 macro_rules! string_id {
     ($name:ident) => {
@@ -53,6 +53,7 @@ pub enum ThreadSource {
     #[default]
     User,
     Subagent,
+    Fork,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,6 +92,8 @@ pub struct PendingApproval {
     pub requested_event_id: EventId,
     pub tool_name: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
     #[serde(default)]
     pub permission_profile: PermissionProfile,
     #[serde(default = "crate::config::default_boundary_none")]
@@ -121,6 +124,8 @@ pub struct ThreadSnapshot {
     pub open_exec_sessions: Vec<ExecSessionRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_compaction: Option<CompactionSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_info: Option<TokenUsageInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_approvals: Vec<PendingApproval>,
 }
@@ -170,6 +175,7 @@ impl ThreadSnapshot {
             conversation: vec![],
             open_exec_sessions: vec![],
             latest_compaction: None,
+            token_info: None,
             pending_approvals: vec![],
         }
     }

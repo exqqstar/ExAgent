@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{anyhow, Result};
@@ -24,6 +24,11 @@ const THREAD_OP_CHANNEL_CAPACITY: usize = 64;
 const THREAD_EVENT_CHANNEL_CAPACITY: usize = 256;
 
 pub type AgentFactory = Arc<dyn Fn(AgentConfig) -> Result<Agent> + Send + Sync>;
+pub(crate) type WorkspaceRuntimeOpPermit = Box<dyn Send + 'static>;
+
+pub(crate) trait WorkspaceRuntimeOpGate: Send + Sync {
+    fn begin_runtime_op(&self, workspace_root: &Path) -> Result<WorkspaceRuntimeOpPermit>;
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ThreadRuntimeError {
@@ -108,6 +113,7 @@ pub(crate) struct ThreadSubmission {
     completion_tx: Option<oneshot::Sender<Result<ThreadOpResult>>>,
     interrupt: Option<RuntimeInterrupt>,
     _active_turn_guard: Option<ActiveRuntimeTurnGuard>,
+    _workspace_runtime_op_guard: Option<WorkspaceRuntimeOpPermit>,
 }
 
 pub struct ThreadRuntimeOptions {
@@ -117,6 +123,7 @@ pub struct ThreadRuntimeOptions {
     policy: Arc<PolicyManager>,
     subagent_control: Option<Arc<AgentControl>>,
     goal_runtime: Option<Arc<GoalRuntime>>,
+    workspace_runtime_op_gate: Option<Arc<dyn WorkspaceRuntimeOpGate>>,
 }
 
 impl ThreadRuntimeOptions {
@@ -128,6 +135,7 @@ impl ThreadRuntimeOptions {
             policy: Arc::new(PolicyManager::default()),
             subagent_control: None,
             goal_runtime: None,
+            workspace_runtime_op_gate: None,
         }
     }
 
@@ -143,6 +151,14 @@ impl ThreadRuntimeOptions {
 
     pub(crate) fn with_goal_runtime(mut self, goal_runtime: Arc<GoalRuntime>) -> Self {
         self.goal_runtime = Some(goal_runtime);
+        self
+    }
+
+    pub(crate) fn with_workspace_runtime_op_gate(
+        mut self,
+        gate: Arc<dyn WorkspaceRuntimeOpGate>,
+    ) -> Self {
+        self.workspace_runtime_op_gate = Some(gate);
         self
     }
 }
@@ -163,6 +179,7 @@ impl ThreadRuntime {
         let (event_tx, _) = broadcast::channel(THREAD_EVENT_CHANNEL_CAPACITY);
         let (status_tx, status_rx) = watch::channel(ThreadRuntimeStatus::Idle);
         let goal_runtime = options.goal_runtime.clone();
+        let workspace_runtime_op_gate = options.workspace_runtime_op_gate.clone();
 
         let session = ThreadSession::new(
             ThreadSessionOptions::new(options.thread_id, options.config, options.agent_factory)
@@ -192,6 +209,7 @@ impl ThreadRuntime {
         let loop_thread_id = runtime.thread_id.clone();
         let loop_turn_reservation = runtime.turn_reservation.clone();
         let loop_goal_runtime = runtime.goal_runtime.clone();
+        let loop_workspace_runtime_op_gate = workspace_runtime_op_gate;
         spawn_runtime_loop(async move {
             ThreadRuntimeLoop {
                 op_tx: loop_op_tx,
@@ -200,6 +218,7 @@ impl ThreadRuntime {
                 thread_id: loop_thread_id,
                 turn_reservation: loop_turn_reservation,
                 goal_runtime: loop_goal_runtime,
+                workspace_runtime_op_gate: loop_workspace_runtime_op_gate,
             }
             .run()
             .await;
@@ -234,12 +253,24 @@ impl ThreadRuntime {
         input: Vec<UserInput>,
         turn_context: Option<ThreadTurnContext>,
     ) -> Result<ThreadOpResult> {
-        let (completion_tx, completion_rx) = oneshot::channel();
-        self.send_user_input_parts(input, turn_context, Some(completion_tx))
+        let (_turn_id, completion_rx) = self
+            .start_user_input_parts_with_completion(input, turn_context)
             .await?;
         completion_rx
             .await
             .map_err(|_| anyhow!("thread runtime stopped before completing op"))?
+    }
+
+    pub(crate) async fn start_user_input_parts_with_completion(
+        &self,
+        input: Vec<UserInput>,
+        turn_context: Option<ThreadTurnContext>,
+    ) -> Result<(TurnId, oneshot::Receiver<Result<ThreadOpResult>>)> {
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let turn_id = self
+            .send_user_input_parts(input, turn_context, Some(completion_tx))
+            .await?;
+        Ok((turn_id, completion_rx))
     }
 
     pub(crate) async fn submit_user_input(
@@ -292,6 +323,7 @@ impl ThreadRuntime {
                 completion_tx: None,
                 interrupt: None,
                 _active_turn_guard: None,
+                _workspace_runtime_op_guard: None,
             })
             .await
             .map_err(|_| anyhow!("thread runtime is stopped"))?;
@@ -312,6 +344,7 @@ impl ThreadRuntime {
             completion_tx: Some(completion_tx),
             interrupt: None,
             _active_turn_guard: Some(guard),
+            _workspace_runtime_op_guard: None,
         });
         match completion_rx
             .await
@@ -336,6 +369,7 @@ impl ThreadRuntime {
                 completion_tx: None,
                 interrupt: None,
                 _active_turn_guard: None,
+                _workspace_runtime_op_guard: None,
             })
             .await
             .map_err(|_| anyhow!("thread runtime is stopped"))?;
@@ -370,6 +404,7 @@ impl ThreadRuntime {
                 interrupted,
             }),
             _active_turn_guard: Some(guard),
+            _workspace_runtime_op_guard: None,
         });
         start_rx
             .await
@@ -389,6 +424,7 @@ impl ThreadRuntime {
                 completion_tx: Some(completion_tx),
                 interrupt,
                 _active_turn_guard: None,
+                _workspace_runtime_op_guard: None,
             })
             .await
             .map_err(|_| anyhow!("thread runtime is stopped"))?;
@@ -641,15 +677,18 @@ struct ThreadRuntimeLoop {
     thread_id: ThreadId,
     turn_reservation: Arc<Mutex<TurnReservationState>>,
     goal_runtime: Option<Arc<GoalRuntime>>,
+    workspace_runtime_op_gate: Option<Arc<dyn WorkspaceRuntimeOpGate>>,
 }
 
 impl ThreadRuntimeLoop {
     async fn run(mut self) {
         let _stopped = self.session.stopped_guard();
         if let Some(goal_runtime) = self.goal_runtime.as_ref() {
+            let restored_events = self.session.persisted_runtime_events().unwrap_or_default();
             let _ = goal_runtime
                 .apply(GoalRuntimeEvent::ThreadResumed {
                     thread_id: &self.thread_id,
+                    restored_events: &restored_events,
                 })
                 .await;
         }
@@ -679,6 +718,7 @@ impl ThreadRuntimeLoop {
                         )
                         .await;
                     drop(submission._active_turn_guard.take());
+                    drop(submission._workspace_runtime_op_guard.take());
                     complete(submission.completion_tx, result);
                     check_goal_continuation = true;
                 }
@@ -688,6 +728,7 @@ impl ThreadRuntimeLoop {
                         .handle_goal_continuation(turn_id, goal_id, submission.interrupt)
                         .await;
                     drop(submission._active_turn_guard.take());
+                    drop(submission._workspace_runtime_op_guard.take());
                     complete(submission.completion_tx, result);
                     check_goal_continuation = true;
                 }
@@ -714,10 +755,11 @@ impl ThreadRuntimeLoop {
                 ThreadOp::ManualCompaction => {
                     let result = self.session.handle_manual_compaction().await;
                     drop(submission._active_turn_guard.take());
+                    drop(submission._workspace_runtime_op_guard.take());
                     complete(submission.completion_tx, result);
                 }
                 ThreadOp::GoalRuntimeEffect { effect } => {
-                    match self.session.handle_goal_runtime_effect(effect) {
+                    match self.session.handle_goal_runtime_effect(effect).await {
                         Ok(should_check_goal_continuation) => {
                             check_goal_continuation = should_check_goal_continuation;
                             complete(submission.completion_tx, Ok(ThreadOpResult::Ack));
@@ -746,6 +788,20 @@ impl ThreadRuntimeLoop {
         }
         let Some(goal_runtime) = self.goal_runtime.as_ref() else {
             return Ok(());
+        };
+        let workspace_runtime_op_guard = match self.workspace_runtime_op_gate.as_ref() {
+            Some(gate) => match gate.begin_runtime_op(&self.session.workspace_root()) {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        thread_id = %self.thread_id.as_str(),
+                        "skipping goal continuation while workspace runtime operation is gated"
+                    );
+                    return Ok(());
+                }
+            },
+            None => None,
         };
         if self.active_turn_id().is_some() {
             return Ok(());
@@ -790,6 +846,7 @@ impl ThreadRuntimeLoop {
                     interrupted,
                 }),
                 _active_turn_guard: Some(guard),
+                _workspace_runtime_op_guard: workspace_runtime_op_guard,
             })
             .await
             .map_err(|_| anyhow!("thread runtime is stopped"))?;
@@ -841,6 +898,26 @@ mod tests {
         release: Arc<Notify>,
     }
 
+    struct RestoreGateProbe {
+        restoring: Arc<std::sync::atomic::AtomicBool>,
+        attempts: AtomicUsize,
+    }
+
+    struct RestoreGatePermit;
+
+    impl WorkspaceRuntimeOpGate for RestoreGateProbe {
+        fn begin_runtime_op(
+            &self,
+            _workspace_root: &std::path::Path,
+        ) -> Result<WorkspaceRuntimeOpPermit> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            if self.restoring.load(Ordering::SeqCst) {
+                return Err(anyhow!("checkpoint restore is in progress"));
+            }
+            Ok(Box::new(RestoreGatePermit))
+        }
+    }
+
     #[async_trait]
     impl LlmClient for BlockingFirstLlm {
         async fn complete(
@@ -884,7 +961,16 @@ mod tests {
         started: Arc<Notify>,
         release: Arc<Notify>,
     ) -> Arc<ThreadRuntime> {
-        let factory: AgentFactory = Arc::new(move |config| {
+        ThreadRuntime::spawn(ThreadRuntimeOptions::new(
+            thread_id,
+            config,
+            blocking_agent_factory(started, release),
+        ))
+        .expect("spawn runtime")
+    }
+
+    fn blocking_agent_factory(started: Arc<Notify>, release: Arc<Notify>) -> AgentFactory {
+        Arc::new(move |config| {
             Ok(Agent::new(
                 config,
                 Box::new(BlockingFirstLlm {
@@ -894,9 +980,7 @@ mod tests {
                 }),
                 ToolRegistry::new(),
             ))
-        });
-        ThreadRuntime::spawn(ThreadRuntimeOptions::new(thread_id, config, factory))
-            .expect("spawn runtime")
+        })
     }
 
     async fn wait_for_turn_completed(
@@ -1095,6 +1179,91 @@ VALUES (?, ?, ?, 'Goal thread', 'Goal preview', 'test', 0, 'idle', 1, 1)
         .await
         .expect("continuation started");
         wait_for_goal_status(&db, &thread_id, ThreadGoalStatus::Complete).await;
+        runtime.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_restore_guard_blocks_goal_continuation_until_later_idle_check() {
+        let dir = tempdir().expect("tempdir");
+        let thread_id = ThreadId::new("thread_checkpoint_restore_guard_goal_continue");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        let db = IndexDb::open(dir.path().join("index.sqlite"))
+            .await
+            .expect("index db");
+        let project = db
+            .upsert_project(ProjectUpsert {
+                name: "Goal Restore Guard Project".to_string(),
+                path: dir.path().to_path_buf(),
+            })
+            .await
+            .expect("project");
+        sqlx::query(
+            r#"
+INSERT INTO threads (
+  id, project_id, rollout_path, fallback_title, preview, title_source,
+  pinned, status, created_at, updated_at
+)
+VALUES (?, ?, ?, 'Goal restore guard', 'Goal restore preview', 'test', 0, 'idle', 1, 1)
+            "#,
+        )
+        .bind(thread_id.as_str())
+        .bind(&project.id)
+        .bind(format!("/tmp/{}/rollout.jsonl", thread_id.as_str()))
+        .execute(db.pool())
+        .await
+        .expect("thread row");
+        db.insert_thread_goal(&thread_id, "continue when restore clears", None)
+            .await
+            .expect("insert goal")
+            .expect("new goal");
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let restoring = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let gate = Arc::new(RestoreGateProbe {
+            restoring: restoring.clone(),
+            attempts: AtomicUsize::new(0),
+        });
+        let runtime = ThreadRuntime::spawn(
+            ThreadRuntimeOptions::new(
+                thread_id.clone(),
+                config,
+                blocking_agent_factory(started.clone(), release.clone()),
+            )
+            .with_goal_runtime(Arc::new(GoalRuntime::new(db.clone())))
+            .with_workspace_runtime_op_gate(gate.clone()),
+        )
+        .expect("runtime");
+
+        runtime
+            .enqueue_goal_runtime_effect(GoalRuntimeEffect::ScheduleContinuation)
+            .await
+            .expect("queue goal effect");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), started.notified())
+                .await
+                .is_err(),
+            "goal continuation must not start while checkpoint restore guard is active"
+        );
+        assert_eq!(runtime.active_turn_id(), None);
+        assert!(gate.attempts.load(Ordering::SeqCst) > 0);
+
+        restoring.store(false, Ordering::SeqCst);
+        runtime
+            .enqueue_goal_runtime_effect(GoalRuntimeEffect::ScheduleContinuation)
+            .await
+            .expect("queue goal effect after restore");
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .expect("goal continuation starts after restore guard drops");
+
+        release.notify_one();
+        wait_until_no_active_turn(&runtime).await;
         runtime.shutdown().await.expect("shutdown");
     }
 

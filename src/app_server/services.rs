@@ -23,7 +23,7 @@ use crate::runtime::subagent::{
     DeliverInterAgentMessageRequest, SendMessageResponse, SpawnAgentResponse,
     SpawnCleanChildRequest, SubagentLifecycle,
 };
-use crate::runtime::thread_runtime::AgentFactory;
+use crate::runtime::thread_runtime::{AgentFactory, WorkspaceRuntimeOpGate};
 use crate::session::{ThreadSnapshot, ThreadSource};
 use crate::state::fork_history::{build_fork_history, ForkTurns};
 use crate::state::rollout::{rollout_paths, thread_meta_from_snapshot, RolloutItem, RolloutStore};
@@ -208,6 +208,10 @@ impl RuntimeSpawner for AppServerServices {
         self.policy.clone()
     }
 
+    fn workspace_runtime_op_gate(&self) -> Option<Arc<dyn WorkspaceRuntimeOpGate>> {
+        Some(Arc::new(self.runtime_loader.clone()))
+    }
+
     fn goal_store(&self) -> Option<crate::index_db::IndexDb> {
         self.goal_store.clone()
     }
@@ -227,6 +231,10 @@ impl RuntimeSpawner for AppServerSubagentLifecycle {
 
     fn policy(&self) -> Arc<PolicyManager> {
         self.policy.clone()
+    }
+
+    fn workspace_runtime_op_gate(&self) -> Option<Arc<dyn WorkspaceRuntimeOpGate>> {
+        Some(Arc::new(self.runtime_loader.clone()))
     }
 }
 

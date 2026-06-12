@@ -7,16 +7,19 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent
 } from "react";
-import { PanelRight, SidebarIcon } from "lucide-react";
+import { PanelRight, ShieldAlert, SidebarIcon } from "lucide-react";
 import { AgentThreadViewer } from "@/components/AgentThreadViewer";
+import { ApprovalInbox } from "@/components/ApprovalInbox";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ChatView } from "@/components/ChatView";
 import { Inspector } from "@/components/Inspector";
 import { Sidebar } from "@/components/Sidebar";
 import { loadWorkbench, useWorkbenchStore } from "@/stores/workbenchStore";
 import type { AgentNode } from "@/types";
+import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 const DESKTOP_SIDEBAR_DEFAULT_WIDTH = 280;
@@ -25,6 +28,7 @@ const DESKTOP_SIDEBAR_MAX_WIDTH = 420;
 const DESKTOP_SIDEBAR_COLLAPSE_WIDTH = 220;
 
 export function AppShell() {
+  const { t } = useI18n();
   const workbench = useWorkbenchStore();
   const activeSession = workbench.sessions.find((session) => session.id === workbench.activeSessionId);
   const selectedAgent = workbench.selectedAgentThreadId
@@ -41,6 +45,10 @@ export function AppShell() {
   const [desktopSidebarWidth, setDesktopSidebarWidth] = useState(DESKTOP_SIDEBAR_DEFAULT_WIDTH);
   const [desktopSidebarCollapsed, setDesktopSidebarCollapsed] = useState(false);
   const [resizingDesktopSidebar, setResizingDesktopSidebar] = useState(false);
+  const pendingApprovalCount = workbench.pendingApprovals.length;
+  const approvalInboxLabel = `${t("approvals.inbox.title")}, ${pendingApprovalCount} ${t("approvals.inbox.pending")} ${
+    pendingApprovalCount === 1 ? t("approvals.inbox.approvalSingular") : t("approvals.inbox.approvalPlural")
+  }`;
 
   const resizeDesktopSidebar = useCallback((clientX: number) => {
     const shellLeft = shellRef.current?.getBoundingClientRect().left ?? 0;
@@ -63,6 +71,23 @@ export function AppShell() {
       void loadWorkbench();
     }
   }, [workbench.loading, workbench.projects.length]);
+
+  useEffect(() => {
+    if (!workbench.compareThreadId) {
+      return;
+    }
+
+    function closeCompareOnEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") {
+        return;
+      }
+      event.preventDefault();
+      workbench.closeCompareView();
+    }
+
+    document.addEventListener("keydown", closeCompareOnEscape);
+    return () => document.removeEventListener("keydown", closeCompareOnEscape);
+  }, [workbench.compareThreadId, workbench.closeCompareView]);
 
   useEffect(() => {
     if (!resizingDesktopSidebar) {
@@ -288,6 +313,36 @@ export function AppShell() {
                   {activeStatus.replace("_", " ")}
                 </span>
               </div>
+              {pendingApprovalCount > 0 || workbench.approvalInboxOpen ? (
+                <Sheet open={workbench.approvalInboxOpen} onOpenChange={workbench.setApprovalInboxOpen}>
+                  {pendingApprovalCount > 0 ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <SheetTrigger asChild>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="min-w-9 px-2"
+                            aria-label={approvalInboxLabel}
+                          >
+                            <ShieldAlert className="h-4 w-4" />
+                            <Badge variant="warning">{pendingApprovalCount}</Badge>
+                          </Button>
+                        </SheetTrigger>
+                      </TooltipTrigger>
+                      <TooltipContent>{approvalInboxLabel}</TooltipContent>
+                    </Tooltip>
+                  ) : null}
+                  <SheetContent side="right" className="w-[min(520px,calc(100vw-24px))] p-0">
+                    <SheetHeader className="sr-only">
+                      <SheetTitle>{t("approvals.inbox.title")}</SheetTitle>
+                      <SheetDescription>{t("approvals.inbox.description")}</SheetDescription>
+                    </SheetHeader>
+                    <ApprovalInbox />
+                  </SheetContent>
+                </Sheet>
+              ) : null}
               <Sheet>
                 <Tooltip>
                   <TooltipTrigger asChild>

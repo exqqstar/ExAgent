@@ -1,4 +1,4 @@
-import { Activity, Bot, ChevronRight, Cpu, Database, FileText, Gauge, HardDrive, ShieldCheck } from "lucide-react";
+import { Activity, Bot, ChevronRight, CircleAlert, Cpu, Database, FileText, Gauge, HardDrive, ShieldCheck } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { AgentsPanel } from "@/components/AgentsPanel";
 import { TokenUsagePanel, tokenUsageSummary } from "@/components/TokenUsagePanel";
@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { countAgents, countLiveAgents } from "@/lib/agentTree";
 import type { getWorkbenchState } from "@/stores/workbenchStore";
+import type { AgentNode } from "@/types";
 import { cn } from "@/lib/utils";
 
 type WorkbenchState = ReturnType<typeof getWorkbenchState>;
@@ -38,6 +39,8 @@ export function Inspector({ state, variant = "sheet" }: { state: WorkbenchState;
   const totalAgents = agentRoot ? countAgents(state.agents) : 0;
   const agentSummary =
     liveAgents > 0 ? `${liveAgents} running` : `${totalAgents} ${totalAgents === 1 ? "agent" : "agents"}`;
+  const waitingApprovalAgents = agentRoot ? countWaitingApproval(agentRoot) : 0;
+  const [expandWaitingSignal, setExpandWaitingSignal] = useState(0);
 
   const content = (
     <div className="inspector-sections p-3">
@@ -60,13 +63,23 @@ export function Inspector({ state, variant = "sheet" }: { state: WorkbenchState;
         <InspectorSection
           defaultOpen={liveAgents > 0}
           icon={Bot}
+          openSignal={expandWaitingSignal}
           title="Agents"
           summary={agentSummary}
+          accessory={
+            waitingApprovalAgents > 0 ? (
+              <WaitingApprovalHeaderButton
+                count={waitingApprovalAgents}
+                onClick={() => setExpandWaitingSignal((value) => value + 1)}
+              />
+            ) : null
+          }
         >
           <AgentsPanel
             root={agentRoot}
             selectedThreadId={state.selectedAgentThreadId}
             onSelectAgent={state.openAgentThread}
+            expandWaitingSignal={expandWaitingSignal}
           />
         </InspectorSection>
       ) : null}
@@ -165,6 +178,7 @@ function InspectorSection({
   title,
   summary,
   accessory,
+  openSignal = 0,
   defaultOpen = false,
   children
 }: {
@@ -172,6 +186,7 @@ function InspectorSection({
   title: string;
   summary?: string;
   accessory?: ReactNode;
+  openSignal?: number;
   defaultOpen?: boolean;
   children: ReactNode;
 }) {
@@ -183,19 +198,28 @@ function InspectorSection({
     }
   }, [defaultOpen]);
 
+  useEffect(() => {
+    if (openSignal > 0) {
+      setOpen(true);
+    }
+  }, [openSignal]);
+
   return (
     <section className="inspector-section overflow-hidden">
-      <button
-        type="button"
-        className="inspector-section-trigger flex min-h-10 w-full items-center gap-2 rounded-md px-1 py-2 text-left transition-colors hover:bg-surface-2/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <ChevronRight className={cn("h-3.5 w-3.5 shrink-0 text-subtle transition-transform duration-200 ease-out", open && "rotate-90")} />
-        <Icon className="h-3.5 w-3.5 shrink-0 text-subtle" />
-        <h3 className="type-label-md min-w-0 flex-1 truncate text-ink">{title}</h3>
-        {accessory ?? (summary ? <span className="type-body-sm min-w-0 max-w-[132px] truncate text-right text-muted">{summary}</span> : null)}
-      </button>
+      <div className="inspector-section-trigger flex min-h-10 w-full items-center gap-2 rounded-md px-1 py-2 transition-colors hover:bg-surface-2/70">
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-2 rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <ChevronRight className={cn("h-3.5 w-3.5 shrink-0 text-subtle transition-transform duration-200 ease-out", open && "rotate-90")} />
+          <Icon className="h-3.5 w-3.5 shrink-0 text-subtle" />
+          <h3 className="type-label-md min-w-0 flex-1 truncate text-ink">{title}</h3>
+          {summary ? <span className="type-body-sm min-w-0 max-w-[132px] truncate text-right text-muted">{summary}</span> : null}
+        </button>
+        {accessory ? <div className="flex shrink-0 items-center">{accessory}</div> : null}
+      </div>
       <div
         data-inspector-section-content
         aria-hidden={!open}
@@ -212,6 +236,23 @@ function InspectorSection({
         ) : null}
       </div>
     </section>
+  );
+}
+
+function WaitingApprovalHeaderButton({ count, onClick }: { count: number; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-label={expandWaitingApprovalLabel(count)}
+      onClick={onClick}
+      className="shrink-0 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus"
+    >
+      <Badge variant="warning" className="gap-1">
+        <CircleAlert aria-hidden className="h-3 w-3 shrink-0" />
+        <span>{count}</span>
+        <span>{count === 1 ? "approval" : "approvals"}</span>
+      </Badge>
+    </button>
   );
 }
 
@@ -233,4 +274,13 @@ function compactPath(path: string) {
     return path;
   }
   return `.../${parts.slice(-2).join("/")}`;
+}
+
+function countWaitingApproval(node: AgentNode): number {
+  const self = node.status === "waiting_approval" ? 1 : 0;
+  return self + node.children.reduce((count, child) => count + countWaitingApproval(child), 0);
+}
+
+function expandWaitingApprovalLabel(count: number) {
+  return `Expand ${count} waiting approval ${count === 1 ? "agent" : "agents"}`;
 }

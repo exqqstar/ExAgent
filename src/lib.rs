@@ -7,6 +7,7 @@ pub mod runtime;
 pub mod state;
 pub mod tools;
 pub mod workspace;
+pub mod workspace_checkpoint;
 
 pub use entrypoints::api;
 pub use entrypoints::cli;

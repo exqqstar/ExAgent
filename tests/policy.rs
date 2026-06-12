@@ -1,8 +1,9 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use exagent::config::AgentConfig;
 use exagent::exec_session::ExecSessionManager;
-use exagent::policy::{PolicyManager, PolicyMode};
+use exagent::policy::{PendingApprovalDetail, PolicyManager, PolicyMode};
 use exagent::registry::{ToolContext, ToolRegistry};
 use exagent::tools::run_command::RunCommandTool;
 use exagent::types::{ThreadId, ToolCall};
@@ -30,6 +31,191 @@ fn test_context() -> (tempfile::TempDir, ThreadId, ToolContext) {
         goal_api: None,
     };
     (dir, thread_id, ctx)
+}
+
+#[tokio::test]
+async fn list_pending_returns_all_threads_ordered_without_consuming() {
+    let cwd = tempdir().unwrap();
+    let policy = PolicyManager::default();
+    let thread_a = ThreadId::new("thread_policy_list_a");
+    let thread_b = ThreadId::new("thread_policy_list_b");
+
+    let first = policy
+        .create_command_approval(
+            thread_a.clone(),
+            "run_command",
+            "rm -rf first",
+            cwd.path().to_path_buf(),
+            Some(15),
+            false,
+            "first requires review".into(),
+        )
+        .await;
+    let second = policy
+        .create_command_approval(
+            thread_b.clone(),
+            "run_command",
+            "git reset --hard",
+            cwd.path().to_path_buf(),
+            None,
+            true,
+            "second requires review".into(),
+        )
+        .await;
+    let third = policy
+        .create_command_approval(
+            thread_a.clone(),
+            "exec_command",
+            "shutdown now",
+            cwd.path().to_path_buf(),
+            Some(30),
+            false,
+            "third requires review".into(),
+        )
+        .await;
+
+    let pending = policy.list_pending().await;
+
+    assert_eq!(pending.len(), 3);
+    assert_eq!(pending[0].approval_id, first.approval_id);
+    assert_eq!(pending[1].approval_id, second.approval_id);
+    assert_eq!(pending[2].approval_id, third.approval_id);
+    assert!(pending[0].requested_at_ms <= pending[1].requested_at_ms);
+    assert!(pending[1].requested_at_ms <= pending[2].requested_at_ms);
+    assert_eq!(pending[0].thread_id, thread_a);
+    assert_eq!(pending[0].checkpoint_id, None);
+
+    match &pending[1].detail {
+        PendingApprovalDetail::Command {
+            tool_name,
+            command,
+            cwd: summary_cwd,
+            timeout_secs,
+            persistent,
+            reason,
+        } => {
+            assert_eq!(tool_name, "run_command");
+            assert_eq!(command, "git reset --hard");
+            assert_eq!(summary_cwd, cwd.path());
+            assert_eq!(*timeout_secs, None);
+            assert!(*persistent);
+            assert_eq!(reason, "second requires review");
+        }
+    }
+
+    let taken = policy
+        .take_pending_command(&second.approval_id)
+        .await
+        .expect("listed approval should remain pending");
+    assert_eq!(taken.command, "git reset --hard");
+
+    let remaining = policy.list_pending().await;
+    assert_eq!(remaining.len(), 2);
+    assert_eq!(remaining[0].approval_id, first.approval_id);
+    assert_eq!(remaining[1].approval_id, third.approval_id);
+}
+
+#[tokio::test]
+async fn cancel_pending_for_thread_removes_entries_from_list() {
+    let cwd = tempdir().unwrap();
+    let policy = PolicyManager::default();
+    let thread_a = ThreadId::new("thread_policy_cancel_a");
+    let thread_b = ThreadId::new("thread_policy_cancel_b");
+
+    policy
+        .create_command_approval(
+            thread_a.clone(),
+            "run_command",
+            "rm -rf first",
+            cwd.path().to_path_buf(),
+            None,
+            false,
+            "first requires review".into(),
+        )
+        .await;
+    let kept = policy
+        .create_command_approval(
+            thread_b.clone(),
+            "run_command",
+            "rm -rf kept",
+            cwd.path().to_path_buf(),
+            None,
+            false,
+            "kept requires review".into(),
+        )
+        .await;
+    policy
+        .create_command_approval(
+            thread_a.clone(),
+            "exec_command",
+            "reboot",
+            cwd.path().to_path_buf(),
+            None,
+            false,
+            "third requires review".into(),
+        )
+        .await;
+
+    policy.cancel_pending_for_thread(&thread_a).await;
+
+    let pending = policy.list_pending().await;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].approval_id, kept.approval_id);
+    assert_eq!(pending[0].thread_id, thread_b);
+}
+
+#[tokio::test]
+async fn restore_existing_pending_approval_preserves_listing_metadata() {
+    let cwd = tempdir().unwrap();
+    let policy = PolicyManager::default();
+    let thread_a = ThreadId::new("thread_policy_restore_a");
+    let thread_b = ThreadId::new("thread_policy_restore_b");
+
+    let mut restored = policy
+        .create_command_approval(
+            thread_a.clone(),
+            "run_command",
+            "rm -rf original",
+            cwd.path().to_path_buf(),
+            None,
+            false,
+            "original requires review".into(),
+        )
+        .await;
+    let original_summary = policy.list_pending().await.remove(0);
+
+    let newer = policy
+        .create_command_approval(
+            thread_b,
+            "run_command",
+            "rm -rf newer",
+            cwd.path().to_path_buf(),
+            None,
+            false,
+            "newer requires review".into(),
+        )
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    restored.command = "rm -rf updated".into();
+    restored.reason = "updated requires review".into();
+    policy.restore_command_approval(restored.clone()).await;
+
+    let pending = policy.list_pending().await;
+
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending[0].approval_id, restored.approval_id);
+    assert_eq!(pending[1].approval_id, newer.approval_id);
+    assert_eq!(pending[0].requested_at_ms, original_summary.requested_at_ms);
+
+    match &pending[0].detail {
+        PendingApprovalDetail::Command {
+            command, reason, ..
+        } => {
+            assert_eq!(command, "rm -rf updated");
+            assert_eq!(reason, "updated requires review");
+        }
+    }
 }
 
 #[tokio::test]

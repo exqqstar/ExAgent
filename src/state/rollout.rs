@@ -85,6 +85,7 @@ pub fn snapshot_from_rollout_items(
     let mut conversation = Vec::new();
     let mut reference_turn_context = None;
     let mut latest_compaction = None;
+    let mut token_info = None;
     for item in items {
         match item {
             RolloutItem::ResponseItem(response_item) => {
@@ -98,9 +99,15 @@ pub fn snapshot_from_rollout_items(
                 });
                 if let Some(replacement_history) = &compacted.replacement_history {
                     conversation = replacement_history.clone();
+                    token_info = None;
                 }
             }
-            RolloutItem::ThreadMeta(_) | RolloutItem::EventMsg(_) => {}
+            RolloutItem::EventMsg(event) => {
+                if let RuntimeEventKind::TokenCount { info } = &event.kind {
+                    token_info = info.clone();
+                }
+            }
+            RolloutItem::ThreadMeta(_) => {}
         }
     }
 
@@ -115,6 +122,7 @@ pub fn snapshot_from_rollout_items(
         conversation,
         open_exec_sessions: vec![],
         latest_compaction,
+        token_info,
         pending_approvals: vec![],
     };
     Ok(snapshot)
@@ -165,6 +173,7 @@ fn should_persist_event(event: &RuntimeEvent) -> bool {
             | RuntimeEventKind::TurnInterrupted
             | RuntimeEventKind::Reasoning { .. }
             | RuntimeEventKind::RuntimeError { .. }
+            | RuntimeEventKind::ToolResult { .. }
             | RuntimeEventKind::ToolInvocationStarted { .. }
             | RuntimeEventKind::ToolInvocationWaitingApproval { .. }
             | RuntimeEventKind::ToolInvocationCompleted { .. }
@@ -176,6 +185,9 @@ fn should_persist_event(event: &RuntimeEvent) -> bool {
             | RuntimeEventKind::SubagentClosed { .. }
             | RuntimeEventKind::InterAgentMessageSent { .. }
             | RuntimeEventKind::TokenCount { .. }
+            | RuntimeEventKind::ThreadGoalTurnStarted { .. }
+            | RuntimeEventKind::ThreadGoalToolCompleted { .. }
+            | RuntimeEventKind::ThreadGoalReport { .. }
     )
 }
 
@@ -487,6 +499,78 @@ mod tests {
     }
 
     #[test]
+    fn goal_report_events_are_persisted_for_thread_history() {
+        let thread_id = ThreadId::new("thread_goal_report_rollout");
+        assert!(should_persist_rollout_item(&RolloutItem::EventMsg(
+            RuntimeEvent {
+                event_id: EventId::new("evt_goal_report"),
+                thread_id,
+                turn_id: Some(TurnId::new("turn_goal_report")),
+                kind: RuntimeEventKind::ThreadGoalReport {
+                    report: crate::app_server::protocol::ThreadGoalReport {
+                        goal_id: "goal_1".to_string(),
+                        objective: "ship report".to_string(),
+                        final_status: crate::app_server::protocol::ThreadGoalStatus::Complete,
+                        turns_run: 2,
+                        tokens_used: 120,
+                        token_budget: Some(200),
+                        time_used_seconds: 30,
+                        changed_files: vec!["src/runtime/goal/runtime.rs".to_string()],
+                        pending_approvals_count: 1,
+                        summary: "The goal completed.".to_string(),
+                    },
+                },
+            }
+        )));
+    }
+
+    #[test]
+    fn compacted_replacement_history_clears_stale_token_info_from_snapshot() {
+        let thread_id = ThreadId::new("thread_compacted_tokens");
+        let workspace_root = PathBuf::from("/tmp/compacted-tokens");
+        let snapshot = crate::session::ThreadSnapshot::new_thread(
+            thread_id.clone(),
+            workspace_root.clone(),
+            workspace_root,
+        );
+
+        let rebuilt = snapshot_from_rollout_items(
+            &thread_id,
+            &[
+                RolloutItem::ThreadMeta(thread_meta_from_snapshot(&snapshot)),
+                RolloutItem::EventMsg(RuntimeEvent {
+                    event_id: EventId::new("evt_token"),
+                    thread_id: thread_id.clone(),
+                    turn_id: Some(TurnId::new("turn_1")),
+                    kind: RuntimeEventKind::TokenCount {
+                        info: Some(TokenUsageInfo {
+                            total_token_usage: TokenUsage {
+                                total_tokens: 500,
+                                ..TokenUsage::default()
+                            },
+                            last_token_usage: TokenUsage {
+                                total_tokens: 500,
+                                ..TokenUsage::default()
+                            },
+                            model_context_window: Some(1_000),
+                        }),
+                    },
+                }),
+                RolloutItem::Compacted(CompactedItem {
+                    message: "summary".to_string(),
+                    replacement_history: Some(vec![ConversationMessage::assistant(
+                        Some("summary".to_string()),
+                        vec![],
+                    )]),
+                }),
+            ],
+        )
+        .expect("rebuild snapshot");
+
+        assert_eq!(rebuilt.token_info, None);
+    }
+
+    #[test]
     fn rollout_snapshot_does_not_restore_live_only_runtime_state() {
         let thread_id = ThreadId::new("session_overlay_cold");
         let workspace_root = PathBuf::from("/tmp/exagent-overlay");
@@ -506,6 +590,7 @@ mod tests {
                     approval_id: ApprovalId::new("approval_1"),
                     tool_name: "run_command".to_string(),
                     reason: "approval required".to_string(),
+                    checkpoint_id: None,
                     permission_profile: crate::config::PermissionProfile::FullAccess,
                     filesystem_sandbox: crate::config::default_boundary_none(),
                     network_sandbox: crate::config::default_boundary_none(),

@@ -6,6 +6,8 @@ use exagent::tools::run_command::RunCommandTool;
 use exagent::tools::{ToolInvocation, ToolRuntimeEffect};
 use exagent::types::{ThreadId, ToolCall};
 use serde_json::json;
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
@@ -106,6 +108,150 @@ async fn run_command_approval_is_typed_effect() {
 
     assert!(outcome.effects.iter().any(|effect| {
         matches!(effect, ToolRuntimeEffect::ApprovalRequested { tool_name, .. } if tool_name == "run_command")
+    }));
+}
+
+#[tokio::test]
+async fn run_command_pending_approval_in_git_workspace_includes_checkpoint_id() {
+    let (dir, ctx) = approval_test_context();
+    init_repo(dir.path());
+    std::fs::write(dir.path().join("tracked.txt"), "base\n").unwrap();
+    git(dir.path(), ["add", "tracked.txt"]);
+    git(dir.path(), ["commit", "-m", "initial"]);
+    std::fs::write(dir.path().join("tracked.txt"), "dirty\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("scratch")).unwrap();
+
+    let mut registry = ToolRegistry::new();
+    registry.register(RunCommandTool);
+
+    let outcome = registry
+        .execute_outcome(
+            ToolInvocation {
+                invocation_id: "inv_git_checkpoint".to_string(),
+                call: ToolCall {
+                    id: "call_git_checkpoint".into(),
+                    name: "run_command".into(),
+                    arguments: json!({ "command": "rm -rf scratch" }),
+                    thought_signature: None,
+                },
+            },
+            &ctx,
+        )
+        .await;
+
+    let meta = outcome.model_result.meta.as_ref().unwrap();
+    let checkpoint_id = meta["checkpoint_id"]
+        .as_str()
+        .expect("git workspace approval should include checkpoint id");
+    assert!(!checkpoint_id.is_empty());
+
+    let pending = ctx.policy.list_pending().await;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].checkpoint_id.as_deref(), Some(checkpoint_id));
+    assert!(outcome.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            ToolRuntimeEffect::ApprovalRequested {
+                checkpoint_id: Some(effect_checkpoint_id),
+                ..
+            } if effect_checkpoint_id == checkpoint_id
+        )
+    }));
+}
+
+#[tokio::test]
+async fn run_command_checkpoint_uses_workspace_root_not_command_cwd() {
+    let (dir, ctx) = approval_test_context();
+    init_repo(dir.path());
+    std::fs::write(dir.path().join("root_tracked.txt"), "base\n").unwrap();
+    git(dir.path(), ["add", "root_tracked.txt"]);
+    git(dir.path(), ["commit", "-m", "initial"]);
+    std::fs::write(dir.path().join("root_tracked.txt"), "dirty outside cwd\n").unwrap();
+    std::fs::write(
+        dir.path().join("root_untracked.txt"),
+        "untracked outside cwd\n",
+    )
+    .unwrap();
+    let command_cwd = dir.path().join("subdir");
+    std::fs::create_dir_all(command_cwd.join("scratch")).unwrap();
+
+    let mut registry = ToolRegistry::new();
+    registry.register(RunCommandTool);
+
+    let outcome = registry
+        .execute_outcome(
+            ToolInvocation {
+                invocation_id: "inv_workspace_root_checkpoint".to_string(),
+                call: ToolCall {
+                    id: "call_workspace_root_checkpoint".into(),
+                    name: "run_command".into(),
+                    arguments: json!({
+                        "command": "rm -rf scratch",
+                        "cwd": command_cwd.display().to_string()
+                    }),
+                    thought_signature: None,
+                },
+            },
+            &ctx,
+        )
+        .await;
+
+    let meta = outcome.model_result.meta.as_ref().unwrap();
+    let checkpoint_id = meta["checkpoint_id"]
+        .as_str()
+        .expect("git workspace approval should include checkpoint id");
+    assert_eq!(
+        git_stdout(
+            dir.path(),
+            ["show", &format!("{checkpoint_id}:root_tracked.txt")]
+        ),
+        "dirty outside cwd\n"
+    );
+    assert_eq!(
+        git_stdout(
+            dir.path(),
+            ["show", &format!("{checkpoint_id}:root_untracked.txt")]
+        ),
+        "untracked outside cwd\n"
+    );
+}
+
+#[tokio::test]
+async fn run_command_pending_approval_without_git_workspace_has_no_checkpoint_id() {
+    let (_dir, ctx) = approval_test_context();
+
+    let mut registry = ToolRegistry::new();
+    registry.register(RunCommandTool);
+
+    let outcome = registry
+        .execute_outcome(
+            ToolInvocation {
+                invocation_id: "inv_no_git_checkpoint".to_string(),
+                call: ToolCall {
+                    id: "call_no_git_checkpoint".into(),
+                    name: "run_command".into(),
+                    arguments: json!({ "command": "rm -rf scratch" }),
+                    thought_signature: None,
+                },
+            },
+            &ctx,
+        )
+        .await;
+
+    let meta = outcome.model_result.meta.as_ref().unwrap();
+    assert!(meta.get("checkpoint_id").is_none());
+
+    let pending = ctx.policy.list_pending().await;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].checkpoint_id, None);
+    assert!(outcome.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            ToolRuntimeEffect::ApprovalRequested {
+                checkpoint_id: None,
+                ..
+            }
+        )
     }));
 }
 
@@ -276,4 +422,44 @@ fn wait_until_pid_exits(pid: &str, timeout: Duration) -> bool {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn init_repo(path: &Path) {
+    git(path, ["init"]);
+    git(path, ["config", "user.name", "ExAgent Test"]);
+    git(
+        path,
+        ["config", "user.email", "exagent-test@example.invalid"],
+    );
+}
+
+fn git<const N: usize>(cwd: &Path, args: [&str; N]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git command failed: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git_stdout<const N: usize>(cwd: &Path, args: [&str; N]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git command failed: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
 }

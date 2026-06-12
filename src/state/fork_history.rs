@@ -52,6 +52,50 @@ pub fn build_fork_history(parent_items: &[RolloutItem], fork_turns: ForkTurns) -
     }
 }
 
+/// Prefix fork for user-facing thread forking. Unlike `build_fork_history`,
+/// this preserves original turn ids and `TurnContext` items so the forked
+/// thread's transcript replays identically to the parent up to the fork point.
+pub fn build_thread_fork_history(
+    parent_items: &[RolloutItem],
+    fork_point_turn_id: &TurnId,
+) -> anyhow::Result<Vec<RolloutItem>> {
+    let mut boundary_index = None;
+    let mut found_response = false;
+
+    for (index, item) in parent_items.iter().enumerate() {
+        match item {
+            RolloutItem::ResponseItem(response) if &response.turn_id == fork_point_turn_id => {
+                found_response = true;
+                boundary_index = Some(index);
+            }
+            RolloutItem::TurnContext(context) if &context.turn_id == fork_point_turn_id => {
+                boundary_index = Some(index);
+            }
+            _ => {}
+        }
+    }
+
+    if !found_response {
+        return Err(anyhow::anyhow!(
+            "fork point turn id {} was not found in parent history",
+            fork_point_turn_id.as_str()
+        ));
+    }
+
+    let boundary_index = boundary_index.expect("found response must set fork boundary");
+    let mut forked = parent_items[..=boundary_index]
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::ThreadMeta(_) | RolloutItem::EventMsg(_) => None,
+            RolloutItem::ResponseItem(_)
+            | RolloutItem::Compacted(_)
+            | RolloutItem::TurnContext(_) => Some(item.clone()),
+        })
+        .collect::<Vec<_>>();
+    strip_incomplete_tool_call_groups(&mut forked);
+    Ok(forked)
+}
+
 fn filter_item(
     item: &RolloutItem,
     include_turn_context: bool,
@@ -501,6 +545,149 @@ mod tests {
             .any(|item| response_content(item) == Some("send-only answer")));
     }
 
+    #[test]
+    fn thread_fork_history_keeps_items_up_to_and_including_fork_turn() {
+        let compacted = RolloutItem::Compacted(CompactedItem {
+            message: "summary before fork".into(),
+            replacement_history: Some(vec![ConversationMessage::user("replacement")]),
+        });
+        let turn_1_context = RolloutItem::TurnContext(parent_turn_context("turn_1"));
+        let turn_2_context = RolloutItem::TurnContext(parent_turn_context("turn_2"));
+        let parent_items = vec![
+            RolloutItem::ThreadMeta(parent_meta()),
+            turn_1_context.clone(),
+            response("turn_1", ConversationMessage::user("first user")),
+            response(
+                "turn_1",
+                ConversationMessage::assistant(Some("first answer".into()), vec![]),
+            ),
+            compacted.clone(),
+            RolloutItem::EventMsg(RuntimeEvent {
+                event_id: EventId::new("evt_1"),
+                thread_id: ThreadId::new("thread_parent"),
+                turn_id: Some(TurnId::new("turn_1")),
+                kind: RuntimeEventKind::TurnCompleted,
+            }),
+            turn_2_context.clone(),
+            response("turn_2", ConversationMessage::user("second user")),
+            response(
+                "turn_2",
+                ConversationMessage::assistant(Some("second answer".into()), vec![]),
+            ),
+            RolloutItem::TurnContext(parent_turn_context("turn_3")),
+            response("turn_3", ConversationMessage::user("third user")),
+            response(
+                "turn_3",
+                ConversationMessage::assistant(Some("third answer".into()), vec![]),
+            ),
+        ];
+
+        let forked = build_thread_fork_history(&parent_items, &TurnId::new("turn_2"))
+            .expect("thread fork history should build");
+
+        assert_eq!(
+            forked,
+            vec![
+                turn_1_context,
+                response("turn_1", ConversationMessage::user("first user")),
+                response(
+                    "turn_1",
+                    ConversationMessage::assistant(Some("first answer".into()), vec![]),
+                ),
+                compacted,
+                turn_2_context,
+                response("turn_2", ConversationMessage::user("second user")),
+                response(
+                    "turn_2",
+                    ConversationMessage::assistant(Some("second answer".into()), vec![]),
+                ),
+            ]
+        );
+        assert_eq!(
+            response_turn_ids(&forked),
+            vec![
+                TurnId::new("turn_1"),
+                TurnId::new("turn_1"),
+                TurnId::new("turn_2"),
+                TurnId::new("turn_2"),
+            ]
+        );
+        assert!(forked.iter().all(|item| {
+            !matches!(item, RolloutItem::ThreadMeta(_) | RolloutItem::EventMsg(_))
+        }));
+        assert!(!forked
+            .iter()
+            .any(|item| response_content(item) == Some("third user")));
+        assert!(!forked
+            .iter()
+            .any(|item| response_content(item) == Some("third answer")));
+    }
+
+    #[test]
+    fn thread_fork_history_rejects_unknown_turn_id() {
+        let parent_items = vec![
+            response("turn_1", ConversationMessage::user("first user")),
+            response(
+                "turn_1",
+                ConversationMessage::assistant(Some("first answer".into()), vec![]),
+            ),
+        ];
+
+        let error = build_thread_fork_history(&parent_items, &TurnId::new("turn_missing"))
+            .expect_err("unknown turn id should be rejected");
+
+        assert!(error.to_string().contains("turn_missing"));
+    }
+
+    #[test]
+    fn thread_fork_history_strips_incomplete_tool_call_groups_at_boundary() {
+        let parent_items = vec![
+            response("turn_1", ConversationMessage::user("first user")),
+            response(
+                "turn_1",
+                ConversationMessage::assistant(Some("first answer".into()), vec![]),
+            ),
+            response("turn_2", ConversationMessage::user("second user")),
+            response(
+                "turn_2",
+                ConversationMessage::assistant(
+                    Some("starting tool".into()),
+                    vec![ToolCall {
+                        id: "call_pending".into(),
+                        name: "shell".into(),
+                        arguments: serde_json::json!({"cmd": "pwd"}),
+                        thought_signature: None,
+                    }],
+                ),
+            ),
+            response("turn_3", ConversationMessage::user("third user")),
+            response(
+                "turn_3",
+                ConversationMessage::tool("call_pending", "late tool result"),
+            ),
+        ];
+
+        let forked = build_thread_fork_history(&parent_items, &TurnId::new("turn_2"))
+            .expect("thread fork history should build");
+
+        assert!(forked
+            .iter()
+            .any(|item| response_content(item) == Some("second user")));
+        assert!(!forked.iter().any(|item| match item {
+            RolloutItem::ResponseItem(response) =>
+                response.message.role == MessageRole::Assistant
+                    && !response.message.tool_calls.is_empty(),
+            _ => false,
+        }));
+        assert!(!forked.iter().any(|item| match item {
+            RolloutItem::ResponseItem(response) => response.message.role == MessageRole::Tool,
+            _ => false,
+        }));
+        assert!(!forked
+            .iter()
+            .any(|item| response_content(item) == Some("third user")));
+    }
+
     fn response(turn_id: &str, message: ConversationMessage) -> RolloutItem {
         RolloutItem::ResponseItem(ResponseItem::for_turn(TurnId::new(turn_id), message))
     }
@@ -510,6 +697,16 @@ mod tests {
             RolloutItem::ResponseItem(response) => Some(response.message.content.as_str()),
             _ => None,
         }
+    }
+
+    fn response_turn_ids(items: &[RolloutItem]) -> Vec<TurnId> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                RolloutItem::ResponseItem(response) => Some(response.turn_id.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn parent_turn_context(turn_id: &str) -> TurnContextItem {

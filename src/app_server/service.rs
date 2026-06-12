@@ -6,11 +6,13 @@ use tokio::sync::broadcast;
 
 use crate::app_server::protocol::{
     AgentRunResponse, AgentTreeParams, AgentTreeResponse, ApprovalDecisionParams,
-    ApprovalDecisionResponse, BoundaryOp, BoundaryOpResponse, EventsReplayParams,
+    ApprovalDecisionResponse, ApprovalsListParams, ApprovalsListResponse, BoundaryOp,
+    BoundaryOpResponse, CheckpointRestoreParams, CheckpointRestoreResponse, EventsReplayParams,
     EventsReplayResponse, EventsSubscribeParams, RunParams, ThreadCompactParams,
-    ThreadCompactResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, TurnInterruptParams,
-    TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    ThreadCompactResponse, ThreadForkParams, ThreadForkResponse, ThreadReadParams,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
+    ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
+    TurnStartResponse,
 };
 use crate::app_server::ThreadManager;
 use crate::config::AgentConfig;
@@ -25,6 +27,15 @@ pub trait AppServerBoundary: Send + Sync {
     async fn run(&self, params: RunParams) -> Result<AgentRunResponse>;
     async fn thread_start(&self, params: ThreadStartParams) -> Result<ThreadStartResponse>;
     async fn thread_read(&self, params: ThreadReadParams) -> Result<ThreadReadResponse>;
+    async fn thread_fork(&self, params: ThreadForkParams) -> Result<ThreadForkResponse> {
+        match self
+            .submit_boundary_op(BoundaryOp::ThreadFork(params))
+            .await?
+        {
+            BoundaryOpResponse::ThreadFork(response) => Ok(response),
+            _ => Err(anyhow::anyhow!("thread fork returned unexpected response")),
+        }
+    }
     async fn thread_compact(&self, params: ThreadCompactParams) -> Result<ThreadCompactResponse>;
     async fn thread_resume(&self, params: ThreadResumeParams) -> Result<ThreadResumeResponse>;
     async fn agent_tree(&self, params: AgentTreeParams) -> Result<AgentTreeResponse>;
@@ -144,6 +155,10 @@ impl AppServerService {
         self.thread_manager.thread_read(params)
     }
 
+    pub async fn thread_fork(&self, params: ThreadForkParams) -> Result<ThreadForkResponse> {
+        self.thread_manager.thread_fork(params).await
+    }
+
     pub async fn thread_compact(
         &self,
         params: ThreadCompactParams,
@@ -155,8 +170,22 @@ impl AppServerService {
         self.thread_manager.thread_resume(params)
     }
 
-    pub fn agent_tree(&self, params: AgentTreeParams) -> Result<AgentTreeResponse> {
-        self.thread_manager.agent_tree(params)
+    pub async fn agent_tree(&self, params: AgentTreeParams) -> Result<AgentTreeResponse> {
+        self.thread_manager.agent_tree(params).await
+    }
+
+    pub async fn approvals_list(
+        &self,
+        params: ApprovalsListParams,
+    ) -> Result<ApprovalsListResponse> {
+        self.thread_manager.approvals_list(params).await
+    }
+
+    pub async fn checkpoint_restore(
+        &self,
+        params: CheckpointRestoreParams,
+    ) -> Result<CheckpointRestoreResponse> {
+        self.thread_manager.checkpoint_restore(params).await
     }
 
     pub async fn turn_start(&self, params: TurnStartParams) -> Result<TurnStartResponse> {
@@ -225,6 +254,10 @@ impl AppServerBoundary for AppServerService {
         self.thread_read(params)
     }
 
+    async fn thread_fork(&self, params: ThreadForkParams) -> Result<ThreadForkResponse> {
+        self.thread_fork(params).await
+    }
+
     async fn thread_compact(&self, params: ThreadCompactParams) -> Result<ThreadCompactResponse> {
         self.thread_compact(params).await
     }
@@ -234,7 +267,7 @@ impl AppServerBoundary for AppServerService {
     }
 
     async fn agent_tree(&self, params: AgentTreeParams) -> Result<AgentTreeResponse> {
-        self.agent_tree(params)
+        self.agent_tree(params).await
     }
 
     async fn turn_start(&self, params: TurnStartParams) -> Result<TurnStartResponse> {

@@ -23,6 +23,7 @@ use crate::tools::{
 };
 use crate::types::{ToolCall, ToolResult, ToolStatus};
 use crate::workspace::resolve_workspace_path;
+use crate::workspace_checkpoint::create_checkpoint;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunCommandArgs {
@@ -235,6 +236,7 @@ async fn handle_approval_decision(
                     "allow",
                     Some(pending.reason.as_str()),
                 );
+                annotate_checkpoint_meta(&mut outcome.meta, pending.checkpoint_id.as_deref());
                 outcome.effects.push(ToolRuntimeEffect::ApprovalApproved {
                     approval_id,
                     note: None,
@@ -257,6 +259,7 @@ async fn handle_approval_decision(
                     "allow",
                     Some(pending.reason.as_str()),
                 );
+                annotate_checkpoint_meta(&mut outcome.meta, pending.checkpoint_id.as_deref());
                 outcome.effects.push(ToolRuntimeEffect::ApprovalApproved {
                     approval_id,
                     note: None,
@@ -271,6 +274,7 @@ async fn handle_approval_decision(
                 "policy_decision": "deny",
                 "approval_reason": pending.reason,
             });
+            annotate_checkpoint_meta(&mut meta, pending.checkpoint_id.as_deref());
             merge_object_meta(&mut meta, permission_profile_meta(ctx));
             Ok(CommandOutcome {
                 status: ToolStatus::Error,
@@ -417,6 +421,17 @@ async fn maybe_require_approval(
                 .clone()
                 .ok_or_else(|| "approval flow requires a runtime thread_id".to_string())?;
             let reason = reason.unwrap_or_else(|| "approval required".to_string());
+            let checkpoint_id = create_checkpoint(&ctx.config.workspace_root)
+                .map_err(|err| {
+                    tracing::warn!(
+                        error = %err,
+                        workspace_root = %ctx.config.workspace_root.display(),
+                        "failed to create workspace checkpoint before approval"
+                    );
+                    err
+                })
+                .ok()
+                .flatten();
             let approval = ctx
                 .policy
                 .create_command_approval(
@@ -430,6 +445,11 @@ async fn maybe_require_approval(
                 )
                 .await;
             let approval_id = approval.approval_id.clone();
+            if let Some(checkpoint_id) = checkpoint_id.clone() {
+                ctx.policy
+                    .attach_checkpoint_id(&approval_id, checkpoint_id)
+                    .await;
+            }
 
             let mut meta = json!({
                     "approval_id": approval_id.as_str(),
@@ -439,6 +459,9 @@ async fn maybe_require_approval(
                     "command": command,
                     "cwd": cwd,
             });
+            if let Some(checkpoint_id) = checkpoint_id.as_ref() {
+                meta["checkpoint_id"] = json!(checkpoint_id);
+            }
             merge_object_meta(&mut meta, permission_profile_meta(ctx));
 
             Ok(Some(CommandOutcome {
@@ -449,6 +472,7 @@ async fn maybe_require_approval(
                     approval_id,
                     tool_name: tool_name.to_string(),
                     reason,
+                    checkpoint_id,
                     permission_profile: ctx.config.permission_profile,
                     filesystem_sandbox: "none".to_string(),
                     network_sandbox: "none".to_string(),
@@ -655,6 +679,15 @@ fn annotate_policy_meta(
         if let Some(reason) = reason {
             object.insert("approval_reason".into(), Value::String(reason.to_string()));
         }
+    }
+}
+
+fn annotate_checkpoint_meta(meta: &mut Value, checkpoint_id: Option<&str>) {
+    if let (Some(object), Some(checkpoint_id)) = (meta.as_object_mut(), checkpoint_id) {
+        object.insert(
+            "checkpoint_id".into(),
+            Value::String(checkpoint_id.to_string()),
+        );
     }
 }
 

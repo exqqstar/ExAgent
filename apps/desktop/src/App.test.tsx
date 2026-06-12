@@ -212,6 +212,58 @@ function threadGoal(overrides: Partial<ThreadGoal> = {}): ThreadGoal {
   };
 }
 
+function pendingApproval(overrides: Record<string, unknown> = {}) {
+  return {
+    thread_id: "thread-alpha",
+    approval_id: "approval-alpha",
+    kind: "command",
+    summary: "Run migration",
+    detail: "npm run migrate -- --tenant acme",
+    goal_id: "goal-alpha",
+    requested_at_ms: 1_718_000_000_000,
+    checkpoint_id: "checkpoint-alpha",
+    ...overrides,
+  };
+}
+
+function seedApprovalInbox(approvals: ReturnType<typeof pendingApproval>[]) {
+  useWorkbenchStore.setState({
+    loading: false,
+    activeProjectId: "project-exagent",
+    activeSessionId: "session-desktop",
+    projects: [
+      {
+        id: "project-exagent",
+        name: "ExAgent",
+        path: "/Users/enxiang/dev/ExAgent",
+        active: true,
+      },
+    ],
+    sessions: [
+      {
+        id: "session-desktop",
+        projectId: "project-exagent",
+        title: "Desktop GUI workbench",
+        updatedAt: "local preview",
+        status: "awaiting_approval",
+      },
+    ],
+    pendingApprovals: approvals,
+    approvalsStatus: "ready",
+    approvalsError: null,
+  } as any);
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((innerResolve, innerReject) => {
+    resolve = innerResolve;
+    reject = innerReject;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("AppShell", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -295,6 +347,411 @@ describe("AppShell", () => {
     expect(screen.getByRole("button", { name: /Token Usage/ })).toHaveTextContent("not reported");
     expect(screen.getByText("No token usage reported for this thread.")).toBeInTheDocument();
     expect(screen.getByLabelText("Message ExAgent")).toBeInTheDocument();
+  });
+
+  it("renders goal completion reports as transcript cards", async () => {
+    const report = {
+      goal_id: "goal-desktop",
+      objective: "Ship morning report",
+      final_status: "complete" as const,
+      turns_run: 3,
+      tokens_used: 800,
+      token_budget: 1000,
+      time_used_seconds: 90,
+      changed_files: [
+        "src/runtime/goal/runtime.rs",
+        "apps/desktop/src/components/TranscriptList.tsx",
+      ],
+      pending_approvals_count: 2,
+      summary: "The goal completed after runtime and desktop updates.",
+    };
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-desktop",
+        status: "idle",
+        active_turn: null,
+        turns: [
+          {
+            id: "turn-goal-report",
+            status: "completed",
+            items: [{ type: "goal_report", event_id: "evt-goal-report", report }],
+          },
+        ],
+      },
+    });
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-desktop",
+      events: [],
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    useWorkbenchStore.setState({
+      loading: false,
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Users/enxiang/dev/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-desktop",
+          projectId: "project-exagent",
+          title: "Desktop GUI workbench",
+          updatedAt: "local preview",
+          status: "idle",
+        },
+      ],
+      transcript: [],
+      events: [],
+    });
+
+    render(<App />);
+    await act(async () => {
+      await useWorkbenchStore.getState().openSession("session-desktop");
+    });
+
+    expect(await screen.findByRole("article", { name: "Goal report" })).toBeInTheDocument();
+    expect(screen.getByText("Goal complete")).toBeInTheDocument();
+    expect(screen.getByText("Ship morning report")).toBeInTheDocument();
+    expect(screen.getByText("3 turns")).toBeInTheDocument();
+    expect(screen.getByText("800 / 1,000 tokens")).toBeInTheDocument();
+    expect(screen.getByText("1m 30s")).toBeInTheDocument();
+    expect(screen.getByText("src/runtime/goal/runtime.rs")).toBeInTheDocument();
+    expect(screen.getByText("apps/desktop/src/components/TranscriptList.tsx")).toBeInTheDocument();
+    expect(screen.getByText("2 approvals waiting in Inbox")).toBeInTheDocument();
+  });
+
+  it("lists pending approvals grouped by goal or thread with expandable detail", async () => {
+    const user = userEvent.setup();
+    seedApprovalInbox([
+      pendingApproval({
+        thread_id: "thread-goal",
+        approval_id: "approval-goal",
+        summary: "Run migration",
+        detail: "npm run migrate -- --tenant acme",
+        goal_id: "goal-alpha",
+      }),
+      pendingApproval({
+        thread_id: "thread-standalone",
+        approval_id: "approval-standalone",
+        summary: "Patch config",
+        detail: "diff --git a/config.ts b/config.ts",
+        goal_id: null,
+        checkpoint_id: null,
+      }),
+    ]);
+
+    render(<App />);
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Approval inbox, 2 pending approvals",
+      }),
+    );
+
+    expect(screen.getByText("Goal goal-alpha")).toBeInTheDocument();
+    expect(screen.getByText("Thread thread-standalone")).toBeInTheDocument();
+    expect(screen.getByText("Run migration")).toBeInTheDocument();
+    expect(screen.queryByText("npm run migrate -- --tenant acme")).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Show details for Run migration",
+      }),
+    );
+
+    expect(screen.getByText("npm run migrate -- --tenant acme")).toBeInTheDocument();
+  });
+
+  it("approves one inbox item through the existing approval decision path and refetches it", async () => {
+    const user = userEvent.setup();
+    seedApprovalInbox([
+      pendingApproval({
+        thread_id: "thread-approve",
+        approval_id: "approval-approve",
+        summary: "Install dependency",
+        detail: "npm install tiny-package",
+      }),
+    ]);
+    const submitApprovalDecision = vi
+      .spyOn(exagentClient, "submitApprovalDecision")
+      .mockResolvedValue({} as any);
+    vi.spyOn(exagentClient as any, "listApprovals").mockResolvedValue({
+      approvals: [],
+    });
+
+    render(<App />);
+    await user.click(
+      screen.getByRole("button", {
+        name: "Approval inbox, 1 pending approval",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "Approve Install dependency" }));
+
+    expect(submitApprovalDecision).toHaveBeenCalledWith(
+      "project-exagent",
+      "thread-approve",
+      undefined,
+      "approval-approve",
+      "approved",
+      "desktop approved",
+    );
+    await waitFor(() => {
+      expect(screen.queryByText("Install dependency")).not.toBeInTheDocument();
+    });
+  });
+
+  it("approves selected inbox items sequentially and reports partial failure", async () => {
+    const firstDecision = createDeferred<unknown>();
+    const user = userEvent.setup();
+    seedApprovalInbox([
+      pendingApproval({
+        thread_id: "thread-one",
+        approval_id: "approval-ok",
+        summary: "Run first command",
+        detail: "cargo fmt",
+      }),
+      pendingApproval({
+        thread_id: "thread-two",
+        approval_id: "approval-fail",
+        summary: "Run second command",
+        detail: "cargo test",
+      }),
+    ]);
+    const calls: string[] = [];
+    vi.spyOn(exagentClient, "submitApprovalDecision").mockImplementation(
+      async (_projectId, _threadId, _turnId, approvalId) => {
+        calls.push(String(approvalId));
+        if (approvalId === "approval-ok") {
+          return firstDecision.promise as Promise<any>;
+        }
+        throw new Error("backend denied approval");
+      },
+    );
+    vi.spyOn(exagentClient as any, "listApprovals").mockResolvedValue({
+      approvals: [
+        pendingApproval({
+          thread_id: "thread-two",
+          approval_id: "approval-fail",
+          summary: "Run second command",
+          detail: "cargo test",
+        }),
+      ],
+    });
+
+    render(<App />);
+    await user.click(
+      screen.getByRole("button", {
+        name: "Approval inbox, 2 pending approvals",
+      }),
+    );
+    await user.click(screen.getByRole("checkbox", { name: "Select Run first command" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select Run second command" }));
+    fireEvent.click(screen.getByRole("button", { name: "Approve selected approvals" }));
+
+    expect(calls).toEqual(["approval-ok"]);
+    firstDecision.resolve({});
+
+    await waitFor(() => {
+      expect(calls).toEqual(["approval-ok", "approval-fail"]);
+    });
+    expect(
+      await screen.findByText("Approved 1 of 2 selected approvals. Stopped at approval-fail: backend denied approval"),
+    ).toBeInTheDocument();
+  });
+
+  it("localizes approval inbox action labels and partial batch status", async () => {
+    window.localStorage.setItem("exagent.locale", "zh");
+    const firstDecision = createDeferred<unknown>();
+    const user = userEvent.setup();
+    seedApprovalInbox([
+      pendingApproval({
+        thread_id: "thread-one",
+        approval_id: "approval-ok",
+        summary: "Run first command",
+        detail: "cargo fmt",
+      }),
+      pendingApproval({
+        thread_id: "thread-two",
+        approval_id: "approval-fail",
+        summary: "Run second command",
+        detail: "cargo test",
+      }),
+    ]);
+    vi.spyOn(exagentClient, "submitApprovalDecision").mockImplementation(
+      async (_projectId, _threadId, _turnId, approvalId) => {
+        if (approvalId === "approval-ok") {
+          return firstDecision.promise as Promise<any>;
+        }
+        throw new Error("backend denied approval");
+      },
+    );
+    vi.spyOn(exagentClient as any, "listApprovals").mockResolvedValue({
+      approvals: [
+        pendingApproval({
+          thread_id: "thread-two",
+          approval_id: "approval-fail",
+          summary: "Run second command",
+          detail: "cargo test",
+        }),
+      ],
+    });
+
+    render(
+      <I18nProvider>
+        <App />
+      </I18nProvider>,
+    );
+    await user.click(
+      screen.getByRole("button", {
+        name: "审批收件箱, 2 待处理 审批",
+      }),
+    );
+    await user.click(screen.getByRole("checkbox", { name: "选择 Run first command" }));
+    await user.click(screen.getByRole("checkbox", { name: "选择 Run second command" }));
+    await user.click(screen.getByRole("button", { name: "批准所选审批" }));
+
+    firstDecision.resolve({});
+
+    expect(
+      await screen.findByText("已批准 1/2 个所选审批。停在 approval-fail：backend denied approval"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Approved 1 of 2 selected approvals/)).not.toBeInTheDocument();
+  });
+
+  it("requires explicit confirmation before rejecting and rolling back to a checkpoint", async () => {
+    const user = userEvent.setup();
+    seedApprovalInbox([
+      pendingApproval({
+        thread_id: "thread-rollback",
+        approval_id: "approval-rollback",
+        summary: "Apply patch",
+        detail: "diff --git a/src/main.rs b/src/main.rs",
+        checkpoint_id: "checkpoint-rollback",
+      }),
+    ]);
+    const submitApprovalDecision = vi
+      .spyOn(exagentClient, "submitApprovalDecision")
+      .mockResolvedValue({} as any);
+    const restoreCheckpoint = vi
+      .spyOn(exagentClient as any, "restoreCheckpoint")
+      .mockResolvedValue({ checkpoint_id: "checkpoint-rollback", status: "restored" });
+    vi.spyOn(exagentClient as any, "listApprovals").mockResolvedValue({
+      approvals: [],
+    });
+
+    render(<App />);
+    await user.click(
+      screen.getByRole("button", {
+        name: "Approval inbox, 1 pending approval",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "Reject and roll back Apply patch" }));
+
+    const confirm = screen.getByRole("button", { name: "Confirm reject and roll back" });
+    expect(confirm).toBeDisabled();
+    expect(screen.getByText("checkpoint-rollback")).toBeInTheDocument();
+    expect(submitApprovalDecision).not.toHaveBeenCalled();
+    expect(restoreCheckpoint).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("checkbox", { name: "I understand rollback will restore this checkpoint" }));
+    await user.click(confirm);
+
+    await waitFor(() => {
+      expect(submitApprovalDecision).toHaveBeenCalledWith(
+        "project-exagent",
+        "thread-rollback",
+        undefined,
+        "approval-rollback",
+        "denied",
+        "desktop denied",
+      );
+    });
+    expect(restoreCheckpoint).toHaveBeenCalledWith("project-exagent", "checkpoint-rollback");
+    expect(submitApprovalDecision.mock.invocationCallOrder[0]).toBeLessThan(
+      restoreCheckpoint.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("removes a denied rollback item and reports when checkpoint restore fails", async () => {
+    const user = userEvent.setup();
+    seedApprovalInbox([
+      pendingApproval({
+        thread_id: "thread-rollback",
+        approval_id: "approval-rollback-fails",
+        summary: "Apply risky patch",
+        detail: "diff --git a/src/main.rs b/src/main.rs",
+        checkpoint_id: "checkpoint-rollback-fails",
+      }),
+    ]);
+    vi.spyOn(exagentClient, "submitApprovalDecision").mockResolvedValue({} as any);
+    vi.spyOn(exagentClient as any, "restoreCheckpoint").mockRejectedValue(new Error("restore exploded"));
+    vi.spyOn(exagentClient as any, "listApprovals").mockResolvedValue({
+      approvals: [],
+    });
+
+    render(<App />);
+    await user.click(
+      screen.getByRole("button", {
+        name: "Approval inbox, 1 pending approval",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "Reject and roll back Apply risky patch" }));
+    await user.click(screen.getByRole("checkbox", { name: "I understand rollback will restore this checkpoint" }));
+    await user.click(screen.getByRole("button", { name: "Confirm reject and roll back" }));
+
+    expect(
+      await screen.findByText("Rejected approval-rollback-fails, but rollback failed: restore exploded"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Apply risky patch")).not.toBeInTheDocument();
+  });
+
+  it("shows an inbox badge when pending approvals are refreshed from runtime events", async () => {
+    vi.useFakeTimers();
+    try {
+      seedApprovalInbox([]);
+      vi.spyOn(exagentClient as any, "listApprovals").mockResolvedValue({
+        approvals: [
+          pendingApproval({
+            thread_id: "thread-event",
+            approval_id: "approval-event",
+            summary: "Run event command",
+            detail: "npm test",
+          }),
+        ],
+      });
+
+      render(<App />);
+
+      await act(async () => {
+        useWorkbenchStore.getState().applyRuntimeEvent({
+          event_id: "evt-approval-requested",
+          thread_id: "session-desktop",
+          turn_id: "turn-event",
+          kind: {
+            type: "approval_requested",
+            approval_id: "approval-event",
+            tool_name: "run_command",
+            reason: "Needs permission",
+            checkpoint_id: "checkpoint-event",
+          },
+        });
+        vi.advanceTimersByTime(300);
+        await Promise.resolve();
+      });
+
+      expect(
+        screen.getByRole("button", {
+          name: "Approval inbox, 1 pending approval",
+        }),
+      ).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("expands an inactive project without switching the active project", async () => {
@@ -933,6 +1390,1232 @@ describe("AppShell", () => {
       expect(useWorkbenchStore.getState().activeSessionId).toBeNull();
       expect(useWorkbenchStore.getState().transcript).toEqual([]);
     });
+  });
+
+  it("forks a historical user turn and opens the new thread", async () => {
+    const user = userEvent.setup();
+    const forkThread = vi.spyOn(exagentClient, "forkThread").mockResolvedValue({
+      new_thread_id: "session-fork",
+      parent_thread_id: "session-parent",
+      fork_point_turn_id: "turn-1",
+    });
+    vi.spyOn(exagentClient, "listThreads").mockResolvedValue([
+      threadRecord({
+        id: "session-parent",
+        fallback_title: "Parent session",
+        created_at: 1,
+        updated_at: 1,
+      }),
+      threadRecord({
+        id: "session-fork",
+        fallback_title: "Forked session",
+        created_at: 2,
+        updated_at: 2,
+        fork_parent_thread_id: "session-parent",
+        fork_point_turn_id: "turn-1",
+      }),
+    ]);
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-fork",
+        status: "idle",
+        active_turn: null,
+        turns: [
+          {
+            id: "turn-1",
+            status: "completed",
+            items: [{ type: "assistant_message", text: "Fork transcript" }],
+          },
+        ],
+      },
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-fork",
+      events: [],
+    });
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Users/enxiang/dev/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-parent",
+          projectId: "project-exagent",
+          title: "Parent session",
+          updatedAt: "now",
+          status: "idle",
+        },
+      ],
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-parent",
+      transcript: [
+        {
+          id: "message-turn-1",
+          role: "user",
+          body: "Fork this point",
+          timestamp: "history",
+          threadId: "session-parent",
+          turnId: "turn-1",
+          turnStatus: "completed",
+        },
+        {
+          id: "message-assistant-1",
+          role: "assistant",
+          body: "Parent answer",
+          timestamp: "history",
+          threadId: "session-parent",
+          turnId: "turn-1",
+          turnStatus: "completed",
+        },
+      ],
+    });
+
+    render(<App />);
+
+    await user.hover(screen.getByRole("article", { name: "User message" }));
+    await user.click(screen.getByRole("button", { name: "Fork from here" }));
+
+    expect(forkThread).toHaveBeenCalledWith("project-exagent", {
+      threadId: "session-parent",
+      atTurnId: "turn-1",
+    });
+    await waitFor(() => {
+      expect(useWorkbenchStore.getState().activeSessionId).toBe("session-fork");
+    });
+    expect(screen.getByText("Fork transcript")).toBeInTheDocument();
+  });
+
+  it("makes a live completed user turn forkable without reopening", async () => {
+    const user = userEvent.setup();
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "session-live",
+      turn: {
+        id: "turn-live",
+        status: "in_progress",
+        items: [],
+      },
+    });
+    const forkThread = vi.spyOn(exagentClient, "forkThread").mockResolvedValue({
+      new_thread_id: "session-live-fork",
+      parent_thread_id: "session-live",
+      fork_point_turn_id: "turn-live",
+    });
+    vi.spyOn(exagentClient, "listThreads").mockResolvedValue([
+      threadRecord({
+        id: "session-live",
+        fallback_title: "Live session",
+        created_at: 1,
+        updated_at: 1,
+      }),
+      threadRecord({
+        id: "session-live-fork",
+        fallback_title: "Live fork",
+        created_at: 2,
+        updated_at: 2,
+        fork_parent_thread_id: "session-live",
+        fork_point_turn_id: "turn-live",
+      }),
+    ]);
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-live-fork",
+        status: "idle",
+        active_turn: null,
+        turns: [],
+      },
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-live-fork",
+      events: [],
+    });
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Users/enxiang/dev/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-live",
+          projectId: "project-exagent",
+          title: "Live session",
+          updatedAt: "now",
+          status: "idle",
+        },
+      ],
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-live",
+      composerValue: "Live fork prompt",
+      transcript: [],
+    });
+
+    render(<App />);
+    await act(async () => {
+      await useWorkbenchStore.getState().sendPrompt();
+    });
+    expect(startTurn).toHaveBeenCalled();
+
+    expect(screen.queryByRole("button", { name: "Fork from here" })).not.toBeInTheDocument();
+
+    act(() => {
+      useWorkbenchStore.getState().applyRuntimeEvent({
+        event_id: "evt-live-completed",
+        thread_id: "session-live",
+        turn_id: "turn-live",
+        kind: { type: "turn_completed" },
+      });
+    });
+
+    await user.hover(screen.getByRole("article", { name: "User message" }));
+    const forkButton = screen.getByRole("button", { name: "Fork from here" });
+    expect(forkButton).toBeEnabled();
+
+    await user.click(forkButton);
+
+    expect(forkThread).toHaveBeenCalledWith("project-exagent", {
+      threadId: "session-live",
+      atTurnId: "turn-live",
+    });
+  });
+
+  it("clears active search so a new fork stays visible when opened", async () => {
+    const forkThread = vi.spyOn(exagentClient, "forkThread").mockResolvedValue({
+      new_thread_id: "session-search-fork",
+      parent_thread_id: "session-search-parent",
+      fork_point_turn_id: "turn-1",
+    });
+    const listThreads = vi.spyOn(exagentClient, "listThreads").mockImplementation(async (_projectId, _archived, search) => {
+      if (search) {
+        return [
+          threadRecord({
+            id: "session-search-parent",
+            fallback_title: "Parent matches search",
+            created_at: 1,
+            updated_at: 1,
+          }),
+        ];
+      }
+      return [
+        threadRecord({
+          id: "session-search-parent",
+          fallback_title: "Parent matches search",
+          created_at: 1,
+          updated_at: 1,
+        }),
+        threadRecord({
+          id: "session-search-fork",
+          fallback_title: "New fork title",
+          created_at: 2,
+          updated_at: 2,
+          fork_parent_thread_id: "session-search-parent",
+          fork_point_turn_id: "turn-1",
+        }),
+      ];
+    });
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-search-fork",
+        status: "idle",
+        active_turn: null,
+        turns: [],
+      },
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-search-fork",
+      events: [],
+    });
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      search: "parent-only",
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Users/enxiang/dev/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-search-parent",
+          projectId: "project-exagent",
+          title: "Parent matches search",
+          updatedAt: "now",
+          status: "idle",
+        },
+      ],
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-search-parent",
+    });
+
+    await useWorkbenchStore.getState().forkThreadFromTurn("session-search-parent", "turn-1");
+
+    expect(forkThread).toHaveBeenCalledWith("project-exagent", {
+      threadId: "session-search-parent",
+      atTurnId: "turn-1",
+    });
+    expect(listThreads).toHaveBeenCalledWith("project-exagent", false, null);
+    expect(useWorkbenchStore.getState().search).toBe("");
+    expect(useWorkbenchStore.getState().activeSessionId).toBe("session-search-fork");
+    expect(useWorkbenchStore.getState().sessions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "session-search-fork",
+          title: "New fork title",
+        }),
+      ]),
+    );
+  });
+
+  it("does not offer fork for a user message in an in-progress active turn", async () => {
+    const user = userEvent.setup();
+    const forkThread = vi.spyOn(exagentClient, "forkThread").mockResolvedValue({
+      new_thread_id: "session-fork",
+      parent_thread_id: "session-active",
+      fork_point_turn_id: "turn-active",
+    });
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-active",
+        status: "running",
+        active_turn: {
+          id: "turn-active",
+          status: "running",
+          items: [{ type: "user_message", text: "Still running" }],
+        },
+        turns: [
+          {
+            id: "turn-active",
+            status: "running",
+            items: [{ type: "user_message", text: "Still running" }],
+          },
+        ],
+      },
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-active",
+      events: [],
+    });
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Users/enxiang/dev/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-active",
+          projectId: "project-exagent",
+          title: "Active session",
+          updatedAt: "now",
+          status: "running",
+        },
+      ],
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      transcript: [],
+    });
+
+    render(<App />);
+    await act(async () => {
+      await useWorkbenchStore.getState().openSession("session-active");
+    });
+
+    await user.hover(screen.getByRole("article", { name: "User message" }));
+
+    expect(screen.queryByRole("button", { name: "Fork from here" })).not.toBeInTheDocument();
+    expect(forkThread).not.toHaveBeenCalled();
+  });
+
+  it("keeps fork disabled while an awaiting-approval turn is active", async () => {
+    const user = userEvent.setup();
+    const forkThread = vi.spyOn(exagentClient, "forkThread").mockResolvedValue({
+      new_thread_id: "session-fork",
+      parent_thread_id: "session-awaiting",
+      fork_point_turn_id: "turn-completed",
+    });
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-awaiting",
+        status: "waiting_approval",
+        active_turn: {
+          id: "turn-awaiting",
+          status: "waiting_approval",
+          items: [],
+        },
+        turns: [
+          {
+            id: "turn-completed",
+            status: "completed",
+            items: [{ type: "user_message", text: "Completed prompt" }],
+          },
+        ],
+      },
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-awaiting",
+      events: [],
+    });
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Users/enxiang/dev/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-awaiting",
+          projectId: "project-exagent",
+          title: "Awaiting session",
+          updatedAt: "now",
+          status: "awaiting_approval",
+        },
+      ],
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      transcript: [],
+    });
+
+    render(<App />);
+    await act(async () => {
+      await useWorkbenchStore.getState().openSession("session-awaiting");
+    });
+
+    await user.hover(screen.getByRole("article", { name: "User message" }));
+    const forkButton = screen.getByRole("button", { name: "Fork from here" });
+
+    expect(forkButton).toBeDisabled();
+    await user.click(forkButton);
+    expect(forkThread).not.toHaveBeenCalled();
+  });
+
+  it("renders forked sessions under their parent with a branch label", () => {
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Users/enxiang/dev/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-parent",
+          projectId: "project-exagent",
+          title: "Parent session",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 1,
+        },
+        {
+          id: "session-child",
+          projectId: "project-exagent",
+          title: "Child fork",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 2,
+          forkParentThreadId: "session-parent",
+          forkPointTurnId: "turn-1",
+        },
+        {
+          id: "session-flat",
+          projectId: "project-exagent",
+          title: "Standalone session",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 3,
+        },
+      ],
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-parent",
+    });
+
+    render(<App />);
+
+    const sidebar = screen.getByRole("complementary", {
+      name: "Projects and sessions",
+    });
+    const parent = within(sidebar).getByText("Parent session");
+    const child = within(sidebar).getByText("Child fork");
+    expect(parent.compareDocumentPosition(child) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText("forked from turn 1")).toBeInTheDocument();
+    expect(screen.getByLabelText("Forked session Child fork, forked from turn 1")).toBeInTheDocument();
+    expect(screen.getByText("forked from turn 1").closest("[data-session-branch-group]")).toHaveClass(
+      "border-l",
+      "pl-2.5",
+    );
+  });
+
+  it("compares a forked session with its parent in read-only panes", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(exagentClient, "readThread").mockImplementation(async (_projectId, threadId) => {
+      if (threadId === "session-parent") {
+        return {
+          thread: {
+            id: "session-parent",
+            status: "idle",
+            active_turn: null,
+            turns: [
+              {
+                id: "turn-1",
+                status: "completed",
+                items: [
+                  { type: "user_message", text: "Shared prompt" },
+                  { type: "assistant_message", text: "Shared answer" },
+                ],
+              },
+              {
+                id: "turn-2-parent",
+                status: "completed",
+                items: [{ type: "assistant_message", text: "Parent-only follow-up" }],
+              },
+            ],
+          },
+        };
+      }
+      return {
+        thread: {
+          id: "session-child",
+          status: "idle",
+          active_turn: null,
+          turns: [
+            {
+              id: "turn-1",
+              status: "completed",
+              items: [
+                { type: "user_message", text: "Shared prompt" },
+                { type: "assistant_message", text: "Shared answer" },
+              ],
+            },
+            {
+              id: "turn-2-child",
+              status: "completed",
+              items: [{ type: "assistant_message", text: "Fork-only follow-up" }],
+            },
+          ],
+        },
+      };
+    });
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Users/enxiang/dev/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-parent",
+          projectId: "project-exagent",
+          title: "Parent session",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 1,
+        },
+        {
+          id: "session-child",
+          projectId: "project-exagent",
+          title: "Child fork",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 2,
+          forkParentThreadId: "session-parent",
+          forkPointTurnId: "turn-1",
+        },
+      ],
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-child",
+      transcript: [
+        {
+          id: "child-current",
+          role: "assistant",
+          body: "Fork-only follow-up",
+          timestamp: "history",
+          threadId: "session-child",
+          turnId: "turn-2-child",
+          turnStatus: "completed",
+        },
+      ],
+    });
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "Session actions for Child fork" }));
+    await user.click(screen.getByRole("menuitem", { name: "Compare with parent" }));
+
+    const parentPane = await screen.findByLabelText("Parent branch transcript");
+    const forkPane = screen.getByLabelText("Fork branch transcript");
+    expect(parentPane.compareDocumentPosition(forkPane) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText("1 shared turn")).toBeInTheDocument();
+    expect(within(parentPane).getByText("Parent-only follow-up")).toBeInTheDocument();
+    expect(within(forkPane).getByText("Fork-only follow-up")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Message ExAgent")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Fork from here" })).not.toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.getByLabelText("Message ExAgent")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Parent branch transcript")).not.toBeInTheDocument();
+  });
+
+  it("renders approval messages in branch compare without approval controls", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(exagentClient, "readThread").mockImplementation(async (_projectId, threadId) => {
+      if (threadId === "session-parent") {
+        return {
+          thread: {
+            id: "session-parent",
+            status: "waiting_approval",
+            active_turn: null,
+            turns: [
+              {
+                id: "turn-1",
+                status: "completed",
+                items: [{ type: "user_message", text: "Shared prompt" }],
+              },
+              {
+                id: "turn-approval",
+                status: "waiting_approval",
+                items: [
+                  {
+                    type: "approval_requested",
+                    event_id: "evt-parent-approval",
+                    approval_id: "approval-parent",
+                    tool_name: "run_deploy",
+                    reason: "Run parent deployment",
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      }
+      return {
+        thread: {
+          id: "session-child",
+          status: "idle",
+          active_turn: null,
+          turns: [
+            {
+              id: "turn-1",
+              status: "completed",
+              items: [{ type: "user_message", text: "Shared prompt" }],
+            },
+            {
+              id: "turn-child",
+              status: "completed",
+              items: [{ type: "assistant_message", text: "Fork-only follow-up" }],
+            },
+          ],
+        },
+      };
+    });
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Users/enxiang/dev/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-parent",
+          projectId: "project-exagent",
+          title: "Parent session",
+          updatedAt: "now",
+          status: "awaiting_approval",
+          createdAt: 1,
+        },
+        {
+          id: "session-child",
+          projectId: "project-exagent",
+          title: "Child fork",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 2,
+          forkParentThreadId: "session-parent",
+          forkPointTurnId: "turn-1",
+        },
+      ],
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-child",
+      transcript: [
+        {
+          id: "child-current",
+          role: "assistant",
+          body: "Fork-only follow-up",
+          timestamp: "history",
+          threadId: "session-child",
+          turnId: "turn-child",
+          turnStatus: "completed",
+        },
+      ],
+    });
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "Session actions for Child fork" }));
+    await user.click(screen.getByRole("menuitem", { name: "Compare with parent" }));
+
+    const parentPane = await screen.findByLabelText("Parent branch transcript");
+    expect(within(parentPane).getByText("Run parent deployment")).toBeInTheDocument();
+    expect(within(parentPane).queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    expect(within(parentPane).queryByRole("button", { name: "Deny" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Message ExAgent")).not.toBeInTheDocument();
+  });
+
+  it("compares a forked session from an inactive expanded project", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(exagentClient, "reindexProject").mockImplementation(async (projectId) => {
+      if (projectId === "project-beta") {
+        return [
+          threadRecord({
+            id: "session-beta-parent",
+            project_id: "project-beta",
+            fallback_title: "Beta parent",
+            created_at: 1,
+            updated_at: 1,
+          }),
+          threadRecord({
+            id: "session-beta-child",
+            project_id: "project-beta",
+            fallback_title: "Beta child",
+            created_at: 2,
+            updated_at: 2,
+            fork_parent_thread_id: "session-beta-parent",
+            fork_point_turn_id: "turn-1",
+          }),
+        ];
+      }
+      return [];
+    });
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-beta-child",
+        status: "idle",
+        active_turn: null,
+        turns: [],
+      },
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-beta-child",
+      events: [],
+    });
+    vi.spyOn(exagentClient, "readThread").mockImplementation(async (_projectId, threadId) => {
+      if (threadId === "session-beta-parent") {
+        return {
+          thread: {
+            id: "session-beta-parent",
+            status: "idle",
+            active_turn: null,
+            turns: [
+              {
+                id: "turn-1",
+                status: "completed",
+                items: [{ type: "user_message", text: "Shared beta prompt" }],
+              },
+              {
+                id: "turn-parent",
+                status: "completed",
+                items: [{ type: "assistant_message", text: "Beta parent only" }],
+              },
+            ],
+          },
+        };
+      }
+      return {
+        thread: {
+          id: "session-beta-child",
+          status: "idle",
+          active_turn: null,
+          turns: [
+            {
+              id: "turn-1",
+              status: "completed",
+              items: [{ type: "user_message", text: "Shared beta prompt" }],
+            },
+            {
+              id: "turn-child",
+              status: "completed",
+              items: [{ type: "assistant_message", text: "Beta child only" }],
+            },
+          ],
+        },
+      };
+    });
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-alpha",
+          name: "Alpha",
+          path: "/tmp/alpha",
+          active: true,
+        },
+        {
+          id: "project-beta",
+          name: "Beta",
+          path: "/tmp/beta",
+          active: false,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-alpha",
+          projectId: "project-alpha",
+          title: "Alpha session",
+          updatedAt: "now",
+          status: "idle",
+        },
+      ],
+      activeProjectId: "project-alpha",
+      activeSessionId: "session-alpha",
+    });
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /^Beta$/ }));
+    expect(await screen.findByText("Beta child")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Session actions for Beta child" }));
+    await user.click(screen.getByRole("menuitem", { name: "Compare with parent" }));
+
+    expect(await screen.findByLabelText("Parent branch transcript")).toBeInTheDocument();
+    expect(screen.getByLabelText("Fork branch transcript")).toBeInTheDocument();
+    expect(screen.getByText("Beta parent only")).toBeInTheDocument();
+    expect(screen.getByText("Beta child only")).toBeInTheDocument();
+    expect(useWorkbenchStore.getState().activeProjectId).toBe("project-beta");
+  });
+
+  it.each([
+    ["child", "session-child", "Archive Child fork"],
+    ["parent", "session-parent", "Archive Parent session"],
+  ] as const)("clears branch compare when archiving the compared %s", async (_branch, sessionId, archiveLabel) => {
+    const user = userEvent.setup();
+    const archiveThread = vi.spyOn(exagentClient, "archiveThread").mockResolvedValue(undefined);
+    vi.spyOn(exagentClient, "readThread").mockImplementation(async (_projectId, threadId) => {
+      if (threadId === "session-parent") {
+        return {
+          thread: {
+            id: "session-parent",
+            status: "idle",
+            active_turn: null,
+            turns: [
+              {
+                id: "turn-1",
+                status: "completed",
+                items: [{ type: "user_message", text: "Shared prompt" }],
+              },
+              {
+                id: "turn-parent",
+                status: "completed",
+                items: [{ type: "assistant_message", text: "Parent-only follow-up" }],
+              },
+            ],
+          },
+        };
+      }
+      return {
+        thread: {
+          id: "session-child",
+          status: "idle",
+          active_turn: null,
+          turns: [
+            {
+              id: "turn-1",
+              status: "completed",
+              items: [{ type: "user_message", text: "Shared prompt" }],
+            },
+            {
+              id: "turn-child",
+              status: "completed",
+              items: [{ type: "assistant_message", text: "Fork-only follow-up" }],
+            },
+          ],
+        },
+      };
+    });
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Users/enxiang/dev/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-parent",
+          projectId: "project-exagent",
+          title: "Parent session",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 1,
+        },
+        {
+          id: "session-child",
+          projectId: "project-exagent",
+          title: "Child fork",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 2,
+          forkParentThreadId: "session-parent",
+          forkPointTurnId: "turn-1",
+        },
+      ],
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-child",
+      transcript: [
+        {
+          id: "child-current",
+          role: "assistant",
+          body: "Fork-only follow-up",
+          timestamp: "history",
+          threadId: "session-child",
+          turnId: "turn-child",
+          turnStatus: "completed",
+        },
+      ],
+    });
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "Session actions for Child fork" }));
+    await user.click(screen.getByRole("menuitem", { name: "Compare with parent" }));
+    expect(await screen.findByLabelText("Parent branch transcript")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: archiveLabel }));
+
+    expect(archiveThread).toHaveBeenCalledWith(sessionId);
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Parent branch transcript")).not.toBeInTheDocument();
+    });
+    expect(useWorkbenchStore.getState().compareThreadId).toBeNull();
+    expect(useWorkbenchStore.getState().compareView).toBeNull();
+  });
+
+  it("does not reopen branch compare from stale pending reads after archiving a compared thread", async () => {
+    const user = userEvent.setup();
+    const parentRead = createDeferred<Awaited<ReturnType<typeof exagentClient.readThread>>>();
+    const childRead = createDeferred<Awaited<ReturnType<typeof exagentClient.readThread>>>();
+    vi.spyOn(exagentClient, "archiveThread").mockResolvedValue(undefined);
+    vi.spyOn(exagentClient, "readThread").mockImplementation((_projectId, threadId) => {
+      return threadId === "session-parent" ? parentRead.promise : childRead.promise;
+    });
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Users/enxiang/dev/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-parent",
+          projectId: "project-exagent",
+          title: "Parent session",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 1,
+        },
+        {
+          id: "session-child",
+          projectId: "project-exagent",
+          title: "Child fork",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 2,
+          forkParentThreadId: "session-parent",
+          forkPointTurnId: "turn-1",
+        },
+      ],
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-child",
+      transcript: [
+        {
+          id: "child-current",
+          role: "assistant",
+          body: "Fork-only follow-up",
+          timestamp: "history",
+          threadId: "session-child",
+          turnId: "turn-child",
+          turnStatus: "completed",
+        },
+      ],
+    });
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "Session actions for Child fork" }));
+    await user.click(screen.getByRole("menuitem", { name: "Compare with parent" }));
+    expect(await screen.findByLabelText("Parent branch transcript")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Archive Child fork" }));
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Parent branch transcript")).not.toBeInTheDocument();
+    });
+
+    await act(async () => {
+      parentRead.resolve({
+        thread: {
+          id: "session-parent",
+          status: "idle",
+          active_turn: null,
+          turns: [
+            {
+              id: "turn-1",
+              status: "completed",
+              items: [{ type: "user_message", text: "Shared prompt" }],
+            },
+            {
+              id: "turn-parent",
+              status: "completed",
+              items: [{ type: "assistant_message", text: "Late parent compare" }],
+            },
+          ],
+        },
+      });
+      childRead.resolve({
+        thread: {
+          id: "session-child",
+          status: "idle",
+          active_turn: null,
+          turns: [
+            {
+              id: "turn-1",
+              status: "completed",
+              items: [{ type: "user_message", text: "Shared prompt" }],
+            },
+            {
+              id: "turn-child",
+              status: "completed",
+              items: [{ type: "assistant_message", text: "Late child compare" }],
+            },
+          ],
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByLabelText("Parent branch transcript")).not.toBeInTheDocument();
+    expect(screen.queryByText("Late parent compare")).not.toBeInTheDocument();
+    expect(screen.queryByText("Late child compare")).not.toBeInTheDocument();
+    expect(useWorkbenchStore.getState().compareThreadId).toBeNull();
+    expect(useWorkbenchStore.getState().compareView).toBeNull();
+  });
+
+  it("closes branch compare from the visible close control", async () => {
+    const user = userEvent.setup();
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Users/enxiang/dev/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-parent",
+          projectId: "project-exagent",
+          title: "Parent session",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 1,
+        },
+        {
+          id: "session-child",
+          projectId: "project-exagent",
+          title: "Child fork",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 2,
+          forkParentThreadId: "session-parent",
+          forkPointTurnId: "turn-1",
+        },
+      ],
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-child",
+      transcript: [
+        {
+          id: "child-current",
+          role: "assistant",
+          body: "Fork-only follow-up",
+          timestamp: "history",
+          threadId: "session-child",
+          turnId: "turn-child",
+          turnStatus: "completed",
+        },
+      ],
+      compareThreadId: "session-child",
+      compareView: {
+        parentThreadId: "session-parent",
+        childThreadId: "session-child",
+        parentTitle: "Parent session",
+        childTitle: "Child fork",
+        parentTranscript: [
+          {
+            id: "parent-message",
+            role: "assistant",
+            body: "Parent-only follow-up",
+            timestamp: "history",
+            threadId: "session-parent",
+            turnId: "turn-parent",
+            turnStatus: "completed",
+          },
+        ],
+        childTranscript: [
+          {
+            id: "child-message",
+            role: "assistant",
+            body: "Fork-only follow-up",
+            timestamp: "history",
+            threadId: "session-child",
+            turnId: "turn-child",
+            turnStatus: "completed",
+          },
+        ],
+        sharedTurnCount: 1,
+        forkPointTurnId: "turn-1",
+        loading: false,
+        error: null,
+      },
+    });
+
+    render(<App />);
+    expect(screen.getByLabelText("Parent branch transcript")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Close branch compare" }));
+
+    expect(screen.queryByLabelText("Parent branch transcript")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Message ExAgent")).toBeInTheDocument();
+    expect(useWorkbenchStore.getState().compareView).toBeNull();
+  });
+
+  it("preserves incoming fork session order while nesting children", () => {
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Users/enxiang/dev/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-recent-root",
+          projectId: "project-exagent",
+          title: "Recent root",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 300,
+        },
+        {
+          id: "session-child-first",
+          projectId: "project-exagent",
+          title: "Child first",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 20,
+          forkParentThreadId: "session-parent-order",
+          forkPointTurnId: "turn-1",
+        },
+        {
+          id: "session-parent-order",
+          projectId: "project-exagent",
+          title: "Parent in incoming order",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 100,
+        },
+        {
+          id: "session-child-second",
+          projectId: "project-exagent",
+          title: "Child second",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 10,
+          forkParentThreadId: "session-parent-order",
+          forkPointTurnId: "turn-2",
+        },
+        {
+          id: "session-older-root",
+          projectId: "project-exagent",
+          title: "Older root",
+          updatedAt: "now",
+          status: "idle",
+          createdAt: 50,
+        },
+      ],
+      activeProjectId: "project-exagent",
+      activeSessionId: "session-recent-root",
+    });
+
+    render(<App />);
+
+    const sidebar = screen.getByRole("complementary", {
+      name: "Projects and sessions",
+    });
+    const recentRoot = within(sidebar).getByText("Recent root");
+    const parent = within(sidebar).getByText("Parent in incoming order");
+    const childFirst = within(sidebar).getByText("Child first");
+    const childSecond = within(sidebar).getByText("Child second");
+    const olderRoot = within(sidebar).getByText("Older root");
+
+    expect(recentRoot.compareDocumentPosition(parent) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(parent.compareDocumentPosition(childFirst) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(childFirst.compareDocumentPosition(childSecond) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(childSecond.compareDocumentPosition(olderRoot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(childFirst.closest("[data-session-branch-group]")).toContainElement(childSecond);
   });
 
   it("shows a focused draft-session state before a real session exists", async () => {

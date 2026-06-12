@@ -1,9 +1,21 @@
-import { CheckCircle2, ChevronRight, CircleAlert, Info, Terminal } from "lucide-react";
+import {
+  CheckCircle2,
+  ChevronRight,
+  CircleAlert,
+  Clock3,
+  FileText,
+  GitBranchPlus,
+  Info,
+  Terminal
+} from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { ApprovalCard } from "@/components/ApprovalCard";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { TranscriptMessage, TurnInput } from "@/types";
+import { useI18n } from "@/lib/i18n";
 import { fileBaseName, localFileAssetSrc } from "@/lib/media";
 import { cn } from "@/lib/utils";
 
@@ -13,7 +25,8 @@ const roleLabel: Record<TranscriptMessage["role"], string> = {
   reasoning: "Reasoning",
   system: "System",
   tool: "Tool",
-  approval: "Approval"
+  approval: "Approval",
+  goal_report: "Goal report"
 };
 
 const statusIcon = {
@@ -35,13 +48,21 @@ export function TranscriptList({
   messages,
   loading = false,
   emptyLabel = "No transcript yet.",
-  className
+  className,
+  forkDisabled = false,
+  readOnly = false,
+  onForkFromTurn
 }: {
   messages: TranscriptMessage[];
   loading?: boolean;
   emptyLabel?: string;
   className?: string;
+  forkDisabled?: boolean;
+  readOnly?: boolean;
+  onForkFromTurn?: (threadId: string, turnId: string) => void;
 }) {
+  const { t } = useI18n();
+
   if (loading) {
     return <TranscriptSkeleton />;
   }
@@ -53,22 +74,62 @@ export function TranscriptList({
   return (
     <div className={cn("flex flex-col gap-5", className)}>
       {messages.map((message) => (
-        <TranscriptItem key={message.id} message={message} />
+        <TranscriptItem
+          key={message.id}
+          message={message}
+          forkDisabled={forkDisabled}
+          forkLabel={t("transcript.actions.forkFromHere")}
+          readOnly={readOnly}
+          onForkFromTurn={onForkFromTurn}
+        />
       ))}
     </div>
   );
 }
 
-export function TranscriptItem({ message }: { message: TranscriptMessage }) {
+export function TranscriptItem({
+  message,
+  forkDisabled = false,
+  forkLabel = "Fork from here",
+  readOnly = false,
+  onForkFromTurn
+}: {
+  message: TranscriptMessage;
+  forkDisabled?: boolean;
+  forkLabel?: string;
+  readOnly?: boolean;
+  onForkFromTurn?: (threadId: string, turnId: string) => void;
+}) {
   if (message.role === "approval") {
-    return <ApprovalCard message={message} />;
+    return <ApprovalCard message={message} readOnly={readOnly} />;
   }
 
   if (message.role === "user") {
     const images = imageInputs(message.input);
     const hasBody = message.body.trim().length > 0;
+    const canFork = Boolean(
+      onForkFromTurn && message.threadId && message.turnId && message.turnStatus === "completed"
+    );
     return (
-      <article className="flex justify-end" aria-label="User message">
+      <article className="group flex items-start justify-end gap-2" aria-label="User message">
+        {canFork && message.threadId && message.turnId ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                disabled={forkDisabled}
+                aria-label={forkLabel}
+                className="mt-1 h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+                onClick={() => onForkFromTurn?.(message.threadId as string, message.turnId as string)}
+              >
+                <GitBranchPlus className="h-3.5 w-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{forkLabel}</TooltipContent>
+          </Tooltip>
+        ) : null}
         <div className="user-bubble max-w-[min(74%,680px)] rounded-lg px-4 py-2.5 text-ink sm:max-w-[min(68%,680px)]">
           {hasBody ? <p className="type-body-lg whitespace-pre-wrap break-words">{message.body}</p> : null}
           {images.length > 0 ? <UserImageGrid images={images} hasBody={hasBody} /> : null}
@@ -89,6 +150,10 @@ export function TranscriptItem({ message }: { message: TranscriptMessage }) {
 
   if (message.role === "reasoning") {
     return <ReasoningBlock message={message} />;
+  }
+
+  if (message.role === "goal_report") {
+    return <GoalReportCard message={message} />;
   }
 
   const Icon = message.status ? statusIcon[message.status] : message.role === "tool" ? Terminal : null;
@@ -121,6 +186,92 @@ export function TranscriptItem({ message }: { message: TranscriptMessage }) {
     </article>
   );
 }
+
+function GoalReportCard({ message }: { message: TranscriptMessage }) {
+  const report = message.goalReport;
+  if (!report) {
+    return null;
+  }
+  const approvalsLabel = `${report.pending_approvals_count} ${report.pending_approvals_count === 1 ? "approval" : "approvals"} waiting in Inbox`;
+
+  return (
+    <article className="message-card w-full max-w-[780px] rounded-lg border border-border px-4 py-3" aria-label="Goal report">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <CheckCircle2 className="h-4 w-4 shrink-0 text-muted" />
+          <span className="type-label-md text-ink">{message.title ?? "Goal report"}</span>
+          <Badge variant={message.status ?? "neutral"}>{goalReportStatusLabel(report.final_status)}</Badge>
+        </div>
+        <time className="type-label-sm text-subtle">{message.timestamp}</time>
+      </div>
+      <div className="mt-3 space-y-2">
+        <p className="type-label-md text-ink">{report.objective}</p>
+        <p className="type-body-md whitespace-pre-wrap text-muted">{report.summary || message.body}</p>
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+        <GoalReportMetric label="Turns" value={`${report.turns_run} ${report.turns_run === 1 ? "turn" : "turns"}`} />
+        <GoalReportMetric label="Tokens" value={tokenUsageValue(report.tokens_used, report.token_budget)} />
+        <GoalReportMetric label="Time" value={durationValue(report.time_used_seconds)} />
+      </div>
+      {report.changed_files.length > 0 ? (
+        <div className="mt-3">
+          <div className="flex items-center gap-2 text-muted">
+            <FileText className="h-4 w-4" />
+            <span className="type-label-sm">Changed files</span>
+          </div>
+          <ul className="mt-2 space-y-1">
+            {report.changed_files.map((file) => (
+              <li key={file} className="type-code-sm break-all rounded border border-border bg-surface-2 px-2 py-1 text-muted">
+                {file}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {report.pending_approvals_count > 0 ? (
+        <p className="type-label-md mt-3 inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-ink">
+          <Clock3 className="h-4 w-4 text-muted" />
+          {approvalsLabel}
+        </p>
+      ) : null}
+    </article>
+  );
+}
+
+function GoalReportMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-border bg-surface-2 px-3 py-2">
+      <p className="type-label-sm text-subtle">{label}</p>
+      <p className="type-label-md mt-1 text-ink">{value}</p>
+    </div>
+  );
+}
+
+function goalReportStatusLabel(status: NonNullable<TranscriptMessage["goalReport"]>["final_status"]) {
+  return status.replace(/_/g, " ");
+}
+
+function tokenUsageValue(tokensUsed: number, tokenBudget?: number | null) {
+  const used = numberFormatter.format(tokensUsed);
+  return tokenBudget === null || tokenBudget === undefined
+    ? `${used} tokens`
+    : `${used} / ${numberFormatter.format(tokenBudget)} tokens`;
+}
+
+function durationValue(seconds: number) {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainingSeconds = safeSeconds % 60;
+  if (minutes === 0) {
+    return `${remainingSeconds}s`;
+  }
+  if (remainingSeconds === 0) {
+    return `${minutes}m`;
+  }
+  return `${minutes}m ${remainingSeconds}s`;
+}
+
+const numberFormatter = new Intl.NumberFormat();
 
 function UserImageGrid({
   images,

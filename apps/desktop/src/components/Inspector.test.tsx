@@ -177,7 +177,9 @@ describe("Inspector Agents section", () => {
 
     render(<Inspector state={workbenchState([runningRoot])} />);
 
-    const reviewerItem = screen.getByRole("treeitem", { name: "review agent, running" });
+    const reviewerItem = screen.getByRole("treeitem", {
+      name: "review agent, running, activity review the plan"
+    });
     expect(within(reviewerItem).getByText("reviewer")).toBeInTheDocument();
 
     expect(within(reviewerItem).queryByText("type")).not.toBeInTheDocument();
@@ -213,6 +215,45 @@ describe("Inspector Agents section", () => {
 
     expect(openAgentThread).toHaveBeenCalledWith("thread-review");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("keeps the waiting-approval count action on the Agents header when the body is collapsed", async () => {
+    const user = userEvent.setup();
+    const waitingRoot: AgentNode = {
+      ...rootOnly,
+      children: [
+        childAgent({
+          threadId: "thread-runner",
+          name: "runner",
+          status: "running",
+          children: [
+            childAgent({
+              threadId: "thread-nested",
+              parentThreadId: "thread-runner",
+              name: "nested reviewer",
+              status: "waiting_approval",
+              currentTool: "request_approval"
+            })
+          ]
+        })
+      ]
+    };
+
+    render(<Inspector state={workbenchState([waitingRoot])} />);
+
+    const agentsToggle = screen.getByRole("button", { name: /^Agents/ });
+    await user.click(agentsToggle);
+    expect(screen.queryByRole("tree", { name: "Running agents" })).not.toBeInTheDocument();
+
+    const waitingButton = screen.getByRole("button", { name: "Expand 1 waiting approval agent" });
+    expect(agentsToggle.closest("section")).toContainElement(waitingButton);
+
+    await user.click(waitingButton);
+
+    expect(screen.getByRole("tree", { name: "Running agents" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("treeitem", { name: /nested reviewer, needs approval, tool request_approval/ })
+    ).toBeInTheDocument();
   });
 });
 

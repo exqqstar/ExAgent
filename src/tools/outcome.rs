@@ -74,6 +74,7 @@ pub enum ToolRuntimeEffect {
         approval_id: ApprovalId,
         tool_name: String,
         reason: String,
+        checkpoint_id: Option<String>,
         permission_profile: PermissionProfile,
         filesystem_sandbox: String,
         network_sandbox: String,

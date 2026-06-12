@@ -64,11 +64,14 @@ export interface SessionSummary {
   status: SessionStatus;
   pinned?: boolean;
   archived?: boolean;
+  createdAt?: number;
+  forkParentThreadId?: string | null;
+  forkPointTurnId?: string | null;
 }
 
 export interface TranscriptMessage {
   id: string;
-  role: "user" | "assistant" | "reasoning" | "system" | "tool" | "approval";
+  role: "user" | "assistant" | "reasoning" | "system" | "tool" | "approval" | "goal_report";
   title?: string;
   body: string;
   input?: TurnInput[];
@@ -76,12 +79,14 @@ export interface TranscriptMessage {
   status?: "info" | "success" | "warning" | "danger";
   threadId?: string;
   turnId?: string;
+  turnStatus?: string;
   approvalId?: string;
   invocationId?: string;
   toolCallId?: string;
   toolName?: string;
   toolStatus?: ToolInvocationTranscriptStatus;
   mutating?: boolean;
+  goalReport?: ThreadGoalReport;
 }
 
 export type ToolInvocationTranscriptStatus =
@@ -112,7 +117,7 @@ export interface ChangedFile {
   status: "modified" | "added" | "deleted";
 }
 
-export type AgentRunStatus = "running" | "spawning" | "done" | "idle" | "failed";
+export type AgentRunStatus = "running" | "spawning" | "waiting_approval" | "done" | "idle" | "failed";
 export type AgentType = "explorer" | "planner" | "reviewer" | "worker";
 
 export interface AgentNode {
@@ -126,11 +131,13 @@ export interface AgentNode {
   agentType?: AgentType | null;
   role?: string | null;
   nickname?: string | null;
+  currentTool?: string | null;
+  tokensUsed?: number | null;
   isRoot: boolean;
   children: AgentNode[];
 }
 
-export type AgentTreeNodeStatus = "idle" | "running" | "done" | "failed";
+export type AgentTreeNodeStatus = "idle" | "running" | "waiting_approval" | "done" | "failed";
 
 export interface AgentTreeNode {
   thread_id?: string | null;
@@ -144,12 +151,48 @@ export interface AgentTreeNode {
   agent_nickname?: string | null;
   last_task_message?: string | null;
   last_activity?: string | null;
+  current_tool?: string | null;
+  tokens_used?: number | null;
   children?: AgentTreeNode[];
 }
 
 export interface AgentTreeResponse {
   root: AgentTreeNode;
 }
+
+export type PendingApprovalKind = "command" | "patch";
+
+export interface PendingApprovalItem {
+  thread_id: string;
+  approval_id: string;
+  kind: PendingApprovalKind;
+  summary: string;
+  detail: string;
+  goal_id?: string | null;
+  requested_at_ms: number;
+  checkpoint_id?: string | null;
+}
+
+export interface ApprovalsListResponse {
+  approvals: PendingApprovalItem[];
+}
+
+export type CheckpointRestoreStatus = "restored";
+
+export interface CheckpointRestoreResponse {
+  workspace_root: string;
+  checkpoint_id: string;
+  status: CheckpointRestoreStatus;
+  message: string;
+}
+
+export type ApprovalActionStatus =
+  | { type: "approval_decision"; approval_id: string; decision: "approved" | "denied" }
+  | { type: "batch_approved"; count: number }
+  | { type: "batch_partial_failed"; completed: number; total: number; approval_id: string; error: string }
+  | { type: "rollback_unavailable"; approval_id: string }
+  | { type: "rollback_restored"; approval_id: string; checkpoint_id: string }
+  | { type: "rollback_failed_after_reject"; approval_id: string; error: string };
 
 export interface TokenUsageCounts {
   input_tokens: number;
@@ -177,6 +220,7 @@ export interface WorkbenchSnapshot {
   sessions: SessionSummary[];
   activeProjectId: string | null;
   activeSessionId: string | null;
+  activeTurnId?: string | null;
   transcript: TranscriptMessage[];
   events: RuntimeEvent[];
   changedFiles: ChangedFile[];
@@ -220,6 +264,8 @@ export interface ThreadRecord {
   created_at: number;
   updated_at: number;
   last_opened_at: number | null;
+  fork_parent_thread_id?: string | null;
+  fork_point_turn_id?: string | null;
 }
 
 export interface ThreadView {
@@ -252,6 +298,19 @@ export interface ThreadGoal {
   updated_at_ms: number;
 }
 
+export interface ThreadGoalReport {
+  goal_id: string;
+  objective: string;
+  final_status: ThreadGoalStatus;
+  turns_run: number;
+  tokens_used: number;
+  token_budget?: number | null;
+  time_used_seconds: number;
+  changed_files: string[];
+  pending_approvals_count: number;
+  summary: string;
+}
+
 export interface DraftThreadGoal {
   objective: string;
   token_budget: number | null;
@@ -272,6 +331,17 @@ export interface ThreadGoalClearResponse {
 export interface ThreadCompactResponse {
   thread_id: string;
   latest_compaction: { summary: string } | null;
+}
+
+export interface ThreadForkParams {
+  threadId: string;
+  atTurnId: string;
+}
+
+export interface ThreadForkResponse {
+  new_thread_id: string;
+  parent_thread_id: string;
+  fork_point_turn_id: string;
 }
 
 export interface TurnView {
@@ -298,7 +368,14 @@ export type ThreadItem =
       output_preview?: string | null;
     }
   | { type: "exec_output"; event_id?: string | null; text: string }
-  | { type: "approval_requested"; event_id?: string | null; approval_id: string; tool_name: string; reason: string }
+  | {
+      type: "approval_requested";
+      event_id?: string | null;
+      approval_id: string;
+      tool_name: string;
+      reason: string;
+      checkpoint_id?: string | null;
+    }
   | { type: "approval_decision"; event_id?: string | null; approval_id?: string | null; status: string; note: string | null }
   | { type: "runtime_error"; event_id?: string | null; message: string }
   | {
@@ -333,6 +410,7 @@ export type ThreadItem =
       followup: boolean;
       started_turn_id?: string | null;
     }
+  | { type: "goal_report"; event_id?: string | null; report: ThreadGoalReport }
   | { type: "compaction_written" };
 
 export interface ThreadReadResponse {
@@ -377,7 +455,13 @@ export type BackendRuntimeEventKind =
   | { type: "tool_invocation_failed"; invocation_id: string; tool_call_id: string; tool_name: string; message: string }
   | { type: "tool_invocation_cancelled"; invocation_id: string; tool_call_id: string; tool_name: string; reason: string }
   | { type: "exec_output"; exec_session_id: string; stream: "stdout" | "stderr"; chunk: string; sequence?: number }
-  | { type: "approval_requested"; approval_id: string; tool_name: string; reason: string }
+  | {
+      type: "approval_requested";
+      approval_id: string;
+      tool_name: string;
+      reason: string;
+      checkpoint_id?: string | null;
+    }
   | { type: "approval_decision"; approval_id: string; status: string; note: string | null }
   | { type: "compaction_written"; summary: { summary: string } }
   | {
@@ -413,6 +497,9 @@ export type BackendRuntimeEventKind =
   | { type: "thread_goal_cleared"; thread_id: string }
   | { type: "thread_goal_continuation_started"; goal_id: string }
   | { type: "thread_goal_continuation_suppressed"; goal_id: string; reason: string }
+  | { type: "thread_goal_turn_started"; goal_id: string }
+  | { type: "thread_goal_tool_completed"; goal_id: string; changed_files?: string[] }
+  | { type: "thread_goal_report"; report: ThreadGoalReport }
   | { type: "token_count"; info?: TokenUsageInfo | null }
   | { type: "runtime_error"; message: string };
 

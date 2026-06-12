@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { compactThread, importImageFiles, pickImageFiles, scanSkillCatalog, setThreadGoal } from "@/api/exagentClient";
+import {
+  compactThread,
+  importImageFiles,
+  listApprovals,
+  pickImageFiles,
+  scanSkillCatalog,
+  setThreadGoal,
+  submitApprovalDecision
+} from "@/api/exagentClient";
 
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn()
@@ -74,6 +82,26 @@ describe("exagentClient", () => {
       thread_id: "thread-root",
       latest_compaction: null
     });
+    expect(tauriMocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("removes browser-preview approvals through the approval decision path", async () => {
+    delete (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+
+    const before = await listApprovals("project-exagent");
+    expect(before.approvals.map((item) => item.approval_id)).toContain("approval-preview-command");
+
+    await submitApprovalDecision(
+      "project-exagent",
+      "session-desktop",
+      undefined,
+      "approval-preview-command",
+      "approved",
+      "desktop approved"
+    );
+
+    const after = await listApprovals("project-exagent");
+    expect(after.approvals.map((item) => item.approval_id)).not.toContain("approval-preview-command");
     expect(tauriMocks.invoke).not.toHaveBeenCalled();
   });
 

@@ -9,6 +9,8 @@ use crate::types::{
     ConversationContentPart, ConversationMessage, MessageRole, ThreadId, TurnId, UserInput,
 };
 
+const SYSTEM_GOAL_REPORT_TURN_ID: &str = "system_goal_reports";
+
 pub(in crate::app_server) fn latest_turn_state(events: &[RuntimeEvent]) -> Option<TurnState> {
     events.iter().rev().find_map(|event| {
         let turn_id = event.turn_id.clone()?;
@@ -39,7 +41,10 @@ pub(in crate::app_server) fn latest_turn_state(events: &[RuntimeEvent]) -> Optio
             RuntimeEventKind::ThreadGoalUpdated { .. }
             | RuntimeEventKind::ThreadGoalCleared { .. }
             | RuntimeEventKind::ThreadGoalContinuationStarted { .. }
-            | RuntimeEventKind::ThreadGoalContinuationSuppressed { .. } => None,
+            | RuntimeEventKind::ThreadGoalContinuationSuppressed { .. }
+            | RuntimeEventKind::ThreadGoalTurnStarted { .. }
+            | RuntimeEventKind::ThreadGoalToolCompleted { .. }
+            | RuntimeEventKind::ThreadGoalReport { .. } => None,
         }?;
         Some(TurnState { turn_id, status })
     })
@@ -169,7 +174,20 @@ fn build_turn_views(events: Vec<RuntimeEvent>) -> Vec<TurnView> {
             RuntimeEventKind::ThreadGoalUpdated { .. }
             | RuntimeEventKind::ThreadGoalCleared { .. }
             | RuntimeEventKind::ThreadGoalContinuationStarted { .. }
-            | RuntimeEventKind::ThreadGoalContinuationSuppressed { .. } => {}
+            | RuntimeEventKind::ThreadGoalContinuationSuppressed { .. }
+            | RuntimeEventKind::ThreadGoalTurnStarted { .. }
+            | RuntimeEventKind::ThreadGoalToolCompleted { .. } => {}
+            RuntimeEventKind::ThreadGoalReport { .. } => {
+                let turn_id = goal_report_turn_id(&event, current_turn_id.as_ref());
+                let synthetic = event.turn_id.is_none() && current_turn_id.is_none();
+                let index = ensure_turn_view(&mut turns, &turn_id);
+                if synthetic {
+                    turns[index].status = TurnStatus::Completed;
+                }
+                if let Some(item) = thread_item_from_event(&event) {
+                    turns[index].items.push(item);
+                }
+            }
         }
     }
 
@@ -359,6 +377,10 @@ fn view_turn_id(event: &RuntimeEvent, current_turn_id: Option<&TurnId>) -> Optio
     current_turn_id.cloned().or_else(|| event.turn_id.clone())
 }
 
+fn goal_report_turn_id(event: &RuntimeEvent, current_turn_id: Option<&TurnId>) -> TurnId {
+    view_turn_id(event, current_turn_id).unwrap_or_else(|| TurnId::new(SYSTEM_GOAL_REPORT_TURN_ID))
+}
+
 fn thread_item_from_event(event: &RuntimeEvent) -> Option<ThreadItem> {
     match &event.kind {
         RuntimeEventKind::AssistantTurn { turn } => {
@@ -384,6 +406,7 @@ fn thread_item_from_event(event: &RuntimeEvent) -> Option<ThreadItem> {
             approval_id,
             tool_name,
             reason,
+            checkpoint_id,
             permission_profile,
             filesystem_sandbox,
             network_sandbox,
@@ -394,6 +417,7 @@ fn thread_item_from_event(event: &RuntimeEvent) -> Option<ThreadItem> {
             approval_id: approval_id.clone(),
             tool_name: tool_name.clone(),
             reason: reason.clone(),
+            checkpoint_id: checkpoint_id.clone(),
             permission_profile: *permission_profile,
             filesystem_sandbox: filesystem_sandbox.clone(),
             network_sandbox: network_sandbox.clone(),
@@ -466,6 +490,10 @@ fn thread_item_from_event(event: &RuntimeEvent) -> Option<ThreadItem> {
             followup: *followup,
             started_turn_id: started_turn_id.clone(),
         }),
+        RuntimeEventKind::ThreadGoalReport { report } => Some(ThreadItem::GoalReport {
+            event_id: Some(event.event_id.clone()),
+            report: report.clone(),
+        }),
         RuntimeEventKind::TurnStarted
         | RuntimeEventKind::TurnCompleted
         | RuntimeEventKind::TurnInterrupted
@@ -481,7 +509,9 @@ fn thread_item_from_event(event: &RuntimeEvent) -> Option<ThreadItem> {
         | RuntimeEventKind::ThreadGoalUpdated { .. }
         | RuntimeEventKind::ThreadGoalCleared { .. }
         | RuntimeEventKind::ThreadGoalContinuationStarted { .. }
-        | RuntimeEventKind::ThreadGoalContinuationSuppressed { .. } => None,
+        | RuntimeEventKind::ThreadGoalContinuationSuppressed { .. }
+        | RuntimeEventKind::ThreadGoalTurnStarted { .. }
+        | RuntimeEventKind::ThreadGoalToolCompleted { .. } => None,
     }
 }
 
@@ -790,6 +820,91 @@ mod tests {
                     text: Some("visible answer".to_string()),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn thread_view_projects_goal_report_as_distinct_item() {
+        let thread_id = ThreadId::new("thread_goal_report_projection");
+        let turn_id = TurnId::new("turn_goal_report_projection");
+        let report = crate::app_server::protocol::ThreadGoalReport {
+            goal_id: "goal_1".to_string(),
+            objective: "ship morning report".to_string(),
+            final_status: crate::app_server::protocol::ThreadGoalStatus::Complete,
+            turns_run: 3,
+            tokens_used: 800,
+            token_budget: Some(1_000),
+            time_used_seconds: 90,
+            changed_files: vec![
+                "src/runtime/goal/runtime.rs".to_string(),
+                "apps/desktop/src/components/TranscriptList.tsx".to_string(),
+            ],
+            pending_approvals_count: 2,
+            summary: "The goal completed after runtime and desktop updates.".to_string(),
+        };
+        let events = vec![
+            RuntimeEvent {
+                event_id: EventId::new("evt_start"),
+                thread_id: thread_id.clone(),
+                turn_id: Some(turn_id.clone()),
+                kind: RuntimeEventKind::TurnStarted,
+            },
+            RuntimeEvent {
+                event_id: EventId::new("evt_goal_report"),
+                thread_id: thread_id.clone(),
+                turn_id: Some(turn_id.clone()),
+                kind: RuntimeEventKind::ThreadGoalReport {
+                    report: report.clone(),
+                },
+            },
+        ];
+
+        let view = build_thread_view(thread_id, ThreadStatus::Idle, None, events, &[]);
+
+        assert_eq!(view.turns.len(), 1);
+        assert_eq!(
+            view.turns[0].items,
+            vec![ThreadItem::GoalReport {
+                event_id: Some(EventId::new("evt_goal_report")),
+                report,
+            }]
+        );
+    }
+
+    #[test]
+    fn thread_view_projects_goal_report_without_turn_id() {
+        let thread_id = ThreadId::new("thread_goal_report_without_turn");
+        let report = crate::app_server::protocol::ThreadGoalReport {
+            goal_id: "goal_1".to_string(),
+            objective: "ship morning report".to_string(),
+            final_status: crate::app_server::protocol::ThreadGoalStatus::Complete,
+            turns_run: 3,
+            tokens_used: 800,
+            token_budget: Some(1_000),
+            time_used_seconds: 90,
+            changed_files: vec!["src/runtime/goal/runtime.rs".to_string()],
+            pending_approvals_count: 0,
+            summary: "The goal completed after an external status update.".to_string(),
+        };
+        let events = vec![RuntimeEvent {
+            event_id: EventId::new("evt_goal_report"),
+            thread_id: thread_id.clone(),
+            turn_id: None,
+            kind: RuntimeEventKind::ThreadGoalReport {
+                report: report.clone(),
+            },
+        }];
+
+        let view = build_thread_view(thread_id, ThreadStatus::Idle, None, events, &[]);
+
+        assert_eq!(view.turns.len(), 1);
+        assert_eq!(view.turns[0].status, TurnStatus::Completed);
+        assert_eq!(
+            view.turns[0].items,
+            vec![ThreadItem::GoalReport {
+                event_id: Some(EventId::new("evt_goal_report")),
+                report,
+            }]
         );
     }
 

@@ -1,9 +1,12 @@
 import "@testing-library/jest-dom/vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentThreadViewer } from "@/components/AgentThreadViewer";
 import type { AgentNode, AgentThreadView, ThreadTokenUsage } from "@/types";
+
+const htmlElementScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+const htmlDivElementScrollIntoView = Object.getOwnPropertyDescriptor(HTMLDivElement.prototype, "scrollIntoView");
 
 const agent: AgentNode = {
   threadId: "thread-review",
@@ -85,6 +88,11 @@ const tokenUsage: ThreadTokenUsage = {
 };
 
 describe("AgentThreadViewer", () => {
+  afterEach(() => {
+    restorePropertyDescriptor(HTMLElement.prototype, "scrollIntoView", htmlElementScrollIntoView);
+    restorePropertyDescriptor(HTMLDivElement.prototype, "scrollIntoView", htmlDivElementScrollIntoView);
+  });
+
   it("opens as a tabbed dialog and keeps tool output off the default conversation tab", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
@@ -121,4 +129,108 @@ describe("AgentThreadViewer", () => {
     expect(screen.getByText("last turn")).toBeInTheDocument();
     expect(screen.getByText("1,050")).toBeInTheDocument();
   });
+
+  it("follows running transcript updates until the user pauses and jumps to latest", async () => {
+    const user = userEvent.setup();
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView
+    });
+    Object.defineProperty(HTMLDivElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView
+    });
+    const { rerender } = render(<AgentThreadViewer agent={agent} view={view} onClose={vi.fn()} />);
+
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+    scrollIntoView.mockClear();
+
+    const liveView = withAssistantMessage(view, "assistant-live-1", "Live child answer");
+    rerender(<AgentThreadViewer agent={agent} view={liveView} onClose={vi.fn()} />);
+
+    expect(screen.getByText("Live child answer")).toBeInTheDocument();
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: "Jump to latest" })).not.toBeInTheDocument();
+    scrollIntoView.mockClear();
+
+    const grownView = withMessageBody(liveView, "assistant-live-1", "Live child answer with streamed tail");
+    rerender(<AgentThreadViewer agent={agent} view={grownView} onClose={vi.fn()} />);
+
+    expect(screen.getByText("Live child answer with streamed tail")).toBeInTheDocument();
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+
+    const viewport = getScrollViewport();
+    setScrollMetrics(viewport, { scrollHeight: 1000, clientHeight: 300, scrollTop: 100 });
+    fireEvent.scroll(viewport);
+
+    expect(screen.getByRole("button", { name: "Jump to latest" })).toBeInTheDocument();
+    scrollIntoView.mockClear();
+
+    const pausedView = withMessageBody(
+      grownView,
+      "assistant-live-1",
+      "Live child answer with streamed tail while paused"
+    );
+    rerender(<AgentThreadViewer agent={agent} view={pausedView} onClose={vi.fn()} />);
+
+    expect(screen.getByText("Live child answer with streamed tail while paused")).toBeInTheDocument();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Jump to latest" }));
+
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: "Jump to latest" })).not.toBeInTheDocument();
+  });
 });
+
+function withAssistantMessage(source: AgentThreadView, id: string, body: string): AgentThreadView {
+  return {
+    ...source,
+    transcript: [
+      ...source.transcript,
+      {
+        id,
+        role: "assistant",
+        body,
+        timestamp: "now",
+        threadId: source.threadId,
+        turnId: id
+      }
+    ]
+  };
+}
+
+function withMessageBody(source: AgentThreadView, id: string, body: string): AgentThreadView {
+  return {
+    ...source,
+    transcript: source.transcript.map((message) => (message.id === id ? { ...message, body } : message))
+  };
+}
+
+function getScrollViewport() {
+  const viewport = document.querySelector("[data-radix-scroll-area-viewport]");
+  if (!(viewport instanceof HTMLElement)) {
+    throw new Error("Scroll viewport not found");
+  }
+  return viewport;
+}
+
+function setScrollMetrics(
+  element: HTMLElement,
+  metrics: { scrollHeight: number; clientHeight: number; scrollTop: number }
+) {
+  Object.defineProperties(element, {
+    scrollHeight: { configurable: true, value: metrics.scrollHeight },
+    clientHeight: { configurable: true, value: metrics.clientHeight },
+    scrollTop: { configurable: true, value: metrics.scrollTop, writable: true }
+  });
+}
+
+function restorePropertyDescriptor(target: object, key: "scrollIntoView", descriptor: PropertyDescriptor | undefined) {
+  if (descriptor) {
+    Object.defineProperty(target, key, descriptor);
+    return;
+  }
+  delete (target as { scrollIntoView?: unknown }).scrollIntoView;
+}

@@ -1,11 +1,14 @@
 import type {
   AgentTreeResponse,
+  ApprovalsListResponse,
   BackendRuntimeEvent,
   ChatGptDeviceCode,
+  CheckpointRestoreResponse,
   EventsReplayResponse,
   GitHubCopilotDeviceCode,
   ModelCapabilities,
   ModelRef,
+  PendingApprovalItem,
   ProviderConfigView,
   ProviderDescriptor,
   ProviderSettingsResponse,
@@ -25,6 +28,8 @@ import type {
   ThreadReadResponse,
   ThreadRecord,
   ThreadCompactResponse,
+  ThreadForkParams,
+  ThreadForkResponse,
   ThreadGoalClearResponse,
   ThreadGoalGetResponse,
   ThreadGoalSetResponse,
@@ -60,6 +65,7 @@ const mockSnapshot: WorkbenchSnapshot = {
   ],
   activeProjectId: "project-exagent",
   activeSessionId: "session-desktop",
+  activeTurnId: null,
   transcript: [
     {
       id: "message-system",
@@ -129,6 +135,30 @@ const mockSnapshot: WorkbenchSnapshot = {
   selectedModel: null,
   selectedThinkingMode: null
 };
+
+const mockPendingApprovalsSeed: PendingApprovalItem[] = [
+  {
+    thread_id: "session-desktop",
+    approval_id: "approval-preview-command",
+    kind: "command",
+    summary: "Run desktop test suite",
+    detail: "npm --prefix apps/desktop test",
+    goal_id: "goal-preview",
+    requested_at_ms: Date.now() - 90_000,
+    checkpoint_id: "checkpoint-preview-command"
+  },
+  {
+    thread_id: "session-worker-1",
+    approval_id: "approval-preview-patch",
+    kind: "patch",
+    summary: "Apply settings panel patch",
+    detail: "diff --git a/apps/desktop/src/components/SettingsDialog.tsx b/apps/desktop/src/components/SettingsDialog.tsx",
+    goal_id: null,
+    requested_at_ms: Date.now() - 45_000,
+    checkpoint_id: null
+  }
+];
+let mockPendingApprovals: PendingApprovalItem[] = mockPendingApprovalsSeed.map((item) => ({ ...item }));
 
 function mockCapabilities(supportsThinking: boolean, supportsTools = true): ModelCapabilities {
   return {
@@ -366,6 +396,7 @@ let mockRuntimeSettings: RuntimeSettingsResponse = {
 };
 
 let mockThreadSequence = 1;
+const mockThreadReads = new Map<string, ThreadReadResponse>();
 
 function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -508,6 +539,11 @@ async function fallbackSnapshot(): Promise<WorkbenchSnapshot> {
 }
 
 function mockThreadRead(threadId: string): ThreadReadResponse {
+  const stored = mockThreadReads.get(threadId);
+  if (stored) {
+    return stored;
+  }
+
   if (threadId === "session-desktop") {
     return {
       thread: {
@@ -582,6 +618,7 @@ export async function getWorkbenchSnapshot(): Promise<WorkbenchSnapshot> {
     sessions: sessions.map(threadRecordToSession),
     activeProjectId: activeProject?.id ?? null,
     activeSessionId: sessions[0]?.id ?? null,
+    activeTurnId: null,
     transcript: [],
     events: [],
     changedFiles: [],
@@ -866,9 +903,11 @@ export async function listThreads(
         archived_at: null,
         pinned: false,
         status: session.status,
-        created_at: 0,
-        updated_at: 0,
-        last_opened_at: null
+        created_at: session.createdAt ?? 0,
+        updated_at: session.createdAt ?? 0,
+        last_opened_at: null,
+        fork_parent_thread_id: session.forkParentThreadId ?? null,
+        fork_point_turn_id: session.forkPointTurnId ?? null
       }));
   }
 
@@ -910,7 +949,8 @@ export async function startThread(projectId: string): Promise<ThreadStartRespons
           hour: "2-digit",
           minute: "2-digit"
         }).format(new Date(now)),
-        status: "idle"
+        status: "idle",
+        createdAt: now
       },
       ...mockSnapshot.sessions
     ];
@@ -941,6 +981,65 @@ export async function resumeThread(projectId: string, threadId: string): Promise
   }
 
   return invokeCommand<ThreadReadResponse>("thread_resume", { projectId, threadId });
+}
+
+export async function forkThread(
+  projectId: string,
+  params: ThreadForkParams
+): Promise<ThreadForkResponse> {
+  if (!isTauriRuntime()) {
+    const parent = mockSnapshot.sessions.find(
+      (session) => session.projectId === projectId && session.id === params.threadId
+    );
+    if (!parent) {
+      throw new Error("Thread not found");
+    }
+
+    const now = Date.now();
+    const id = `session-fork-${mockThreadSequence++}`;
+    const title = `${parent.title} fork`;
+    mockSnapshot.sessions = [
+      ...mockSnapshot.sessions,
+      {
+        id,
+        projectId,
+        title,
+        updatedAt: new Intl.DateTimeFormat(undefined, {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit"
+        }).format(new Date(now)),
+        status: "idle",
+        createdAt: now,
+        forkParentThreadId: params.threadId,
+        forkPointTurnId: params.atTurnId
+      }
+    ];
+
+    const parentRead = mockThreadRead(params.threadId);
+    const forkPointIndex = parentRead.thread.turns.findIndex((turn) => turn.id === params.atTurnId);
+    mockThreadReads.set(id, {
+      thread: {
+        id,
+        status: "idle",
+        active_turn: null,
+        turns: forkPointIndex >= 0 ? parentRead.thread.turns.slice(0, forkPointIndex + 1) : []
+      }
+    });
+
+    return {
+      new_thread_id: id,
+      parent_thread_id: params.threadId,
+      fork_point_turn_id: params.atTurnId
+    };
+  }
+
+  return invokeCommand<ThreadForkResponse>("thread_fork", {
+    projectId,
+    threadId: params.threadId,
+    atTurnId: params.atTurnId
+  });
 }
 
 export async function compactThread(projectId: string, threadId: string): Promise<ThreadCompactResponse> {
@@ -1001,6 +1100,30 @@ export async function agentTree(projectId: string, threadId: string): Promise<Ag
   }
 
   return invokeCommand<AgentTreeResponse>("agent_tree", { projectId, threadId });
+}
+
+export async function listApprovals(projectId: string): Promise<ApprovalsListResponse> {
+  if (!isTauriRuntime()) {
+    return { approvals: mockPendingApprovals.map((item) => ({ ...item })) };
+  }
+
+  return invokeCommand<ApprovalsListResponse>("approvals_list", { projectId });
+}
+
+export async function restoreCheckpoint(
+  projectId: string,
+  checkpointId: string
+): Promise<CheckpointRestoreResponse> {
+  if (!isTauriRuntime()) {
+    return {
+      workspace_root: "",
+      checkpoint_id: checkpointId,
+      status: "restored",
+      message: "Checkpoint restore skipped in browser preview."
+    };
+  }
+
+  return invokeCommand<CheckpointRestoreResponse>("checkpoint_restore", { projectId, checkpointId });
 }
 
 export type StartTurnOptions = {
@@ -1102,6 +1225,16 @@ export async function submitApprovalDecision(
   decision: "approved" | "denied",
   note?: string
 ) {
+  if (!isTauriRuntime()) {
+    mockPendingApprovals = mockPendingApprovals.filter((item) => item.approval_id !== approvalId);
+    return {
+      thread_id: threadId,
+      approval_id: approvalId,
+      decision,
+      note: note ?? null
+    };
+  }
+
   return invokeCommand("approval_decision", {
     projectId,
     threadId,
@@ -1362,7 +1495,10 @@ export function threadRecordToSession(record: ThreadRecord): SessionSummary {
     updatedAt: formatTimestamp(record.updated_at),
     status: mapThreadStatus(record),
     pinned: record.pinned,
-    archived: record.archived_at !== null
+    archived: record.archived_at !== null,
+    createdAt: record.created_at,
+    forkParentThreadId: record.fork_parent_thread_id ?? null,
+    forkPointTurnId: record.fork_point_turn_id ?? null
   };
 }
 
@@ -1521,6 +1657,8 @@ export const exagentClient = {
   isDesktopRuntime,
   mockSubagentEvents,
   mockAgentTree,
+  listApprovals,
+  restoreCheckpoint,
   interruptTurn,
   importImageFiles,
   importImagePaths,
@@ -1538,6 +1676,7 @@ export const exagentClient = {
   renameProject,
   renameThread,
   compactThread,
+  forkThread,
   replayEvents,
   resumeThread,
   saveProviderSettings,

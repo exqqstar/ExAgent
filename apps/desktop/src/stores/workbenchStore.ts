@@ -11,17 +11,20 @@ import type {
   AgentNode,
   AgentRunStatus,
   AgentThreadView,
+  ApprovalActionStatus,
   BackendRuntimeEvent,
   ComposerAttachment,
   DraftThreadGoal,
   InputModality,
   ModelRef,
+  PendingApprovalItem,
   ProviderSettingsResponse,
   ProjectSummary,
   RuntimeEvent,
   RuntimeSettingsSaveRequest,
   SessionSummary,
   ThreadGoal,
+  ThreadGoalReport,
   ThreadGoalStatus,
   ThinkingMode,
   TurnInput,
@@ -35,8 +38,32 @@ import type {
 
 type Unlisten = () => void;
 const DEFAULT_PROVIDER_ID = "openai";
+const AGENT_TREE_REFRESH_DEBOUNCE_MS = 300;
+const APPROVALS_REFRESH_DEBOUNCE_MS = 300;
 let openSessionRequestSequence = 0;
 let openAgentThreadRequestSequence = 0;
+type AgentTreeRefreshContext = { projectId: string; threadId: string; sessionGeneration: number };
+let agentTreeRefreshTimeoutId: ReturnType<typeof setTimeout> | null = null;
+let pendingAgentTreeRefreshContext: AgentTreeRefreshContext | null = null;
+type ApprovalsRefreshContext = { projectId: string; sessionGeneration: number };
+let approvalsRefreshTimeoutId: ReturnType<typeof setTimeout> | null = null;
+let pendingApprovalsRefreshContext: ApprovalsRefreshContext | null = null;
+let branchCompareRequestSequence = 0;
+
+type ApprovalsStatus = "idle" | "loading" | "ready" | "error" | "submitting";
+
+type BranchCompareView = {
+  parentThreadId: string;
+  childThreadId: string;
+  parentTitle: string;
+  childTitle: string;
+  parentTranscript: TranscriptMessage[];
+  childTranscript: TranscriptMessage[];
+  sharedTurnCount: number;
+  forkPointTurnId: string;
+  loading: boolean;
+  error: string | null;
+};
 
 type WorkbenchState = WorkbenchSnapshot & {
   loading: boolean;
@@ -56,6 +83,14 @@ type WorkbenchState = WorkbenchSnapshot & {
   selectedAgentView: AgentThreadView | null;
   selectedAgentUnlisten: Unlisten | null;
   selectedAgentAppliedEventIds: Set<string>;
+  pendingApprovals: PendingApprovalItem[];
+  approvalsStatus: ApprovalsStatus;
+  approvalsError: string | null;
+  approvalActionStatus: ApprovalActionStatus | null;
+  approvalInboxOpen: boolean;
+  selectedApprovalIds: Set<string>;
+  compareThreadId: string | null;
+  compareView: BranchCompareView | null;
   loadWorkbench: () => Promise<void>;
   addProject: () => Promise<void>;
   renameProject: (projectId: string, name: string) => Promise<void>;
@@ -70,18 +105,29 @@ type WorkbenchState = WorkbenchSnapshot & {
   sendPrompt: () => Promise<void>;
   interruptActiveTurn: () => Promise<void>;
   compactActiveThread: () => Promise<void>;
+  forkThreadFromTurn: (threadId: string, turnId: string) => Promise<void>;
   openThreadGoalEditor: () => void;
   closeThreadGoalEditor: () => void;
   saveThreadGoal: (objective: string, tokenBudget?: number | null) => Promise<void>;
   setThreadGoalStatus: (status: Extract<ThreadGoalStatus, "active" | "paused" | "blocked" | "complete">) => Promise<void>;
   clearThreadGoal: () => Promise<void>;
   refreshAgentTree: () => Promise<void>;
+  refreshApprovals: () => Promise<void>;
+  setApprovalInboxOpen: (open: boolean) => void;
+  toggleApprovalSelection: (approvalId: string) => void;
+  clearApprovalSelection: () => void;
+  approveInboxApproval: (item: PendingApprovalItem) => Promise<void>;
+  rejectInboxApproval: (item: PendingApprovalItem) => Promise<void>;
+  approveSelectedApprovals: () => Promise<void>;
+  rejectAndRollbackApproval: (item: PendingApprovalItem) => Promise<void>;
   submitApproval: (message: TranscriptMessage, decision: "approved" | "denied") => Promise<void>;
   renameSession: (sessionId: string, title: string) => Promise<void>;
   archiveSession: (sessionId: string) => Promise<void>;
   unarchiveSession: (projectId: string, sessionId: string) => Promise<void>;
   openArchivedSession: (projectId: string, sessionId: string) => Promise<void>;
   pinSession: (sessionId: string, pinned: boolean) => Promise<void>;
+  openBranchCompare: (sessionId: string, projectId?: string) => Promise<void>;
+  closeCompareView: () => void;
   setComposerValue: (composerValue: string) => void;
   addComposerAttachments: (paths: string[]) => void;
   removeComposerAttachment: (id: string) => void;
@@ -105,6 +151,7 @@ const emptySnapshot: WorkbenchSnapshot = {
   sessions: [],
   activeProjectId: null,
   activeSessionId: null,
+  activeTurnId: null,
   transcript: [],
   events: [],
   changedFiles: [],
@@ -141,8 +188,18 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   selectedAgentView: null,
   selectedAgentUnlisten: null,
   selectedAgentAppliedEventIds: new Set(),
+  pendingApprovals: [],
+  approvalsStatus: "idle",
+  approvalsError: null,
+  approvalActionStatus: null,
+  approvalInboxOpen: false,
+  selectedApprovalIds: new Set(),
+  compareThreadId: null,
+  compareView: null,
 
   async loadWorkbench() {
+    cancelPendingAgentTreeRefresh();
+    cancelPendingApprovalsRefresh();
     resetSelectedAgentThread(get, set);
     set({ loading: true, error: null });
     try {
@@ -159,6 +216,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       });
       set({
         ...snapshot,
+        activeTurnId: snapshot.activeTurnId ?? null,
         runtimeSettings,
         providerSettings,
         selectedModel: normalized.selectedModel,
@@ -166,6 +224,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         activeProviderId: normalized.activeProviderId,
         draftGoal: null,
         appliedRuntimeEventIds: new Set(),
+        compareThreadId: null,
+        compareView: null,
         loading: false,
         error: null
       });
@@ -175,6 +235,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         // Browser preview: no live runtime, so seed a sample agent tree.
         set({ agents: agentForestFromTreeResponse(exagentClient.mockAgentTree(snapshot.activeSessionId)) });
       }
+      await get().refreshApprovals();
     } catch (error) {
       set({
         ...emptySnapshot,
@@ -182,6 +243,13 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         providerSettings: null,
         draftGoal: null,
         appliedRuntimeEventIds: new Set(),
+        pendingApprovals: [],
+        approvalsStatus: "idle",
+        approvalsError: null,
+        approvalActionStatus: null,
+        selectedApprovalIds: new Set(),
+        compareThreadId: null,
+        compareView: null,
         loading: false,
         error: errorMessage(error)
       });
@@ -205,6 +273,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         sessions: sessions.map(exagentClient.threadRecordToSession),
         activeProjectId: project.id,
         activeSessionId: sessions[0]?.id ?? null,
+        activeTurnId: null,
         transcript: [],
         draftGoal: null,
         events: [],
@@ -275,11 +344,14 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       set({
         sessions: threads.map(exagentClient.threadRecordToSession),
         activeSessionId: null,
+        activeTurnId: null,
         transcript: [],
         events: [],
         changedFiles: [],
         draftGoal: null,
         appliedRuntimeEventIds: new Set(),
+        compareThreadId: null,
+        compareView: null,
         error: null
       });
     } catch (error) {
@@ -301,8 +373,9 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     if (!project) {
       return;
     }
+    cancelPendingApprovalsRefresh();
     resetSelectedAgentThread(get, set);
-    set({ loading: true, error: null });
+    set({ loading: true, error: null, compareThreadId: null, compareView: null });
     try {
       const threads = get().search
         ? await exagentClient.listThreads(projectId, false, get().search)
@@ -316,16 +389,26 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         sessions: threads.map(exagentClient.threadRecordToSession),
         activeProjectId: projectId,
         activeSessionId: targetSessionId,
+        activeTurnId: null,
         transcript: [],
         events: [],
         changedFiles: [],
         draftGoal: null,
         cwd: project.path,
         appliedRuntimeEventIds: new Set(),
+        pendingApprovals: [],
+        approvalsStatus: "idle",
+        approvalsError: null,
+        approvalActionStatus: null,
+        selectedApprovalIds: new Set(),
+        compareThreadId: null,
+        compareView: null,
         loading: false
       });
       if (targetSessionId) {
         await get().openSession(targetSessionId);
+      } else {
+        await get().refreshApprovals();
       }
     } catch (error) {
       set({ loading: false, error: errorMessage(error) });
@@ -337,11 +420,14 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     if (!projectId) {
       return;
     }
+    cancelPendingAgentTreeRefresh();
+    cancelPendingApprovalsRefresh();
     const requestId = ++openSessionRequestSequence;
     resetSelectedAgentThread(get, set);
     get().eventUnlisten?.();
     set({
       activeSessionId: sessionId,
+      activeTurnId: null,
       loading: true,
       error: null,
       eventUnlisten: null,
@@ -349,7 +435,14 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       events: [],
       draftGoal: null,
       agents: [],
-      appliedRuntimeEventIds: new Set()
+      pendingApprovals: [],
+      approvalsStatus: "idle",
+      approvalsError: null,
+      approvalActionStatus: null,
+      selectedApprovalIds: new Set(),
+      appliedRuntimeEventIds: new Set(),
+      compareThreadId: null,
+      compareView: null
     });
 
     const isCurrentOpen = () =>
@@ -364,6 +457,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     let unlistenCalled = false;
     const cleanupUnlisten = () => {
       liveEventBatcher.cancel();
+      cancelPendingAgentTreeRefresh({ projectId, threadId: sessionId, sessionGeneration: requestId });
+      cancelPendingApprovalsRefresh({ projectId, sessionGeneration: requestId });
       if (!unlisten || unlistenCalled) {
         return;
       }
@@ -381,6 +476,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       const readStatus = sessionStatusFromThreadStatus(read.thread.status);
       set({
         sessions: updateSessionStatus(get().sessions, sessionId, readStatus),
+        activeTurnId: activeTurnIdFromThread(read.thread),
         transcript: threadViewToTranscript(read.thread),
         currentGoal: read.thread.goal ?? null,
         agents: buildAgentForest(sessionId, rootAgentStatus(readStatus), agentRecordsFromThreadView(read.thread)),
@@ -396,6 +492,12 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
           return;
         }
         if (event.thread_id !== sessionId) {
+          if (replayComplete && shouldRefreshAgentTreeAfterEvent(event)) {
+            scheduleAgentTreeRefresh(get, set);
+          }
+          if (replayComplete && shouldRefreshApprovalsAfterEvent(event)) {
+            scheduleApprovalsRefresh(get, set);
+          }
           return;
         }
         if (!replayComplete) {
@@ -445,6 +547,11 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       }
       const sessions = updateSessionStatus(get().sessions, sessionId, sessionStatus);
       let agents = buildAgentForest(sessionId, rootAgentStatus(sessionStatus), agentRecords);
+      const activeTurnId = applyActiveTurnEvents(
+        activeTurnIdFromThread(read.thread),
+        [...replay.events, ...inspectorLiveEvents],
+        sessionId
+      );
       const currentGoal = applyGoalRuntimeEvents(read.thread.goal ?? null, [
         ...replay.events,
         ...inspectorLiveEvents
@@ -469,6 +576,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
 
       set({
         transcript: applyTranscriptEvents(threadViewToTranscript(read.thread), bufferedEvents, representedEventIds),
+        activeTurnId,
         currentGoal: applyGoalRuntimeEvents(currentGoal, bufferedEvents),
         sessions,
         events: [
@@ -481,6 +589,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         tokenUsageByThreadId,
         loading: false
       });
+      await get().refreshApprovals();
     } catch (error) {
       cleanupUnlisten();
       if (isCurrentOpen()) {
@@ -500,6 +609,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       return null;
     }
     openSessionRequestSequence += 1;
+    cancelPendingAgentTreeRefresh();
+    cancelPendingApprovalsRefresh();
     resetSelectedAgentThread(get, set);
     get().eventUnlisten?.();
 
@@ -517,7 +628,9 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         currentGoal: null,
         draftGoal: null,
         goalEditorOpen: false,
-        appliedRuntimeEventIds: new Set()
+        appliedRuntimeEventIds: new Set(),
+        compareThreadId: null,
+        compareView: null
       });
       try {
         const threads = get().search
@@ -528,6 +641,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
           sessions: threads.map(exagentClient.threadRecordToSession),
           activeProjectId: targetProjectId,
           activeSessionId: null,
+          activeTurnId: null,
           transcript: [],
           currentGoal: null,
           draftGoal: null,
@@ -537,9 +651,17 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
           cwd: project?.path ?? get().cwd,
           eventUnlisten: null,
           appliedRuntimeEventIds: new Set(),
+          pendingApprovals: [],
+          approvalsStatus: "idle",
+          approvalsError: null,
+          approvalActionStatus: null,
+          selectedApprovalIds: new Set(),
+          compareThreadId: null,
+          compareView: null,
           loading: false,
           error: null
         });
+        await get().refreshApprovals();
       } catch (error) {
         set({ loading: false, error: errorMessage(error) });
       }
@@ -548,6 +670,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
 
     set({
       activeSessionId: null,
+      activeTurnId: null,
       transcript: [],
       currentGoal: null,
       draftGoal: null,
@@ -559,6 +682,13 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       composerPlanMode: false,
       eventUnlisten: null,
       appliedRuntimeEventIds: new Set(),
+      pendingApprovals: [],
+      approvalsStatus: "idle",
+      approvalsError: null,
+      approvalActionStatus: null,
+      selectedApprovalIds: new Set(),
+      compareThreadId: null,
+      compareView: null,
       error: null
     });
     return null;
@@ -640,7 +770,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         selectedModel: normalized.selectedModel,
         selectedThinkingMode: normalized.selectedThinkingMode
       });
-      await exagentClient.startTurn(
+      const started = await exagentClient.startTurn(
         projectId,
         threadId,
         prompt,
@@ -652,6 +782,16 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
           ...(inputForTurn.length > 0 ? { input: inputForTurn } : {})
         }
       );
+      if (get().activeProjectId === projectId && get().activeSessionId === threadId) {
+        set({
+          activeTurnId: started.turn.id,
+          transcript: get().transcript.map((message) =>
+            message.id === optimisticMessage.id
+              ? { ...message, turnId: started.turn.id, turnStatus: started.turn.status }
+              : message
+          )
+        });
+      }
     } catch (error) {
       const current = get();
       const shouldRestoreDraft = current.composerValue.length === 0 && current.composerAttachments.length === 0;
@@ -709,6 +849,28 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       if (get().activeProjectId === projectId && get().activeSessionId === threadId) {
         set({ error: errorMessage(error) });
       }
+    }
+  },
+
+  async forkThreadFromTurn(threadId: string, turnId: string) {
+    const projectId = get().activeProjectId;
+    if (!projectId || !threadId || !turnId) {
+      return;
+    }
+    try {
+      const forked = await exagentClient.forkThread(projectId, {
+        threadId,
+        atTurnId: turnId
+      });
+      const threads = await exagentClient.listThreads(projectId, false, null);
+      set({
+        search: "",
+        sessions: threads.map(exagentClient.threadRecordToSession),
+        error: null
+      });
+      await get().openSession(forked.new_thread_id);
+    } catch (error) {
+      set({ error: errorMessage(error) });
     }
   },
 
@@ -789,38 +951,198 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   },
 
   async refreshAgentTree() {
-    const projectId = get().activeProjectId;
-    const threadId = get().activeSessionId;
-    if (!projectId || !threadId) {
+    const context = currentAgentTreeRefreshContext(get);
+    if (!context) {
       return;
     }
-    try {
-      const agents = agentForestFromTreeResponse(await exagentClient.agentTree(projectId, threadId));
-      if (get().activeProjectId === projectId && get().activeSessionId === threadId) {
-        set({ agents });
+    await refreshAgentTreeForContext(get, set, context);
+  },
+
+  async refreshApprovals() {
+    const context = currentApprovalsRefreshContext(get);
+    if (!context) {
+      set({ pendingApprovals: [], approvalsStatus: "idle", approvalsError: null, selectedApprovalIds: new Set() });
+      return;
+    }
+    await refreshApprovalsForContext(get, set, context);
+  },
+
+  setApprovalInboxOpen(open: boolean) {
+    set({ approvalInboxOpen: open });
+    if (open && get().approvalsStatus !== "ready" && get().approvalsStatus !== "submitting") {
+      void get().refreshApprovals();
+    }
+  },
+
+  toggleApprovalSelection(approvalId: string) {
+    const selectedApprovalIds = new Set(get().selectedApprovalIds);
+    if (selectedApprovalIds.has(approvalId)) {
+      selectedApprovalIds.delete(approvalId);
+    } else {
+      selectedApprovalIds.add(approvalId);
+    }
+    set({ selectedApprovalIds });
+  },
+
+  clearApprovalSelection() {
+    set({ selectedApprovalIds: new Set() });
+  },
+
+  async approveInboxApproval(item: PendingApprovalItem) {
+    await submitInboxApprovalDecision(get, set, item, "approved", "desktop approved");
+  },
+
+  async rejectInboxApproval(item: PendingApprovalItem) {
+    await submitInboxApprovalDecision(get, set, item, "denied", "desktop denied");
+  },
+
+  async approveSelectedApprovals() {
+    const context = currentApprovalsRefreshContext(get);
+    if (!context) {
+      return;
+    }
+    const selectedIds = new Set(get().selectedApprovalIds);
+    const selected = get().pendingApprovals.filter((item) => selectedIds.has(item.approval_id));
+    if (selected.length === 0) {
+      return;
+    }
+
+    set({ approvalsStatus: "submitting", approvalsError: null, approvalActionStatus: null });
+    let completed = 0;
+    for (const item of selected) {
+      try {
+        await exagentClient.submitApprovalDecision(
+          context.projectId,
+          item.thread_id,
+          undefined,
+          item.approval_id,
+          "approved",
+          "desktop approved"
+        );
+        if (!isActiveApprovalsRefreshContext(get, context)) {
+          return;
+        }
+        completed += 1;
+        set({
+          pendingApprovals: get().pendingApprovals.filter((pending) => pending.approval_id !== item.approval_id),
+          selectedApprovalIds: removeApprovalId(get().selectedApprovalIds, item.approval_id)
+        });
+      } catch (error) {
+        if (!isActiveApprovalsRefreshContext(get, context)) {
+          return;
+        }
+        set({
+          approvalsStatus: "error",
+          approvalsError: null,
+          approvalActionStatus: {
+            type: "batch_partial_failed",
+            completed,
+            total: selected.length,
+            approval_id: item.approval_id,
+            error: errorMessage(error)
+          }
+        });
+        await refreshApprovalsForContext(get, set, context);
+        return;
       }
-    } catch {
-      // Keep the local event-derived tree when the app-server projection is unavailable.
+    }
+
+    if (!isActiveApprovalsRefreshContext(get, context)) {
+      return;
+    }
+    set({
+      approvalsStatus: "ready",
+      approvalActionStatus: { type: "batch_approved", count: completed },
+      approvalsError: null,
+      selectedApprovalIds: new Set()
+    });
+    await refreshApprovalsForContext(get, set, context);
+  },
+
+  async rejectAndRollbackApproval(item: PendingApprovalItem) {
+    const context = currentApprovalsRefreshContext(get);
+    if (!context || !item.checkpoint_id) {
+      set({
+        approvalsStatus: "error",
+        approvalsError: null,
+        approvalActionStatus: { type: "rollback_unavailable", approval_id: item.approval_id }
+      });
+      return;
+    }
+
+    set({ approvalsStatus: "submitting", approvalsError: null, approvalActionStatus: null });
+    let denied = false;
+    try {
+      await exagentClient.submitApprovalDecision(
+        context.projectId,
+        item.thread_id,
+        undefined,
+        item.approval_id,
+        "denied",
+        "desktop denied"
+      );
+      denied = true;
+      await exagentClient.restoreCheckpoint(context.projectId, item.checkpoint_id);
+      if (!isActiveApprovalsRefreshContext(get, context)) {
+        return;
+      }
+      set({
+        pendingApprovals: get().pendingApprovals.filter((pending) => pending.approval_id !== item.approval_id),
+        selectedApprovalIds: removeApprovalId(get().selectedApprovalIds, item.approval_id),
+        approvalsStatus: "ready",
+        approvalsError: null,
+        approvalActionStatus: {
+          type: "rollback_restored",
+          approval_id: item.approval_id,
+          checkpoint_id: item.checkpoint_id
+        }
+      });
+      await refreshApprovalsForContext(get, set, context);
+    } catch (error) {
+      if (!isActiveApprovalsRefreshContext(get, context)) {
+        return;
+      }
+      if (denied) {
+        set({
+          pendingApprovals: get().pendingApprovals.filter((pending) => pending.approval_id !== item.approval_id),
+          selectedApprovalIds: removeApprovalId(get().selectedApprovalIds, item.approval_id),
+          approvalsStatus: "error",
+          approvalsError: null,
+          approvalActionStatus: {
+            type: "rollback_failed_after_reject",
+            approval_id: item.approval_id,
+            error: errorMessage(error)
+          }
+        });
+        await refreshApprovalsForContext(get, set, context);
+      } else {
+        set({ approvalsStatus: "error", approvalsError: errorMessage(error), approvalActionStatus: null });
+      }
     }
   },
 
   async submitApproval(message: TranscriptMessage, decision: "approved" | "denied") {
-    const projectId = get().activeProjectId;
+    const context = currentApprovalsRefreshContext(get);
     const threadId = message.threadId ?? get().activeSessionId;
-    if (!projectId || !threadId || !message.approvalId) {
+    if (!context || !threadId || !message.approvalId) {
       return;
     }
     try {
       await exagentClient.submitApprovalDecision(
-        projectId,
+        context.projectId,
         threadId,
         message.turnId,
         message.approvalId,
         decision,
         decision === "approved" ? "desktop approved" : "desktop denied"
       );
+      if (isActiveApprovalsRefreshContext(get, context)) {
+        void refreshApprovalsForContext(get, set, context);
+      }
     } catch (error) {
-      set({ error: errorMessage(error) });
+      if (isActiveApprovalsRefreshContext(get, context)) {
+        set({ error: errorMessage(error) });
+      }
     }
   },
 
@@ -844,17 +1166,26 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   async archiveSession(sessionId: string) {
     try {
       await exagentClient.archiveThread(sessionId);
-      const active = get().activeSessionId === sessionId;
+      const current = get();
+      const active = current.activeSessionId === sessionId;
+      const compareReferencesArchivedThread =
+        current.compareThreadId === sessionId || compareViewReferencesThread(current.compareView, sessionId);
+      if (compareReferencesArchivedThread) {
+        branchCompareRequestSequence += 1;
+      }
       if (active) {
         resetSelectedAgentThread(get, set);
       }
       set({
-        sessions: get().sessions.filter((session) => session.id !== sessionId),
-        activeSessionId: active ? null : get().activeSessionId,
-        transcript: active ? [] : get().transcript,
-        events: active ? [] : get().events,
-        changedFiles: active ? [] : get().changedFiles,
-        appliedRuntimeEventIds: active ? new Set() : get().appliedRuntimeEventIds
+        sessions: current.sessions.filter((session) => session.id !== sessionId),
+        activeSessionId: active ? null : current.activeSessionId,
+        activeTurnId: active ? null : current.activeTurnId,
+        transcript: active ? [] : current.transcript,
+        events: active ? [] : current.events,
+        changedFiles: active ? [] : current.changedFiles,
+        appliedRuntimeEventIds: active ? new Set() : current.appliedRuntimeEventIds,
+        compareThreadId: compareReferencesArchivedThread ? null : current.compareThreadId,
+        compareView: compareReferencesArchivedThread ? null : current.compareView
       });
     } catch (error) {
       set({ error: errorMessage(error) });
@@ -898,6 +1229,82 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     } catch (error) {
       set({ error: errorMessage(error) });
     }
+  },
+
+  async openBranchCompare(sessionId: string, projectId?: string) {
+    if (projectId && projectId !== get().activeProjectId) {
+      await get().selectProject(projectId, sessionId);
+      if (get().activeProjectId !== projectId) {
+        return;
+      }
+    }
+
+    const activeProjectId = get().activeProjectId;
+    const childSession = get().sessions.find((session) => session.id === sessionId);
+    const parentThreadId = childSession?.forkParentThreadId;
+    const forkPointTurnId = childSession?.forkPointTurnId;
+    if (!activeProjectId || !childSession || !parentThreadId || !forkPointTurnId) {
+      return;
+    }
+
+    const parentSession = get().sessions.find((session) => session.id === parentThreadId);
+    const requestId = ++branchCompareRequestSequence;
+    const loadingView: BranchCompareView = {
+      parentThreadId,
+      childThreadId: childSession.id,
+      parentTitle: parentSession?.title ?? parentThreadId,
+      childTitle: childSession.title,
+      parentTranscript: [],
+      childTranscript: [],
+      sharedTurnCount: 0,
+      forkPointTurnId,
+      loading: true,
+      error: null
+    };
+    set({
+      compareThreadId: childSession.id,
+      compareView: loadingView,
+      error: null
+    });
+
+    const isCurrentCompare = () =>
+      branchCompareRequestSequence === requestId && get().compareThreadId === childSession.id;
+
+    try {
+      const [parentRead, childRead] = await Promise.all([
+        exagentClient.readThread(activeProjectId, parentThreadId),
+        exagentClient.readThread(activeProjectId, childSession.id)
+      ]);
+      if (!isCurrentCompare()) {
+        return;
+      }
+      set({
+        compareView: {
+          ...loadingView,
+          parentTranscript: postForkTranscript(parentRead.thread, forkPointTurnId),
+          childTranscript: postForkTranscript(childRead.thread, forkPointTurnId),
+          sharedTurnCount: sharedTurnCountForFork(parentRead.thread, childRead.thread, forkPointTurnId),
+          loading: false,
+          error: null
+        }
+      });
+    } catch (error) {
+      if (!isCurrentCompare()) {
+        return;
+      }
+      set({
+        compareView: {
+          ...(get().compareView ?? loadingView),
+          loading: false,
+          error: errorMessage(error)
+        }
+      });
+    }
+  },
+
+  closeCompareView() {
+    branchCompareRequestSequence += 1;
+    set({ compareThreadId: null, compareView: null });
   },
 
   setComposerValue(composerValue: string) {
@@ -1032,6 +1439,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     let sessions = current.sessions;
     let agentRecords = flattenAgentForest(current.agents);
     let tokenUsageByThreadId = current.tokenUsageByThreadId;
+    let activeTurnId = current.activeTurnId ?? null;
     let agentRecordsChanged = false;
     let changed = false;
 
@@ -1052,6 +1460,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       });
 
       if (event.thread_id === activeThreadId) {
+        activeTurnId = applyActiveTurnEvent(activeTurnId, event);
         transcript = applyTranscriptEvent(transcript, event);
         currentGoal = applyGoalRuntimeEvent(currentGoal, event);
         const nextAgentRecords = applyAgentEvent(agentRecords, event);
@@ -1090,10 +1499,14 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       agents,
       appliedRuntimeEventIds,
       tokenUsageByThreadId,
+      activeTurnId,
       sessions
     });
     if (events.some(shouldRefreshAgentTreeAfterEvent)) {
-      void get().refreshAgentTree();
+      scheduleAgentTreeRefresh(get, set);
+    }
+    if (events.some(shouldRefreshApprovalsAfterEvent)) {
+      scheduleApprovalsRefresh(get, set);
     }
   },
 
@@ -1284,8 +1697,11 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       tokenUsageByThreadId,
       selectedAgentAppliedEventIds: appliedEventIds
     });
-    if (events.some((event) => event.kind.type === "runtime_error")) {
-      void get().refreshAgentTree();
+    if (events.some(shouldRefreshAgentTreeAfterEvent)) {
+      scheduleAgentTreeRefresh(get, set);
+    }
+    if (events.some(shouldRefreshApprovalsAfterEvent)) {
+      scheduleApprovalsRefresh(get, set);
     }
   }
 }));
@@ -1395,6 +1811,173 @@ function createRuntimeEventBatcher(apply: (events: BackendRuntimeEvent[]) => voi
   };
 }
 
+function scheduleAgentTreeRefresh(
+  get: () => WorkbenchState,
+  set: (partial: Partial<WorkbenchState>) => void
+) {
+  const context = currentAgentTreeRefreshContext(get);
+  if (!context) {
+    return;
+  }
+
+  pendingAgentTreeRefreshContext = context;
+  if (agentTreeRefreshTimeoutId !== null) {
+    clearTimeout(agentTreeRefreshTimeoutId);
+  }
+  agentTreeRefreshTimeoutId = setTimeout(() => {
+    const context = pendingAgentTreeRefreshContext;
+    agentTreeRefreshTimeoutId = null;
+    pendingAgentTreeRefreshContext = null;
+    if (!context) {
+      return;
+    }
+    void refreshAgentTreeForContext(get, set, context);
+  }, AGENT_TREE_REFRESH_DEBOUNCE_MS);
+}
+
+function cancelPendingAgentTreeRefresh(context?: AgentTreeRefreshContext) {
+  if (
+    context &&
+    pendingAgentTreeRefreshContext &&
+    !sameAgentTreeRefreshContext(pendingAgentTreeRefreshContext, context)
+  ) {
+    return;
+  }
+  if (agentTreeRefreshTimeoutId !== null) {
+    clearTimeout(agentTreeRefreshTimeoutId);
+  }
+  agentTreeRefreshTimeoutId = null;
+  pendingAgentTreeRefreshContext = null;
+}
+
+function scheduleApprovalsRefresh(
+  get: () => WorkbenchState,
+  set: (partial: Partial<WorkbenchState>) => void
+) {
+  const context = currentApprovalsRefreshContext(get);
+  if (!context) {
+    return;
+  }
+
+  pendingApprovalsRefreshContext = context;
+  if (approvalsRefreshTimeoutId !== null) {
+    clearTimeout(approvalsRefreshTimeoutId);
+  }
+  approvalsRefreshTimeoutId = setTimeout(() => {
+    const context = pendingApprovalsRefreshContext;
+    approvalsRefreshTimeoutId = null;
+    pendingApprovalsRefreshContext = null;
+    if (!context) {
+      return;
+    }
+    void refreshApprovalsForContext(get, set, context);
+  }, APPROVALS_REFRESH_DEBOUNCE_MS);
+}
+
+function cancelPendingApprovalsRefresh(context?: ApprovalsRefreshContext) {
+  if (
+    context &&
+    pendingApprovalsRefreshContext &&
+    !sameApprovalsRefreshContext(pendingApprovalsRefreshContext, context)
+  ) {
+    return;
+  }
+  if (approvalsRefreshTimeoutId !== null) {
+    clearTimeout(approvalsRefreshTimeoutId);
+  }
+  approvalsRefreshTimeoutId = null;
+  pendingApprovalsRefreshContext = null;
+}
+
+function currentAgentTreeRefreshContext(get: () => WorkbenchState): AgentTreeRefreshContext | null {
+  const projectId = get().activeProjectId;
+  const threadId = get().activeSessionId;
+  if (!projectId || !threadId) {
+    return null;
+  }
+  return { projectId, threadId, sessionGeneration: openSessionRequestSequence };
+}
+
+function currentApprovalsRefreshContext(get: () => WorkbenchState): ApprovalsRefreshContext | null {
+  const projectId = get().activeProjectId;
+  if (!projectId) {
+    return null;
+  }
+  return { projectId, sessionGeneration: openSessionRequestSequence };
+}
+
+function sameAgentTreeRefreshContext(a: AgentTreeRefreshContext, b: AgentTreeRefreshContext) {
+  return a.projectId === b.projectId && a.threadId === b.threadId && a.sessionGeneration === b.sessionGeneration;
+}
+
+function sameApprovalsRefreshContext(a: ApprovalsRefreshContext, b: ApprovalsRefreshContext) {
+  return a.projectId === b.projectId && a.sessionGeneration === b.sessionGeneration;
+}
+
+function isActiveAgentTreeRefreshContext(get: () => WorkbenchState, context: AgentTreeRefreshContext) {
+  return (
+    get().activeProjectId === context.projectId &&
+    get().activeSessionId === context.threadId &&
+    openSessionRequestSequence === context.sessionGeneration
+  );
+}
+
+function isActiveApprovalsRefreshContext(get: () => WorkbenchState, context: ApprovalsRefreshContext) {
+  return get().activeProjectId === context.projectId && openSessionRequestSequence === context.sessionGeneration;
+}
+
+async function refreshAgentTreeForContext(
+  get: () => WorkbenchState,
+  set: (partial: Partial<WorkbenchState>) => void,
+  context: AgentTreeRefreshContext
+) {
+  if (!isActiveAgentTreeRefreshContext(get, context)) {
+    return;
+  }
+  try {
+    const agents = agentForestFromTreeResponse(await exagentClient.agentTree(context.projectId, context.threadId));
+    if (isActiveAgentTreeRefreshContext(get, context)) {
+      set({ agents });
+    }
+  } catch {
+    // Keep the local event-derived tree when the app-server projection is unavailable.
+  }
+}
+
+async function refreshApprovalsForContext(
+  get: () => WorkbenchState,
+  set: (partial: Partial<WorkbenchState>) => void,
+  context: ApprovalsRefreshContext
+) {
+  if (!isActiveApprovalsRefreshContext(get, context)) {
+    return;
+  }
+  set({ approvalsStatus: "loading", approvalsError: null });
+  try {
+    const response = await exagentClient.listApprovals(context.projectId);
+    if (!isActiveApprovalsRefreshContext(get, context)) {
+      return;
+    }
+    const approvalIds = new Set(response.approvals.map((item) => item.approval_id));
+    set({
+      pendingApprovals: response.approvals,
+      selectedApprovalIds: filterSelectedApprovalIds(get().selectedApprovalIds, approvalIds),
+      approvalsStatus: "ready",
+      approvalsError: null
+    });
+  } catch (error) {
+    if (isActiveApprovalsRefreshContext(get, context)) {
+      set({ approvalsStatus: "error", approvalsError: errorMessage(error) });
+    }
+  }
+}
+
+export function __resetWorkbenchStoreRuntimeForTests() {
+  cancelPendingAgentTreeRefresh();
+  cancelPendingApprovalsRefresh();
+  branchCompareRequestSequence = 0;
+}
+
 async function persistDraftGoal(
   projectId: string,
   threadId: string,
@@ -1499,6 +2082,7 @@ async function refreshProjectSelection(
       sessions: [],
       activeProjectId: null,
       activeSessionId: null,
+      activeTurnId: null,
       transcript: [],
       currentGoal: null,
       draftGoal: null,
@@ -1508,6 +2092,8 @@ async function refreshProjectSelection(
       cwd: "No project selected",
       eventUnlisten: null,
       appliedRuntimeEventIds: new Set(),
+      compareThreadId: null,
+      compareView: null,
       loading: false,
       error: null
     });
@@ -1523,6 +2109,7 @@ async function refreshProjectSelection(
     sessions: threads.map(exagentClient.threadRecordToSession),
     activeProjectId: targetProject.id,
     activeSessionId: targetSessionId,
+    activeTurnId: null,
     transcript: [],
     currentGoal: null,
     draftGoal: null,
@@ -1532,6 +2119,8 @@ async function refreshProjectSelection(
     cwd: targetProject.path,
     eventUnlisten: null,
     appliedRuntimeEventIds: new Set(),
+    compareThreadId: null,
+    compareView: null,
     loading: false,
     error: null
   });
@@ -1559,6 +2148,29 @@ function threadViewToTranscript(thread: ThreadView): TranscriptMessage[] {
   return thread.turns.flatMap((turn) => turnItemsToTranscript(thread.id, turn));
 }
 
+function postForkTranscript(thread: ThreadView, forkPointTurnId: string): TranscriptMessage[] {
+  const forkPointIndex = thread.turns.findIndex((turn) => turn.id === forkPointTurnId);
+  const divergentTurns = forkPointIndex >= 0 ? thread.turns.slice(forkPointIndex + 1) : thread.turns;
+  return divergentTurns.flatMap((turn) => turnItemsToTranscript(thread.id, turn));
+}
+
+function compareViewReferencesThread(compareView: BranchCompareView | null, threadId: string): boolean {
+  return compareView?.parentThreadId === threadId || compareView?.childThreadId === threadId;
+}
+
+function sharedTurnCountForFork(
+  parentThread: ThreadView,
+  childThread: ThreadView,
+  forkPointTurnId: string
+): number {
+  const childForkPointIndex = childThread.turns.findIndex((turn) => turn.id === forkPointTurnId);
+  if (childForkPointIndex >= 0) {
+    return childForkPointIndex + 1;
+  }
+  const parentForkPointIndex = parentThread.turns.findIndex((turn) => turn.id === forkPointTurnId);
+  return parentForkPointIndex >= 0 ? parentForkPointIndex + 1 : 0;
+}
+
 function threadViewEventIds(thread: ThreadView): Set<string> {
   const ids = new Set<string>();
   thread.turns.forEach((turn) => {
@@ -1576,6 +2188,52 @@ function threadViewHasFailedTurn(thread: ThreadView): boolean {
   return thread.turns.some((turn) => turn.status === "failed");
 }
 
+function activeTurnIdFromThread(thread: ThreadView): string | null {
+  if (thread.active_turn?.id) {
+    return thread.active_turn.id;
+  }
+  const activeTurn = thread.turns.find((turn) => isActiveTurnStatus(turn.status));
+  return activeTurn?.id ?? null;
+}
+
+function isActiveTurnStatus(status: string | undefined): boolean {
+  return status === "running" || status === "waiting_approval" || status === "started" || status === "in_progress";
+}
+
+function applyActiveTurnEvents(
+  activeTurnId: string | null,
+  events: BackendRuntimeEvent[],
+  threadId: string
+): string | null {
+  return events.reduce((current, event) => {
+    if (event.thread_id !== threadId) {
+      return current;
+    }
+    return applyActiveTurnEvent(current, event);
+  }, activeTurnId);
+}
+
+function applyActiveTurnEvent(
+  activeTurnId: string | null,
+  event: BackendRuntimeEvent
+): string | null {
+  switch (event.kind.type) {
+    case "turn_started":
+    case "approval_requested":
+    case "tool_invocation_waiting_approval":
+      return event.turn_id ?? activeTurnId;
+    case "turn_completed":
+    case "turn_interrupted":
+    case "runtime_error":
+      if (!event.turn_id || event.turn_id === activeTurnId) {
+        return null;
+      }
+      return activeTurnId;
+    default:
+      return activeTurnId;
+  }
+}
+
 function threadItemEventId(item: ThreadItem): string | null {
   switch (item.type) {
     case "assistant_message":
@@ -1585,6 +2243,7 @@ function threadItemEventId(item: ThreadItem): string | null {
     case "approval_requested":
     case "approval_decision":
     case "runtime_error":
+    case "goal_report":
       return item.event_id ?? null;
     default:
       return null;
@@ -1594,7 +2253,7 @@ function threadItemEventId(item: ThreadItem): string | null {
 function turnItemsToTranscript(threadId: string, turn: ThreadView["turns"][number]): TranscriptMessage[] {
   const hasToolInvocation = turn.items.some((item) => item.type === "tool_invocation");
   return turn.items.reduce<TranscriptMessage[]>((messages, item, index) => {
-    const message = threadItemToTranscript(threadId, turn.id, item, index, hasToolInvocation);
+    const message = threadItemToTranscript(threadId, turn.id, turn.status, item, index, hasToolInvocation);
     return message ? appendTranscriptMessage(messages, message) : messages;
   }, []);
 }
@@ -1602,6 +2261,7 @@ function turnItemsToTranscript(threadId: string, turn: ThreadView["turns"][numbe
 function threadItemToTranscript(
   threadId: string,
   turnId: string,
+  turnStatus: string,
   item: ThreadItem,
   index: number,
   turnHasToolInvocation: boolean
@@ -1616,7 +2276,8 @@ function threadItemToTranscript(
         input: item.input ?? [],
         timestamp: "history",
         threadId,
-        turnId
+        turnId,
+        turnStatus
       };
     case "assistant_message":
       return {
@@ -1625,7 +2286,8 @@ function threadItemToTranscript(
         body: item.text ?? "",
         timestamp: "history",
         threadId,
-        turnId
+        turnId,
+        turnStatus
       };
     case "reasoning":
       return {
@@ -1635,7 +2297,8 @@ function threadItemToTranscript(
         body: reasoningBody(item.summary, item.content),
         timestamp: "history",
         threadId,
-        turnId
+        turnId,
+        turnStatus
       };
     case "tool_result":
       if (turnHasToolInvocation) {
@@ -1650,6 +2313,7 @@ function threadItemToTranscript(
         status: "info",
         threadId,
         turnId,
+        turnStatus,
         toolName: item.name,
         toolStatus: "completed"
       };
@@ -1663,6 +2327,7 @@ function threadItemToTranscript(
         status: toolInvocationTone(item),
         threadId,
         turnId,
+        turnStatus,
         invocationId: item.invocation_id,
         toolCallId: item.tool_call_id ?? undefined,
         toolName: item.tool_name ?? undefined,
@@ -1682,6 +2347,7 @@ function threadItemToTranscript(
         status: "warning",
         threadId,
         turnId,
+        turnStatus,
         approvalId: item.approval_id,
         toolName: item.tool_name
       };
@@ -1695,6 +2361,7 @@ function threadItemToTranscript(
         status: item.status === "approved" ? "success" : "danger",
         threadId,
         turnId,
+        turnStatus,
         approvalId: item.approval_id ?? undefined
       };
     case "runtime_error":
@@ -1706,14 +2373,39 @@ function threadItemToTranscript(
         timestamp: "history",
         status: "danger",
         threadId,
-        turnId
+        turnId,
+        turnStatus
       };
+    case "goal_report":
+      return goalReportToTranscript(id, threadId, turnId, turnStatus, "history", item.report);
     case "subagent_spawn":
     case "subagent_close":
     case "inter_agent_message":
     case "compaction_written":
       return null;
   }
+}
+
+function goalReportToTranscript(
+  id: string,
+  threadId: string,
+  turnId: string | undefined,
+  turnStatus: string | undefined,
+  timestamp: string,
+  report: ThreadGoalReport
+): TranscriptMessage {
+  return {
+    id,
+    role: "goal_report",
+    title: `Goal ${goalStatusLabel(report.final_status)}`,
+    body: report.summary,
+    timestamp,
+    status: goalReportTone(report.final_status),
+    threadId,
+    turnId,
+    turnStatus,
+    goalReport: report
+  };
 }
 
 function normalizeToolInvocationStatus(status: string): ToolInvocationTranscriptStatus {
@@ -1850,27 +2542,71 @@ function applyTranscriptEvent(
   if (representedEventIds?.has(event.event_id)) {
     return transcript;
   }
-  const streamingTranscript = applyStreamingTranscriptEvent(transcript, event);
+  const nextTranscript = applyTurnStatusTranscriptEvent(transcript, event) ?? transcript;
+  const streamingTranscript = applyStreamingTranscriptEvent(nextTranscript, event);
   if (streamingTranscript) {
     return streamingTranscript;
   }
   const toolMessage = runtimeEventToToolInvocationTranscript(event);
   if (toolMessage) {
-    return upsertToolInvocationMessage(transcript, toolMessage);
+    return upsertToolInvocationMessage(nextTranscript, toolMessage);
   }
 
   const transcriptMessage = runtimeEventToTranscript(event);
   if (!transcriptMessage) {
-    return transcript;
+    return nextTranscript;
   }
-  const finalizedStreamingTranscript = finalizeStreamingTranscriptMessage(transcript, transcriptMessage);
+  const finalizedStreamingTranscript = finalizeStreamingTranscriptMessage(nextTranscript, transcriptMessage);
   if (finalizedStreamingTranscript) {
     return finalizedStreamingTranscript;
   }
-  if (transcript.some((message) => message.id === transcriptMessage.id)) {
-    return transcript;
+  if (nextTranscript.some((message) => message.id === transcriptMessage.id)) {
+    return nextTranscript;
   }
-  return [...transcript, transcriptMessage];
+  return [...nextTranscript, transcriptMessage];
+}
+
+function applyTurnStatusTranscriptEvent(
+  transcript: TranscriptMessage[],
+  event: BackendRuntimeEvent
+): TranscriptMessage[] | null {
+  const turnStatus = transcriptTurnStatusFromEvent(event);
+  if (!turnStatus || !event.turn_id) {
+    return null;
+  }
+
+  let changed = false;
+  const next = transcript.map((message) => {
+    if (
+      message.threadId !== event.thread_id ||
+      message.turnId !== event.turn_id ||
+      message.turnStatus === turnStatus
+    ) {
+      return message;
+    }
+    changed = true;
+    return { ...message, turnStatus };
+  });
+
+  return changed ? next : null;
+}
+
+function transcriptTurnStatusFromEvent(event: BackendRuntimeEvent): string | null {
+  switch (event.kind.type) {
+    case "turn_started":
+      return "running";
+    case "approval_requested":
+    case "tool_invocation_waiting_approval":
+      return "waiting_approval";
+    case "turn_completed":
+      return "completed";
+    case "turn_interrupted":
+      return "interrupted";
+    case "runtime_error":
+      return "failed";
+    default:
+      return null;
+  }
 }
 
 function applyStreamingTranscriptEvent(
@@ -2024,8 +2760,34 @@ function runtimeEventToTranscript(event: BackendRuntimeEvent): TranscriptMessage
         body: event.kind.message,
         status: "danger"
       };
+    case "thread_goal_report":
+      return goalReportToTranscript(
+        event.event_id,
+        event.thread_id,
+        event.turn_id ?? undefined,
+        undefined,
+        "now",
+        event.kind.report
+      );
     default:
       return null;
+  }
+}
+
+function goalStatusLabel(status: ThreadGoal["status"]) {
+  return status.replace(/_/g, " ");
+}
+
+function goalReportTone(status: ThreadGoal["status"]): TranscriptMessage["status"] {
+  switch (status) {
+    case "complete":
+      return "success";
+    case "blocked":
+    case "usage_limited":
+    case "budget_limited":
+      return "warning";
+    default:
+      return "info";
   }
 }
 
@@ -2421,7 +3183,10 @@ function eventTone(event: BackendRuntimeEvent): RuntimeEvent["tone"] {
 }
 
 function rootAgentStatus(status: SessionSummary["status"] | undefined): AgentRunStatus {
-  return status === "running" || status === "awaiting_approval" ? "running" : "idle";
+  if (status === "awaiting_approval") {
+    return "waiting_approval";
+  }
+  return status === "running" ? "running" : "idle";
 }
 
 function sessionStatusFromThreadStatus(status: string | undefined): SessionSummary["status"] {
@@ -2459,7 +3224,14 @@ function markSessionStatus(
     current.activeSessionId === threadId
       ? buildAgentForest(threadId, rootAgentStatus(status), flattenAgentForest(current.agents))
       : current.agents;
-  set({ sessions, agents });
+  set({
+    sessions,
+    agents,
+    activeTurnId:
+      current.activeSessionId === threadId && status !== "running" && status !== "awaiting_approval"
+        ? null
+        : current.activeTurnId
+  });
 }
 
 function isNoActiveTurnError(error: unknown) {
@@ -2471,9 +3243,29 @@ function shouldRefreshAgentTreeAfterEvent(event: BackendRuntimeEvent) {
     case "subagent_spawned":
     case "subagent_closed":
     case "inter_agent_message_sent":
+    case "turn_started":
     case "turn_completed":
     case "turn_interrupted":
     case "runtime_error":
+    case "tool_invocation_started":
+    case "tool_invocation_completed":
+    case "tool_invocation_failed":
+    case "tool_invocation_cancelled":
+    case "tool_invocation_waiting_approval":
+    case "approval_requested":
+    case "approval_decision":
+    case "token_count":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function shouldRefreshApprovalsAfterEvent(event: BackendRuntimeEvent) {
+  switch (event.kind.type) {
+    case "approval_requested":
+    case "approval_decision":
+    case "tool_invocation_waiting_approval":
       return true;
     default:
       return false;
@@ -2501,6 +3293,64 @@ function statusFromEvent(event: BackendRuntimeEvent, current: SessionSummary["st
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function submitInboxApprovalDecision(
+  get: () => WorkbenchState,
+  set: (partial: Partial<WorkbenchState>) => void,
+  item: PendingApprovalItem,
+  decision: "approved" | "denied",
+  note: string
+) {
+  const context = currentApprovalsRefreshContext(get);
+  if (!context) {
+    return;
+  }
+
+  set({ approvalsStatus: "submitting", approvalsError: null, approvalActionStatus: null });
+  try {
+    await exagentClient.submitApprovalDecision(
+      context.projectId,
+      item.thread_id,
+      undefined,
+      item.approval_id,
+      decision,
+      note
+    );
+    if (!isActiveApprovalsRefreshContext(get, context)) {
+      return;
+    }
+    set({
+      pendingApprovals: get().pendingApprovals.filter((pending) => pending.approval_id !== item.approval_id),
+      selectedApprovalIds: removeApprovalId(get().selectedApprovalIds, item.approval_id),
+      approvalsStatus: "ready",
+      approvalsError: null,
+      approvalActionStatus: { type: "approval_decision", approval_id: item.approval_id, decision }
+    });
+    await refreshApprovalsForContext(get, set, context);
+  } catch (error) {
+    if (!isActiveApprovalsRefreshContext(get, context)) {
+      return;
+    }
+    const message = errorMessage(error);
+    set({ approvalsStatus: "error", approvalsError: message, approvalActionStatus: null });
+  }
+}
+
+function removeApprovalId(selectedApprovalIds: Set<string>, approvalId: string) {
+  const next = new Set(selectedApprovalIds);
+  next.delete(approvalId);
+  return next;
+}
+
+function filterSelectedApprovalIds(selectedApprovalIds: Set<string>, availableApprovalIds: Set<string>) {
+  const next = new Set<string>();
+  for (const approvalId of selectedApprovalIds) {
+    if (availableApprovalIds.has(approvalId)) {
+      next.add(approvalId);
+    }
+  }
+  return next;
 }
 
 type SelectionState = Pick<

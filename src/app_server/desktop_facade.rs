@@ -1,16 +1,18 @@
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use tokio::sync::broadcast;
 
 use crate::app_server::protocol::{
-    ApprovalDecisionParams, ApprovalDecisionResponse, EventsReplayParams, EventsReplayResponse,
-    EventsSubscribeParams, ThreadCompactParams, ThreadCompactResponse, ThreadGoal,
-    ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse,
-    ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams,
-    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
-    ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse,
+    ApprovalDecisionParams, ApprovalDecisionResponse, ApprovalsListParams, ApprovalsListResponse,
+    BoundaryOp, BoundaryOpResponse, CheckpointRestoreParams, CheckpointRestoreResponse,
+    EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, ThreadCompactParams,
+    ThreadCompactResponse, ThreadForkParams, ThreadForkResponse, ThreadGoal, ThreadGoalClearParams,
+    ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams,
+    ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams, ThreadReadResponse,
+    ThreadResumeParams, ThreadResumeResponse, ThreadStartParams, ThreadStartResponse,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
 };
 use crate::app_server::AppServerService;
 use crate::events::RuntimeEvent;
@@ -18,6 +20,8 @@ use crate::index_db::{
     IndexDb, ProjectRecord, ProjectUpsert, ThreadGoalRecord, ThreadGoalStatusRecord,
     ThreadListFilter, ThreadRecord,
 };
+use crate::state::fork_edges::ThreadForkEdgeStore;
+use crate::types::{ThreadId, TurnId};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct NewProjectRequest {
@@ -126,7 +130,13 @@ impl DesktopFacade {
     }
 
     pub async fn list_threads(&self, filter: ThreadListFilter) -> Result<Vec<ThreadRecord>> {
-        self.index.list_threads(filter).await
+        let project_id = filter.project_id.clone();
+        let threads = self.index.list_threads(filter).await?;
+        if threads.is_empty() {
+            return Ok(threads);
+        }
+        let project = self.index.project_by_id(&project_id).await?;
+        hydrate_thread_lineage(&project.path, threads)
     }
 
     pub async fn reindex_project(&self, project_id: &str) -> Result<Vec<ThreadRecord>> {
@@ -134,13 +144,15 @@ impl DesktopFacade {
         self.index
             .reindex_project(project_id, &project.path)
             .await?;
-        self.index
+        let threads = self
+            .index
             .list_threads(ThreadListFilter {
                 project_id: project_id.to_string(),
                 include_archived: false,
                 search: None,
             })
-            .await
+            .await?;
+        hydrate_thread_lineage(&project.path, threads)
     }
 
     pub async fn start_thread(&self, project_id: &str) -> Result<ThreadStartResponse> {
@@ -184,6 +196,20 @@ impl DesktopFacade {
         Ok(response)
     }
 
+    pub async fn fork_thread(
+        &self,
+        project_id: &str,
+        mut params: ThreadForkParams,
+    ) -> Result<ThreadForkResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        params.workspace_root = Some(project.path.display().to_string());
+        let response = self.service.thread_fork(params).await?;
+        self.index
+            .reindex_project(&project.id, &project.path)
+            .await?;
+        Ok(response)
+    }
+
     pub async fn compact_thread(
         &self,
         project_id: &str,
@@ -209,6 +235,41 @@ impl DesktopFacade {
                 workspace_root: Some(project.path.display().to_string()),
                 ..params
             })
+            .await
+    }
+
+    pub async fn approvals_list(
+        &self,
+        project_id: &str,
+        mut params: ApprovalsListParams,
+    ) -> Result<ApprovalsListResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        params.workspace_root = Some(project.path.display().to_string());
+        match self
+            .service
+            .submit_boundary_op(BoundaryOp::ApprovalsList(params))
+            .await?
+        {
+            BoundaryOpResponse::ApprovalsList(response) => Ok(response),
+            _ => Err(anyhow!("approvals list returned unexpected response")),
+        }
+    }
+
+    pub async fn checkpoint_restore(
+        &self,
+        project_id: &str,
+        mut params: CheckpointRestoreParams,
+    ) -> Result<CheckpointRestoreResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        params.workspace_root = project.path.display().to_string();
+        match self
+            .service
+            .submit_boundary_op(BoundaryOp::CheckpointRestore(params))
+            .await?
+        {
+            BoundaryOpResponse::CheckpointRestored(response) => Ok(response),
+            _ => Err(anyhow!("checkpoint restore returned unexpected response")),
+        }
     }
 
     pub async fn thread_goal_set(
@@ -406,6 +467,42 @@ fn thread_goal_from_record(record: ThreadGoalRecord) -> ThreadGoal {
         created_at_ms: record.created_at_ms,
         updated_at_ms: record.updated_at_ms,
     }
+}
+
+fn hydrate_thread_lineage(
+    project_path: &Path,
+    mut threads: Vec<ThreadRecord>,
+) -> Result<Vec<ThreadRecord>> {
+    let fork_edges =
+        match ThreadForkEdgeStore::for_workspace(project_path).list_for_workspace_blocking() {
+            Ok(edges) => edges,
+            Err(error) => {
+                tracing::warn!(
+                    workspace = %project_path.display(),
+                    error = %error,
+                    "failed to hydrate thread fork lineage"
+                );
+                return Ok(threads);
+            }
+        };
+    let edges_by_child: HashMap<ThreadId, (ThreadId, TurnId)> = fork_edges
+        .into_iter()
+        .map(|edge| {
+            (
+                edge.child_thread_id,
+                (edge.parent_thread_id, edge.fork_point_turn_id),
+            )
+        })
+        .collect();
+
+    for thread in &mut threads {
+        if let Some((parent_thread_id, fork_point_turn_id)) = edges_by_child.get(&thread.id) {
+            thread.fork_parent_thread_id = Some(parent_thread_id.clone());
+            thread.fork_point_turn_id = Some(fork_point_turn_id.clone());
+        }
+    }
+
+    Ok(threads)
 }
 
 async fn git_root(path: &std::path::Path) -> Result<PathBuf> {

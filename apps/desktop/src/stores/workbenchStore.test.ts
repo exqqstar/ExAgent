@@ -1,12 +1,18 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { exagentClient } from "@/api/exagentClient";
-import { useWorkbenchStore } from "@/stores/workbenchStore";
-import type { BackendRuntimeEvent } from "@/types";
+import { __resetWorkbenchStoreRuntimeForTests, useWorkbenchStore } from "@/stores/workbenchStore";
+import type { AgentTreeResponse, BackendRuntimeEvent, ThreadReadResponse } from "@/types";
 
 describe("workbenchStore runtime events", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    __resetWorkbenchStoreRuntimeForTests();
     useWorkbenchStore.setState(useWorkbenchStore.getInitialState(), true);
+  });
+
+  afterEach(() => {
+    __resetWorkbenchStoreRuntimeForTests();
+    vi.useRealTimers();
   });
 
   it("keeps child thread events out of the root transcript until the agent viewer applies them", () => {
@@ -122,6 +128,173 @@ describe("workbenchStore runtime events", () => {
     });
   });
 
+  it("does not apply stale approval decision results after switching projects", async () => {
+    const decision = createDeferred<unknown>();
+    vi.spyOn(exagentClient, "submitApprovalDecision").mockReturnValue(decision.promise as Promise<any>);
+    vi.spyOn(exagentClient, "listApprovals").mockResolvedValue({ approvals: [] });
+    const originalApproval = {
+      thread_id: "thread-a",
+      approval_id: "approval-a",
+      kind: "command" as const,
+      summary: "Run A",
+      detail: "cargo test",
+      goal_id: null,
+      requested_at_ms: 1,
+      checkpoint_id: null
+    };
+    const nextProjectApproval = {
+      thread_id: "thread-b",
+      approval_id: "approval-b",
+      kind: "command" as const,
+      summary: "Run B",
+      detail: "npm test",
+      goal_id: null,
+      requested_at_ms: 2,
+      checkpoint_id: null
+    };
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      activeProjectId: "project-a",
+      activeSessionId: "thread-a",
+      pendingApprovals: [originalApproval],
+      approvalsStatus: "ready",
+      approvalActionStatus: null
+    });
+
+    const approve = useWorkbenchStore.getState().approveInboxApproval(originalApproval);
+    useWorkbenchStore.setState({
+      activeProjectId: "project-b",
+      activeSessionId: "thread-b",
+      pendingApprovals: [nextProjectApproval],
+      approvalsStatus: "ready",
+      approvalActionStatus: null
+    });
+    decision.resolve({});
+    await approve;
+    await Promise.resolve();
+
+    expect(useWorkbenchStore.getState().pendingApprovals).toEqual([nextProjectApproval]);
+    expect(useWorkbenchStore.getState().approvalActionStatus).toBeNull();
+    expect(exagentClient.listApprovals).not.toHaveBeenCalled();
+  });
+
+  it("does not refresh approvals or set errors for stale transcript approval completions", async () => {
+    const decision = createDeferred<unknown>();
+    vi.spyOn(exagentClient, "submitApprovalDecision").mockReturnValue(decision.promise as Promise<any>);
+    vi.spyOn(exagentClient, "listApprovals").mockResolvedValue({ approvals: [] });
+    const nextProjectApproval = {
+      thread_id: "thread-b",
+      approval_id: "approval-b",
+      kind: "command" as const,
+      summary: "Run B",
+      detail: "npm test",
+      goal_id: null,
+      requested_at_ms: 2,
+      checkpoint_id: null
+    };
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      activeProjectId: "project-a",
+      activeSessionId: "thread-a",
+      pendingApprovals: [],
+      approvalsStatus: "ready",
+      error: null
+    });
+
+    const submit = useWorkbenchStore.getState().submitApproval(
+      {
+        id: "message-approval-a",
+        role: "approval",
+        body: "Approve command",
+        timestamp: "now",
+        threadId: "thread-a",
+        turnId: "turn-a",
+        approvalId: "approval-a"
+      },
+      "approved"
+    );
+    useWorkbenchStore.setState({
+      activeProjectId: "project-b",
+      activeSessionId: "thread-b",
+      pendingApprovals: [nextProjectApproval],
+      approvalsStatus: "ready",
+      error: null
+    });
+    decision.reject(new Error("old approval failed"));
+    await submit;
+    await Promise.resolve();
+
+    expect(exagentClient.submitApprovalDecision).toHaveBeenCalledWith(
+      "project-a",
+      "thread-a",
+      "turn-a",
+      "approval-a",
+      "approved",
+      "desktop approved"
+    );
+    expect(useWorkbenchStore.getState().pendingApprovals).toEqual([nextProjectApproval]);
+    expect(useWorkbenchStore.getState().error).toBeNull();
+    expect(exagentClient.listApprovals).not.toHaveBeenCalled();
+  });
+
+  it("still restores the captured checkpoint when rollback context becomes stale after denial", async () => {
+    const denial = createDeferred<unknown>();
+    const restore = createDeferred<unknown>();
+    vi.spyOn(exagentClient, "submitApprovalDecision").mockReturnValue(denial.promise as Promise<any>);
+    vi.spyOn(exagentClient, "restoreCheckpoint").mockReturnValue(restore.promise as Promise<any>);
+    vi.spyOn(exagentClient, "listApprovals").mockResolvedValue({ approvals: [] });
+    const originalApproval = {
+      thread_id: "thread-a",
+      approval_id: "approval-a",
+      kind: "command" as const,
+      summary: "Run A",
+      detail: "cargo test",
+      goal_id: null,
+      requested_at_ms: 1,
+      checkpoint_id: "checkpoint-a"
+    };
+    const nextProjectApproval = {
+      thread_id: "thread-b",
+      approval_id: "approval-b",
+      kind: "command" as const,
+      summary: "Run B",
+      detail: "npm test",
+      goal_id: null,
+      requested_at_ms: 2,
+      checkpoint_id: null
+    };
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      activeProjectId: "project-a",
+      activeSessionId: "thread-a",
+      pendingApprovals: [originalApproval],
+      approvalsStatus: "ready",
+      approvalActionStatus: null
+    });
+
+    const rollback = useWorkbenchStore.getState().rejectAndRollbackApproval(originalApproval);
+    denial.resolve({});
+    useWorkbenchStore.setState({
+      activeProjectId: "project-b",
+      activeSessionId: "thread-b",
+      pendingApprovals: [nextProjectApproval],
+      approvalsStatus: "ready",
+      approvalActionStatus: null
+    });
+    await Promise.resolve();
+
+    expect(exagentClient.restoreCheckpoint).toHaveBeenCalledWith("project-a", "checkpoint-a");
+    restore.resolve({});
+    await rollback;
+
+    expect(useWorkbenchStore.getState().pendingApprovals).toEqual([nextProjectApproval]);
+    expect(useWorkbenchStore.getState().approvalActionStatus).toBeNull();
+    expect(exagentClient.listApprovals).not.toHaveBeenCalled();
+  });
+
   it("does not clear existing thread usage when a token count event has null info", () => {
     useWorkbenchStore.setState({
       ...useWorkbenchStore.getInitialState(),
@@ -224,6 +397,218 @@ describe("workbenchStore runtime events", () => {
       expect.objectContaining({ body: "Root answer", threadId: "thread-root" })
     ]);
     expect(useWorkbenchStore.getState().tokenUsageByThreadId["thread-child"]?.total.total_tokens).toBe(1600);
+  });
+
+  it("debounces agent tree refreshes for agent-relevant runtime event bursts", async () => {
+    vi.useFakeTimers();
+    const agentTree = vi.spyOn(exagentClient, "agentTree").mockResolvedValue({
+      root: {
+        thread_id: "thread-root",
+        root_thread_id: "thread-root",
+        depth: 0,
+        agent_path: "root",
+        status: "waiting_approval",
+        current_tool: "run_command",
+        tokens_used: 1800,
+        children: []
+      }
+    });
+
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      activeProjectId: "project",
+      activeSessionId: "thread-root",
+      sessions: [
+        {
+          id: "thread-root",
+          projectId: "project",
+          title: "Root thread",
+          updatedAt: "now",
+          status: "running"
+        }
+      ],
+      agents: [
+        {
+          threadId: "thread-root",
+          parentThreadId: null,
+          name: "Root agent",
+          agentPath: "root",
+          status: "running",
+          task: "",
+          lastActivity: null,
+          currentTool: null,
+          tokensUsed: null,
+          isRoot: true,
+          children: []
+        }
+      ]
+    });
+
+    useWorkbenchStore.getState().applyRuntimeEvent({
+      event_id: "evt-child-token-count",
+      thread_id: "thread-child",
+      turn_id: "turn-child",
+      kind: {
+        type: "token_count",
+        info: {
+          total_token_usage: {
+            input_tokens: 1800,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: 1800
+          },
+          last_token_usage: {
+            input_tokens: 1800,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: 1800
+          },
+          model_context_window: null
+        }
+      }
+    });
+    useWorkbenchStore.getState().applyRuntimeEvent({
+      event_id: "evt-spawn-child",
+      thread_id: "thread-root",
+      turn_id: "turn-root",
+      kind: {
+        type: "subagent_spawned",
+        invocation_id: "inv_spawn",
+        tool_call_id: "call_spawn",
+        parent_thread_id: "thread-root",
+        child_thread_id: "thread-child",
+        task_name: "Worker",
+        message_preview: "Check the branch"
+      }
+    });
+
+    expect(agentTree).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(299);
+    expect(agentTree).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(agentTree).toHaveBeenCalledTimes(1);
+    expect(agentTree).toHaveBeenCalledWith("project", "thread-root");
+    expect(useWorkbenchStore.getState().agents[0]).toMatchObject({
+      threadId: "thread-root",
+      status: "waiting_approval",
+      currentTool: "run_command",
+      tokensUsed: 1800
+    });
+    expect(useWorkbenchStore.getState().transcript).toEqual([]);
+  });
+
+  it("ignores a pending agent tree refresh when the active session changes before the debounce fires", async () => {
+    vi.useFakeTimers();
+    const agentTree = vi.spyOn(exagentClient, "agentTree").mockResolvedValue(agentTreeResponse("thread-old"));
+
+    mountRootSession("thread-old");
+
+    useWorkbenchStore.getState().applyRuntimeEvent(turnStartedEvent("evt-old-turn", "thread-old"));
+    useWorkbenchStore.setState({
+      activeSessionId: "thread-new",
+      agents: [rootAgent("thread-new", "running")]
+    });
+
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(agentTree).not.toHaveBeenCalled();
+    expect(useWorkbenchStore.getState().agents[0]).toMatchObject({
+      threadId: "thread-new",
+      status: "running"
+    });
+  });
+
+  it("drops a stale in-flight agent tree response after the active session changes", async () => {
+    vi.useFakeTimers();
+    const staleTree = createDeferred<AgentTreeResponse>();
+    const agentTree = vi.spyOn(exagentClient, "agentTree").mockReturnValue(staleTree.promise);
+
+    mountRootSession("thread-old");
+
+    useWorkbenchStore.getState().applyRuntimeEvent(turnStartedEvent("evt-old-inflight", "thread-old"));
+    await vi.advanceTimersByTimeAsync(300);
+    expect(agentTree).toHaveBeenCalledWith("project", "thread-old");
+
+    useWorkbenchStore.setState({
+      activeSessionId: "thread-new",
+      agents: [rootAgent("thread-new", "running")]
+    });
+    staleTree.resolve(agentTreeResponse("thread-old", { status: "failed", currentTool: "run_command" }));
+    await Promise.resolve();
+
+    expect(useWorkbenchStore.getState().agents[0]).toMatchObject({
+      threadId: "thread-new",
+      status: "running",
+      currentTool: null
+    });
+  });
+
+  it("keeps a newer session agent tree refresh when stale open session cleanup runs", async () => {
+    vi.useFakeTimers();
+    const oldResume = createDeferred<ThreadReadResponse>();
+    vi.spyOn(exagentClient, "resumeThread").mockImplementation(async (_projectId, threadId) => {
+      if (threadId === "thread-old") {
+        return oldResume.promise;
+      }
+      return threadReadResponse(threadId);
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(vi.fn());
+    vi.spyOn(exagentClient, "replayEvents").mockImplementation(async (_projectId, threadId) => ({
+      thread_id: threadId,
+      events: []
+    }));
+    const agentTree = vi.spyOn(exagentClient, "agentTree").mockResolvedValue(
+      agentTreeResponse("thread-new", { status: "waiting_approval", currentTool: "run_command" })
+    );
+
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      activeProjectId: "project",
+      activeSessionId: null,
+      sessions: [
+        {
+          id: "thread-old",
+          projectId: "project",
+          title: "Old thread",
+          updatedAt: "now",
+          status: "running"
+        },
+        {
+          id: "thread-new",
+          projectId: "project",
+          title: "New thread",
+          updatedAt: "now",
+          status: "running"
+        }
+      ]
+    });
+
+    const staleOpen = useWorkbenchStore.getState().openSession("thread-old");
+    await Promise.resolve();
+
+    await useWorkbenchStore.getState().openSession("thread-new");
+    agentTree.mockClear();
+
+    useWorkbenchStore.getState().applyRuntimeEvent(turnStartedEvent("evt-new-turn", "thread-new"));
+    oldResume.resolve(threadReadResponse("thread-old"));
+    await staleOpen;
+
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(agentTree).toHaveBeenCalledTimes(1);
+    expect(agentTree).toHaveBeenCalledWith("project", "thread-new");
+    expect(useWorkbenchStore.getState().agents[0]).toMatchObject({
+      threadId: "thread-new",
+      status: "waiting_approval",
+      currentTool: "run_command"
+    });
   });
 
   it("keeps replayed token usage when a buffered live event has the same event id", async () => {
@@ -397,4 +782,86 @@ function tokenCountEvent(eventId: string, totalTokens: number): BackendRuntimeEv
       }
     }
   };
+}
+
+function mountRootSession(threadId: string) {
+  useWorkbenchStore.setState({
+    ...useWorkbenchStore.getInitialState(),
+    loading: false,
+    activeProjectId: "project",
+    activeSessionId: threadId,
+    sessions: [
+      {
+        id: threadId,
+        projectId: "project",
+        title: "Root thread",
+        updatedAt: "now",
+        status: "running"
+      }
+    ],
+    agents: [rootAgent(threadId, "running")]
+  });
+}
+
+function rootAgent(threadId: string, status: "running" | "waiting_approval" | "failed") {
+  return {
+    threadId,
+    parentThreadId: null,
+    name: "Root agent",
+    agentPath: "root",
+    status,
+    task: "",
+    lastActivity: null,
+    currentTool: null,
+    tokensUsed: null,
+    isRoot: true,
+    children: []
+  };
+}
+
+function turnStartedEvent(eventId: string, threadId: string): BackendRuntimeEvent {
+  return {
+    event_id: eventId,
+    thread_id: threadId,
+    turn_id: "turn-1",
+    kind: { type: "turn_started" }
+  };
+}
+
+function threadReadResponse(threadId: string): ThreadReadResponse {
+  return {
+    thread: {
+      id: threadId,
+      status: "running",
+      active_turn: null,
+      turns: []
+    }
+  };
+}
+
+function agentTreeResponse(
+  threadId: string,
+  fields: { status?: "running" | "waiting_approval" | "failed"; currentTool?: string | null } = {}
+): AgentTreeResponse {
+  return {
+    root: {
+      thread_id: threadId,
+      root_thread_id: threadId,
+      depth: 0,
+      agent_path: "root",
+      status: fields.status ?? "running",
+      current_tool: fields.currentTool ?? null,
+      children: []
+    }
+  };
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
 }

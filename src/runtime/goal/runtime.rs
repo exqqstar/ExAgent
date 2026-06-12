@@ -4,7 +4,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::app_server::protocol::{ThreadGoal, ThreadGoalStatus};
+use crate::app_server::protocol::{ThreadGoal, ThreadGoalReport, ThreadGoalStatus};
+use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::index_db::{
     GoalAccountingMode, GoalAccountingOutcome, GoalUpdate, IndexDb, ThreadGoalRecord,
     ThreadGoalStatusRecord,
@@ -29,6 +30,7 @@ pub(crate) enum GoalRuntimeEvent<'a> {
         turn_id: &'a TurnId,
         tool_name: &'a str,
         token_usage: TokenUsage,
+        changed_files: Vec<String>,
     },
     ToolCompletedGoal {
         thread_id: &'a ThreadId,
@@ -56,6 +58,7 @@ pub(crate) enum GoalRuntimeEvent<'a> {
     },
     ThreadResumed {
         thread_id: &'a ThreadId,
+        restored_events: &'a [RuntimeEvent],
     },
     MaybeContinueIfIdle {
         thread_id: &'a ThreadId,
@@ -67,10 +70,20 @@ pub(crate) enum GoalRuntimeEffect {
     None,
     EmitUpdated(ThreadGoal),
     EmitCleared(ThreadId),
+    EmitUpdatedAndGoalReport {
+        goal: ThreadGoal,
+        report: ThreadGoalReport,
+    },
     EmitUpdatedAndInjectPersistentContext {
         goal: ThreadGoal,
         source: &'static str,
         content: String,
+    },
+    EmitUpdatedInjectContextAndGoalReport {
+        goal: ThreadGoal,
+        source: &'static str,
+        content: String,
+        report: ThreadGoalReport,
     },
     EmitUpdatedAndContinuationSuppressed {
         goal: ThreadGoal,
@@ -120,7 +133,9 @@ impl GoalToolApi {
         thread_id: &ThreadId,
         status: ThreadGoalStatus,
     ) -> anyhow::Result<ThreadGoal> {
-        self.runtime.update_goal_status(thread_id, status).await
+        self.runtime
+            .update_goal_status_from_tool(thread_id, status)
+            .await
     }
 
     pub(crate) async fn account_update_goal_tool(
@@ -145,6 +160,10 @@ struct GoalRuntimeState {
     turn_accounting: HashMap<ThreadId, GoalTurnAccountingSnapshot>,
     wall_clock: HashMap<ThreadId, GoalWallClockAccountingSnapshot>,
     budget_limit_reported_goal_ids: HashSet<String>,
+    goal_turn_counts: HashMap<String, i64>,
+    goal_changed_files: HashMap<String, Vec<String>>,
+    reported_goal_statuses: HashSet<String>,
+    pending_status_effects: HashMap<ThreadId, GoalRuntimeEffect>,
 }
 
 #[derive(Debug, Clone)]
@@ -191,13 +210,17 @@ impl GoalRuntime {
                 turn_id,
                 tool_name,
                 token_usage,
+                changed_files,
             } => {
-                self.account_turn_progress(thread_id, turn_id, token_usage, true, false)
+                self.record_changed_files_for_current_goal(thread_id, turn_id, changed_files)
+                    .await;
+                let effect = self
+                    .account_turn_progress(thread_id, turn_id, token_usage, true, false)
                     .await?;
                 if tool_name != "update_goal" {
                     self.reset_suppression_for_current_goal(thread_id).await?;
                 }
-                Ok(GoalRuntimeEffect::None)
+                Ok(effect)
             }
             GoalRuntimeEvent::ToolCompletedGoal {
                 thread_id,
@@ -206,6 +229,15 @@ impl GoalRuntime {
             } => {
                 self.account_turn_progress(thread_id, turn_id, token_usage, false, true)
                     .await?;
+                if let Some(effect) = self
+                    .state
+                    .lock()
+                    .await
+                    .pending_status_effects
+                    .remove(thread_id)
+                {
+                    return Ok(effect);
+                }
                 Ok(GoalRuntimeEffect::None)
             }
             GoalRuntimeEvent::TurnFinished {
@@ -233,7 +265,10 @@ impl GoalRuntime {
                 previous_goal,
             } => self.external_set(thread_id, goal, previous_goal).await,
             GoalRuntimeEvent::ExternalClear { thread_id } => self.external_clear(thread_id).await,
-            GoalRuntimeEvent::ThreadResumed { thread_id } => self.thread_resumed(thread_id).await,
+            GoalRuntimeEvent::ThreadResumed {
+                thread_id,
+                restored_events,
+            } => self.thread_resumed(thread_id, restored_events).await,
             GoalRuntimeEvent::MaybeContinueIfIdle { thread_id } => {
                 self.maybe_continue_if_idle(thread_id).await
             }
@@ -270,11 +305,12 @@ impl GoalRuntime {
         Ok(goal)
     }
 
-    pub(crate) async fn update_goal_status(
+    pub(crate) async fn update_goal_status_effect(
         &self,
         thread_id: &ThreadId,
         status: ThreadGoalStatus,
-    ) -> anyhow::Result<ThreadGoal> {
+    ) -> anyhow::Result<GoalRuntimeEffect> {
+        let previous = self.db.get_thread_goal(thread_id).await?;
         let status = status_record_from_protocol(status);
         let goal = self
             .db
@@ -289,7 +325,29 @@ impl GoalRuntime {
             )
             .await?
             .ok_or_else(|| anyhow::anyhow!("thread has no current goal"))?;
-        Ok(thread_goal_from_record(goal))
+        let goal = thread_goal_from_record(goal);
+        self.mark_active_goal(
+            thread_id,
+            (goal.status == ThreadGoalStatus::Active).then_some(goal.goal_id.clone()),
+        )
+        .await;
+        Ok(self
+            .goal_updated_effect(goal, previous.map(thread_goal_from_record))
+            .await)
+    }
+
+    async fn update_goal_status_from_tool(
+        &self,
+        thread_id: &ThreadId,
+        status: ThreadGoalStatus,
+    ) -> anyhow::Result<ThreadGoal> {
+        let effect = self.update_goal_status_effect(thread_id, status).await?;
+        let goal = goal_from_effect(&effect).clone();
+        let mut state = self.state.lock().await;
+        state
+            .pending_status_effects
+            .insert(thread_id.clone(), effect);
+        Ok(goal)
     }
 
     pub(crate) async fn get_goal(
@@ -300,6 +358,19 @@ impl GoalRuntime {
             .get_thread_goal(thread_id)
             .await
             .map(|goal| goal.map(thread_goal_from_record))
+    }
+
+    pub(crate) async fn active_goal_id_for_turn(
+        &self,
+        thread_id: &ThreadId,
+        turn_id: &TurnId,
+    ) -> Option<String> {
+        let state = self.state.lock().await;
+        state
+            .turn_accounting
+            .get(thread_id)
+            .filter(|snapshot| &snapshot.turn_id == turn_id)
+            .and_then(|snapshot| snapshot.active_goal_id.clone())
     }
 
     async fn turn_started(
@@ -324,6 +395,9 @@ impl GoalRuntime {
         self.mark_active_goal_locked(thread_id, active_goal_id.clone())
             .await;
         let mut state = self.state.lock().await;
+        if let Some(goal_id) = active_goal_id.as_ref() {
+            *state.goal_turn_counts.entry(goal_id.clone()).or_insert(0) += 1;
+        }
         state.turn_accounting.insert(
             thread_id.clone(),
             GoalTurnAccountingSnapshot {
@@ -536,16 +610,26 @@ impl GoalRuntime {
             .as_ref()
             .is_some_and(|previous| previous.objective != goal.objective)
         {
+            let content = crate::runtime::goal::prompts::objective_updated_prompt(&goal);
+            let final_effect = self.goal_updated_effect(goal.clone(), previous_goal).await;
+            if let GoalRuntimeEffect::EmitUpdatedAndGoalReport { report, .. } = final_effect {
+                return Ok(GoalRuntimeEffect::EmitUpdatedInjectContextAndGoalReport {
+                    goal,
+                    source: "goal_objective_updated",
+                    content,
+                    report,
+                });
+            }
             return Ok(GoalRuntimeEffect::EmitUpdatedAndInjectPersistentContext {
-                goal: goal.clone(),
+                goal,
                 source: "goal_objective_updated",
-                content: crate::runtime::goal::prompts::objective_updated_prompt(&goal),
+                content,
             });
         }
         if active && !self.has_active_turn(thread_id).await {
             return Ok(GoalRuntimeEffect::ScheduleContinuation);
         }
-        Ok(GoalRuntimeEffect::EmitUpdated(goal))
+        Ok(self.goal_updated_effect(goal, previous_goal).await)
     }
 
     async fn external_clear(&self, thread_id: &ThreadId) -> anyhow::Result<GoalRuntimeEffect> {
@@ -555,7 +639,13 @@ impl GoalRuntime {
         Ok(GoalRuntimeEffect::EmitCleared(thread_id.clone()))
     }
 
-    async fn thread_resumed(&self, thread_id: &ThreadId) -> anyhow::Result<GoalRuntimeEffect> {
+    async fn thread_resumed(
+        &self,
+        thread_id: &ThreadId,
+        restored_events: &[RuntimeEvent],
+    ) -> anyhow::Result<GoalRuntimeEffect> {
+        self.rebuild_report_facts_from_events(thread_id, restored_events)
+            .await;
         let goal = self.db.get_thread_goal(thread_id).await?;
         let active_goal_id = goal
             .as_ref()
@@ -607,21 +697,145 @@ impl GoalRuntime {
         &self,
         goal: ThreadGoalRecord,
     ) -> anyhow::Result<GoalRuntimeEffect> {
-        let mut state = self.state.lock().await;
-        if !state
-            .budget_limit_reported_goal_ids
-            .insert(goal.goal_id.clone())
-        {
+        let first_budget_report = {
+            let mut state = self.state.lock().await;
+            state
+                .budget_limit_reported_goal_ids
+                .insert(goal.goal_id.clone())
+        };
+        if !first_budget_report {
             return Ok(GoalRuntimeEffect::EmitUpdated(thread_goal_from_record(
                 goal,
             )));
         }
         let goal = thread_goal_from_record(goal);
+        let content = crate::runtime::goal::prompts::budget_limit_prompt(&goal);
+        if let Some(report) = self.report_for_final_status(&goal).await {
+            return Ok(GoalRuntimeEffect::EmitUpdatedInjectContextAndGoalReport {
+                goal,
+                source: "goal_budget_limited",
+                content,
+                report,
+            });
+        }
         Ok(GoalRuntimeEffect::EmitUpdatedAndInjectPersistentContext {
-            goal: goal.clone(),
+            goal,
             source: "goal_budget_limited",
-            content: crate::runtime::goal::prompts::budget_limit_prompt(&goal),
+            content,
         })
+    }
+
+    async fn goal_updated_effect(
+        &self,
+        goal: ThreadGoal,
+        previous_goal: Option<ThreadGoal>,
+    ) -> GoalRuntimeEffect {
+        let transitioned = previous_goal
+            .as_ref()
+            .is_none_or(|previous| previous.status != goal.status);
+        if transitioned {
+            if let Some(report) = self.report_for_final_status(&goal).await {
+                return GoalRuntimeEffect::EmitUpdatedAndGoalReport { goal, report };
+            }
+        }
+        GoalRuntimeEffect::EmitUpdated(goal)
+    }
+
+    async fn report_for_final_status(&self, goal: &ThreadGoal) -> Option<ThreadGoalReport> {
+        if !is_final_report_status(goal.status) {
+            return None;
+        }
+        let mut state = self.state.lock().await;
+        let key = report_status_key(&goal.goal_id, goal.status);
+        if !state.reported_goal_statuses.insert(key) {
+            return None;
+        }
+        let turns_run = state
+            .goal_turn_counts
+            .get(&goal.goal_id)
+            .copied()
+            .unwrap_or_default();
+        let changed_files = state
+            .goal_changed_files
+            .get(&goal.goal_id)
+            .cloned()
+            .unwrap_or_default();
+        Some(ThreadGoalReport {
+            goal_id: goal.goal_id.clone(),
+            objective: goal.objective.clone(),
+            final_status: goal.status,
+            turns_run,
+            tokens_used: goal.tokens_used,
+            token_budget: goal.token_budget,
+            time_used_seconds: goal.time_used_seconds,
+            changed_files,
+            pending_approvals_count: 0,
+            summary: fallback_report_summary(goal),
+        })
+    }
+
+    async fn record_changed_files_for_current_goal(
+        &self,
+        thread_id: &ThreadId,
+        turn_id: &TurnId,
+        changed_files: Vec<String>,
+    ) {
+        if changed_files.is_empty() {
+            return;
+        }
+        let mut state = self.state.lock().await;
+        let Some(goal_id) = state
+            .turn_accounting
+            .get(thread_id)
+            .filter(|snapshot| &snapshot.turn_id == turn_id)
+            .and_then(|snapshot| snapshot.active_goal_id.clone())
+        else {
+            return;
+        };
+        let files = state.goal_changed_files.entry(goal_id).or_default();
+        for file in changed_files {
+            if !files.iter().any(|existing| existing == &file) {
+                files.push(file);
+            }
+        }
+    }
+
+    async fn rebuild_report_facts_from_events(
+        &self,
+        thread_id: &ThreadId,
+        events: &[RuntimeEvent],
+    ) {
+        let mut turn_counts = HashMap::<String, i64>::new();
+        let mut changed_files = HashMap::<String, Vec<String>>::new();
+        for event in events.iter().filter(|event| &event.thread_id == thread_id) {
+            match &event.kind {
+                RuntimeEventKind::ThreadGoalTurnStarted { goal_id } => {
+                    *turn_counts.entry(goal_id.clone()).or_insert(0) += 1;
+                }
+                RuntimeEventKind::ThreadGoalToolCompleted {
+                    goal_id,
+                    changed_files: files,
+                } => {
+                    let goal_files = changed_files.entry(goal_id.clone()).or_default();
+                    for file in files {
+                        if !goal_files.iter().any(|existing| existing == file) {
+                            goal_files.push(file.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if turn_counts.is_empty() && changed_files.is_empty() {
+            return;
+        }
+        let mut state = self.state.lock().await;
+        for (goal_id, count) in turn_counts {
+            state.goal_turn_counts.insert(goal_id, count);
+        }
+        for (goal_id, files) in changed_files {
+            state.goal_changed_files.insert(goal_id, files);
+        }
     }
 
     async fn mark_active_goal(&self, thread_id: &ThreadId, goal_id: Option<String>) {
@@ -714,13 +928,63 @@ fn status_record_from_protocol(status: ThreadGoalStatus) -> ThreadGoalStatusReco
     }
 }
 
+fn goal_from_effect(effect: &GoalRuntimeEffect) -> &ThreadGoal {
+    match effect {
+        GoalRuntimeEffect::EmitUpdated(goal)
+        | GoalRuntimeEffect::EmitUpdatedAndGoalReport { goal, .. }
+        | GoalRuntimeEffect::EmitUpdatedAndInjectPersistentContext { goal, .. }
+        | GoalRuntimeEffect::EmitUpdatedInjectContextAndGoalReport { goal, .. }
+        | GoalRuntimeEffect::EmitUpdatedAndContinuationSuppressed { goal, .. } => goal,
+        GoalRuntimeEffect::None
+        | GoalRuntimeEffect::EmitCleared(_)
+        | GoalRuntimeEffect::ScheduleContinuation => {
+            unreachable!("status update must produce an updated goal")
+        }
+    }
+}
+
+fn is_final_report_status(status: ThreadGoalStatus) -> bool {
+    matches!(
+        status,
+        ThreadGoalStatus::Complete
+            | ThreadGoalStatus::Blocked
+            | ThreadGoalStatus::UsageLimited
+            | ThreadGoalStatus::BudgetLimited
+    )
+}
+
+fn report_status_key(goal_id: &str, status: ThreadGoalStatus) -> String {
+    format!("{goal_id}:{}", status_report_name(status))
+}
+
+fn status_report_name(status: ThreadGoalStatus) -> &'static str {
+    match status {
+        ThreadGoalStatus::Active => "active",
+        ThreadGoalStatus::Paused => "paused",
+        ThreadGoalStatus::Blocked => "blocked",
+        ThreadGoalStatus::UsageLimited => "usage_limited",
+        ThreadGoalStatus::BudgetLimited => "budget_limited",
+        ThreadGoalStatus::Complete => "complete",
+    }
+}
+
+fn fallback_report_summary(goal: &ThreadGoal) -> String {
+    format!(
+        "Goal {} with status {}.",
+        goal.goal_id,
+        status_report_name(goal.status)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
     use std::time::Duration;
 
+    use crate::events::{RuntimeEvent, RuntimeEventKind};
     use crate::index_db::{IndexDb, ProjectRecord, ProjectUpsert};
-    use crate::types::ThreadId;
+    use crate::state::rollout::{events_from_rollout_items, RolloutItem, RolloutStore};
+    use crate::types::{EventId, ThreadId};
 
     use super::*;
 
@@ -833,6 +1097,7 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
                 turn_id: &turn_id,
                 tool_name: "read_file",
                 token_usage: usage(15),
+                changed_files: Vec::new(),
             })
             .await
             .unwrap();
@@ -878,6 +1143,51 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
     }
 
     #[tokio::test]
+    async fn budget_limit_unsuppressed_returns_goal_report_without_deadlock() {
+        let thread_id = ThreadId::new("goal_runtime_budget_report");
+        let turn_id = TurnId::new("turn_1");
+        let (_dir, runtime) = runtime_with_thread(&thread_id).await;
+        runtime
+            .create_goal(&thread_id, "hit budget with report".to_string(), Some(5))
+            .await
+            .unwrap();
+        runtime
+            .apply(GoalRuntimeEvent::TurnStarted {
+                thread_id: &thread_id,
+                turn_id: &turn_id,
+                trigger: GoalTurnTrigger::User,
+                token_usage: usage(0),
+            })
+            .await
+            .unwrap();
+
+        let effect = tokio::time::timeout(
+            Duration::from_millis(250),
+            runtime.apply(GoalRuntimeEvent::ToolCompleted {
+                thread_id: &thread_id,
+                turn_id: &turn_id,
+                tool_name: "apply_patch",
+                token_usage: usage(6),
+                changed_files: vec!["src/runtime/goal/runtime.rs".to_string()],
+            }),
+        )
+        .await
+        .expect("budget limit report path should not deadlock")
+        .unwrap();
+
+        let GoalRuntimeEffect::EmitUpdatedInjectContextAndGoalReport { goal, report, .. } = effect
+        else {
+            panic!("expected budget limit report effect, got {effect:?}");
+        };
+        assert_eq!(goal.status, ThreadGoalStatus::BudgetLimited);
+        assert_eq!(report.final_status, ThreadGoalStatus::BudgetLimited);
+        assert_eq!(
+            report.changed_files,
+            vec!["src/runtime/goal/runtime.rs".to_string()]
+        );
+    }
+
+    #[tokio::test]
     async fn thread_resumed_restores_active_goal_wall_clock() {
         let thread_id = ThreadId::new("goal_runtime_resumed");
         let (_dir, runtime) = runtime_with_thread(&thread_id).await;
@@ -889,6 +1199,7 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
         let effect = runtime
             .apply(GoalRuntimeEvent::ThreadResumed {
                 thread_id: &thread_id,
+                restored_events: &[],
             })
             .await
             .unwrap();
@@ -1020,6 +1331,258 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
     }
 
     #[tokio::test]
+    async fn update_goal_to_complete_emits_goal_report_effect() {
+        let thread_id = ThreadId::new("goal_runtime_complete_report");
+        let turn_id = TurnId::new("turn_complete");
+        let (_dir, runtime) = runtime_with_thread(&thread_id).await;
+        runtime
+            .create_goal(&thread_id, "ship the morning report".to_string(), Some(500))
+            .await
+            .unwrap();
+        runtime
+            .apply(GoalRuntimeEvent::TurnStarted {
+                thread_id: &thread_id,
+                turn_id: &turn_id,
+                trigger: GoalTurnTrigger::User,
+                token_usage: usage(10),
+            })
+            .await
+            .unwrap();
+        runtime
+            .apply(GoalRuntimeEvent::ToolCompletedGoal {
+                thread_id: &thread_id,
+                turn_id: &turn_id,
+                token_usage: usage(42),
+            })
+            .await
+            .unwrap();
+
+        let effect = runtime
+            .update_goal_status_effect(&thread_id, ThreadGoalStatus::Complete)
+            .await
+            .unwrap();
+
+        let GoalRuntimeEffect::EmitUpdatedAndGoalReport { goal, report } = effect else {
+            panic!("expected goal report effect, got {effect:?}");
+        };
+        assert_eq!(goal.status, ThreadGoalStatus::Complete);
+        assert_eq!(report.objective, "ship the morning report");
+        assert_eq!(report.final_status, ThreadGoalStatus::Complete);
+        assert_eq!(report.turns_run, 1);
+        assert_eq!(report.tokens_used, 32);
+        assert_eq!(report.token_budget, Some(500));
+        assert_eq!(report.pending_approvals_count, 0);
+    }
+
+    #[tokio::test]
+    async fn goal_report_changed_files_are_scoped_to_goal_id() {
+        let thread_id = ThreadId::new("goal_runtime_changed_files_scope");
+        let first_turn_id = TurnId::new("turn_first");
+        let second_turn_id = TurnId::new("turn_second");
+        let (_dir, runtime) = runtime_with_thread(&thread_id).await;
+        runtime
+            .create_goal(&thread_id, "first goal".to_string(), Some(500))
+            .await
+            .unwrap();
+        runtime
+            .apply(GoalRuntimeEvent::TurnStarted {
+                thread_id: &thread_id,
+                turn_id: &first_turn_id,
+                trigger: GoalTurnTrigger::User,
+                token_usage: usage(0),
+            })
+            .await
+            .unwrap();
+        runtime
+            .apply(GoalRuntimeEvent::ToolCompleted {
+                thread_id: &thread_id,
+                turn_id: &first_turn_id,
+                tool_name: "apply_patch",
+                token_usage: usage(1),
+                changed_files: vec!["src/first.rs".to_string()],
+            })
+            .await
+            .unwrap();
+        let first_effect = runtime
+            .update_goal_status_effect(&thread_id, ThreadGoalStatus::Complete)
+            .await
+            .unwrap();
+        let GoalRuntimeEffect::EmitUpdatedAndGoalReport {
+            report: first_report,
+            ..
+        } = first_effect
+        else {
+            panic!("expected first goal report, got {first_effect:?}");
+        };
+        assert_eq!(first_report.changed_files, vec!["src/first.rs".to_string()]);
+
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let second_goal = runtime
+            .db
+            .replace_thread_goal(
+                &thread_id,
+                "second goal",
+                ThreadGoalStatusRecord::Active,
+                Some(500),
+            )
+            .await
+            .unwrap();
+        runtime
+            .apply(GoalRuntimeEvent::ThreadResumed {
+                thread_id: &thread_id,
+                restored_events: &[],
+            })
+            .await
+            .unwrap();
+        runtime
+            .apply(GoalRuntimeEvent::TurnStarted {
+                thread_id: &thread_id,
+                turn_id: &second_turn_id,
+                trigger: GoalTurnTrigger::User,
+                token_usage: usage(0),
+            })
+            .await
+            .unwrap();
+        runtime
+            .apply(GoalRuntimeEvent::ToolCompleted {
+                thread_id: &thread_id,
+                turn_id: &second_turn_id,
+                tool_name: "write_file",
+                token_usage: usage(1),
+                changed_files: vec!["src/second.rs".to_string()],
+            })
+            .await
+            .unwrap();
+        let second_effect = runtime
+            .update_goal_status_effect(&thread_id, ThreadGoalStatus::Complete)
+            .await
+            .unwrap();
+        let GoalRuntimeEffect::EmitUpdatedAndGoalReport {
+            report: second_report,
+            ..
+        } = second_effect
+        else {
+            panic!("expected second goal report, got {second_effect:?}");
+        };
+        assert_eq!(second_report.goal_id, second_goal.goal_id);
+        assert_eq!(
+            second_report.changed_files,
+            vec!["src/second.rs".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn external_set_final_status_with_objective_change_emits_report_and_context() {
+        let thread_id = ThreadId::new("goal_runtime_external_final_objective");
+        let (_dir, runtime) = runtime_with_thread(&thread_id).await;
+        let previous_goal = runtime
+            .create_goal(&thread_id, "old objective".to_string(), None)
+            .await
+            .unwrap();
+        let mut goal = previous_goal.clone();
+        goal.objective = "new objective".to_string();
+        goal.status = ThreadGoalStatus::Complete;
+
+        let effect = runtime
+            .apply(GoalRuntimeEvent::ExternalSet {
+                thread_id: &thread_id,
+                goal,
+                previous_goal: Some(previous_goal),
+            })
+            .await
+            .unwrap();
+
+        let GoalRuntimeEffect::EmitUpdatedInjectContextAndGoalReport { source, report, .. } =
+            effect
+        else {
+            panic!("expected objective context plus goal report, got {effect:?}");
+        };
+        assert_eq!(source, "goal_objective_updated");
+        assert_eq!(report.objective, "new objective");
+        assert_eq!(report.final_status, ThreadGoalStatus::Complete);
+    }
+
+    #[tokio::test]
+    async fn thread_resumed_rebuilds_goal_report_facts_from_persisted_markers() {
+        let thread_id = ThreadId::new("goal_runtime_restart_report_facts");
+        let turn_id = TurnId::new("turn_before_restart");
+        let (dir, runtime) = runtime_with_thread(&thread_id).await;
+        let goal = runtime
+            .create_goal(&thread_id, "survive runtime restart".to_string(), Some(500))
+            .await
+            .unwrap();
+        runtime
+            .apply(GoalRuntimeEvent::TurnStarted {
+                thread_id: &thread_id,
+                turn_id: &turn_id,
+                trigger: GoalTurnTrigger::User,
+                token_usage: usage(0),
+            })
+            .await
+            .unwrap();
+        runtime
+            .apply(GoalRuntimeEvent::ToolCompleted {
+                thread_id: &thread_id,
+                turn_id: &turn_id,
+                tool_name: "write_file",
+                token_usage: usage(10),
+                changed_files: vec!["src/restarted.rs".to_string()],
+            })
+            .await
+            .unwrap();
+        let marker_events = vec![
+            RuntimeEvent {
+                event_id: EventId::new("evt_goal_turn_started"),
+                thread_id: thread_id.clone(),
+                turn_id: Some(turn_id.clone()),
+                kind: RuntimeEventKind::ThreadGoalTurnStarted {
+                    goal_id: goal.goal_id.clone(),
+                },
+            },
+            RuntimeEvent {
+                event_id: EventId::new("evt_goal_tool_completed"),
+                thread_id: thread_id.clone(),
+                turn_id: Some(turn_id),
+                kind: RuntimeEventKind::ThreadGoalToolCompleted {
+                    goal_id: goal.goal_id.clone(),
+                    changed_files: vec!["src/restarted.rs".to_string()],
+                },
+            },
+        ];
+        let rollout_store = RolloutStore::new(dir.path().join("goal-markers.jsonl"));
+        rollout_store
+            .append_items_blocking(
+                &marker_events
+                    .iter()
+                    .cloned()
+                    .map(RolloutItem::EventMsg)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let rollout_items = RolloutStore::read_items_blocking(rollout_store.path()).unwrap();
+        let restored_events = events_from_rollout_items(&rollout_items);
+        let restarted_runtime = GoalRuntime::new(runtime.db.clone());
+
+        restarted_runtime
+            .apply(GoalRuntimeEvent::ThreadResumed {
+                thread_id: &thread_id,
+                restored_events: &restored_events,
+            })
+            .await
+            .unwrap();
+        let effect = restarted_runtime
+            .update_goal_status_effect(&thread_id, ThreadGoalStatus::Complete)
+            .await
+            .unwrap();
+
+        let GoalRuntimeEffect::EmitUpdatedAndGoalReport { report, .. } = effect else {
+            panic!("expected restarted runtime goal report, got {effect:?}");
+        };
+        assert_eq!(report.turns_run, 1);
+        assert_eq!(report.changed_files, vec!["src/restarted.rs".to_string()]);
+    }
+
+    #[tokio::test]
     async fn thread_resumed_resets_wall_clock_baseline_to_now_without_counting_app_closed_time() {
         let thread_id = ThreadId::new("goal_runtime_resume_baseline");
         let (_dir, runtime) = runtime_with_thread(&thread_id).await;
@@ -1035,6 +1598,7 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
         runtime
             .apply(GoalRuntimeEvent::ThreadResumed {
                 thread_id: &thread_id,
+                restored_events: &[],
             })
             .await
             .unwrap();

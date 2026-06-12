@@ -42,6 +42,10 @@ pub struct ThreadRecord {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_opened_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_parent_thread_id: Option<crate::types::ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_point_turn_id: Option<crate::types::TurnId>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]

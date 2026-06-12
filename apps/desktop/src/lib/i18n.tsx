@@ -3,6 +3,48 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 export type Locale = "en" | "zh";
 
 export type TranslationKey =
+  | "approvals.inbox.title"
+  | "approvals.inbox.description"
+  | "approvals.inbox.empty"
+  | "approvals.inbox.pending"
+  | "approvals.inbox.approvalSingular"
+  | "approvals.inbox.approvalPlural"
+  | "approvals.inbox.loading"
+  | "approvals.inbox.approveSelected"
+  | "approvals.inbox.approveSelectedAria"
+  | "approvals.inbox.clearSelection"
+  | "approvals.inbox.details"
+  | "approvals.inbox.detailsFor"
+  | "approvals.inbox.hideDetails"
+  | "approvals.inbox.hideDetailsFor"
+  | "approvals.inbox.approve"
+  | "approvals.inbox.approveFor"
+  | "approvals.inbox.reject"
+  | "approvals.inbox.rejectFor"
+  | "approvals.inbox.rejectRollback"
+  | "approvals.inbox.rejectRollbackFor"
+  | "approvals.inbox.rollbackUnavailable"
+  | "approvals.inbox.checkpoint"
+  | "approvals.inbox.confirmTitle"
+  | "approvals.inbox.confirmDescription"
+  | "approvals.inbox.confirmUnderstanding"
+  | "approvals.inbox.confirmAction"
+  | "approvals.inbox.cancel"
+  | "approvals.inbox.kind"
+  | "approvals.inbox.requested"
+  | "approvals.inbox.requestedUnknown"
+  | "approvals.inbox.select"
+  | "approvals.inbox.groupGoal"
+  | "approvals.inbox.groupThread"
+  | "approvals.inbox.status.approved"
+  | "approvals.inbox.status.denied"
+  | "approvals.inbox.status.batchApproved"
+  | "approvals.inbox.status.batchPartialFailed"
+  | "approvals.inbox.status.rollbackUnavailable"
+  | "approvals.inbox.status.rollbackRestored"
+  | "approvals.inbox.status.rollbackFailedAfterReject"
+  | "transcript.actions.forkFromHere"
+  | "sessions.forkedFromTurn"
   | "composer.actions.addPhotosAndFiles"
   | "composer.actions.attachChrome"
   | "composer.actions.planMode"
@@ -136,6 +178,48 @@ const localeStorageKey = "exagent.locale";
 
 const translations: Record<Locale, Record<TranslationKey, string>> = {
   en: {
+    "approvals.inbox.title": "Approval inbox",
+    "approvals.inbox.description": "Review pending approvals across active threads.",
+    "approvals.inbox.empty": "No pending approvals.",
+    "approvals.inbox.pending": "pending",
+    "approvals.inbox.approvalSingular": "approval",
+    "approvals.inbox.approvalPlural": "approvals",
+    "approvals.inbox.loading": "Refreshing approvals...",
+    "approvals.inbox.approveSelected": "Approve selected",
+    "approvals.inbox.approveSelectedAria": "Approve selected approvals",
+    "approvals.inbox.clearSelection": "Clear selection",
+    "approvals.inbox.details": "Show details",
+    "approvals.inbox.detailsFor": "Show details for {summary}",
+    "approvals.inbox.hideDetails": "Hide details",
+    "approvals.inbox.hideDetailsFor": "Hide details for {summary}",
+    "approvals.inbox.approve": "Approve",
+    "approvals.inbox.approveFor": "Approve {summary}",
+    "approvals.inbox.reject": "Reject",
+    "approvals.inbox.rejectFor": "Reject {summary}",
+    "approvals.inbox.rejectRollback": "Reject and roll back",
+    "approvals.inbox.rejectRollbackFor": "Reject and roll back {summary}",
+    "approvals.inbox.rollbackUnavailable": "Rollback unavailable",
+    "approvals.inbox.checkpoint": "Checkpoint",
+    "approvals.inbox.confirmTitle": "Reject and roll back",
+    "approvals.inbox.confirmDescription": "Confirm the denial before restoring this checkpoint.",
+    "approvals.inbox.confirmUnderstanding": "I understand rollback will restore this checkpoint",
+    "approvals.inbox.confirmAction": "Confirm reject and roll back",
+    "approvals.inbox.cancel": "Cancel",
+    "approvals.inbox.kind": "Kind",
+    "approvals.inbox.requested": "Requested",
+    "approvals.inbox.requestedUnknown": "unknown",
+    "approvals.inbox.select": "Select",
+    "approvals.inbox.groupGoal": "Goal",
+    "approvals.inbox.groupThread": "Thread",
+    "approvals.inbox.status.approved": "Approved {approvalId}.",
+    "approvals.inbox.status.denied": "Rejected {approvalId}.",
+    "approvals.inbox.status.batchApproved": "Approved {count} selected {approvalNoun}.",
+    "approvals.inbox.status.batchPartialFailed": "Approved {completed} of {total} selected approvals. Stopped at {approvalId}: {error}",
+    "approvals.inbox.status.rollbackUnavailable": "Rollback unavailable: {approvalId} has no checkpoint.",
+    "approvals.inbox.status.rollbackRestored": "Rejected {approvalId} and restored checkpoint {checkpointId}.",
+    "approvals.inbox.status.rollbackFailedAfterReject": "Rejected {approvalId}, but rollback failed: {error}",
+    "transcript.actions.forkFromHere": "Fork from here",
+    "sessions.forkedFromTurn": "forked from turn {turn}",
     "composer.actions.addPhotosAndFiles": "Add photos",
     "composer.actions.attachChrome": "Attach Google Chrome",
     "composer.actions.planMode": "Plan mode",
@@ -260,6 +344,48 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "common.close": "Close"
   },
   zh: {
+    "approvals.inbox.title": "审批收件箱",
+    "approvals.inbox.description": "查看当前线程中的待处理审批。",
+    "approvals.inbox.empty": "没有待处理审批。",
+    "approvals.inbox.pending": "待处理",
+    "approvals.inbox.approvalSingular": "审批",
+    "approvals.inbox.approvalPlural": "审批",
+    "approvals.inbox.loading": "正在刷新审批...",
+    "approvals.inbox.approveSelected": "批准所选",
+    "approvals.inbox.approveSelectedAria": "批准所选审批",
+    "approvals.inbox.clearSelection": "清除选择",
+    "approvals.inbox.details": "显示详情",
+    "approvals.inbox.detailsFor": "显示 {summary} 的详情",
+    "approvals.inbox.hideDetails": "隐藏详情",
+    "approvals.inbox.hideDetailsFor": "隐藏 {summary} 的详情",
+    "approvals.inbox.approve": "批准",
+    "approvals.inbox.approveFor": "批准 {summary}",
+    "approvals.inbox.reject": "拒绝",
+    "approvals.inbox.rejectFor": "拒绝 {summary}",
+    "approvals.inbox.rejectRollback": "拒绝并回滚",
+    "approvals.inbox.rejectRollbackFor": "拒绝并回滚 {summary}",
+    "approvals.inbox.rollbackUnavailable": "无法回滚",
+    "approvals.inbox.checkpoint": "检查点",
+    "approvals.inbox.confirmTitle": "拒绝并回滚",
+    "approvals.inbox.confirmDescription": "恢复此检查点前请确认拒绝操作。",
+    "approvals.inbox.confirmUnderstanding": "我了解回滚会恢复此检查点",
+    "approvals.inbox.confirmAction": "确认拒绝并回滚",
+    "approvals.inbox.cancel": "取消",
+    "approvals.inbox.kind": "类型",
+    "approvals.inbox.requested": "请求时间",
+    "approvals.inbox.requestedUnknown": "未知",
+    "approvals.inbox.select": "选择",
+    "approvals.inbox.groupGoal": "目标",
+    "approvals.inbox.groupThread": "线程",
+    "approvals.inbox.status.approved": "已批准 {approvalId}。",
+    "approvals.inbox.status.denied": "已拒绝 {approvalId}。",
+    "approvals.inbox.status.batchApproved": "已批准 {count} 个所选审批。",
+    "approvals.inbox.status.batchPartialFailed": "已批准 {completed}/{total} 个所选审批。停在 {approvalId}：{error}",
+    "approvals.inbox.status.rollbackUnavailable": "无法回滚：{approvalId} 没有检查点。",
+    "approvals.inbox.status.rollbackRestored": "已拒绝 {approvalId} 并恢复检查点 {checkpointId}。",
+    "approvals.inbox.status.rollbackFailedAfterReject": "已拒绝 {approvalId}，但回滚失败：{error}",
+    "transcript.actions.forkFromHere": "从这里分叉",
+    "sessions.forkedFromTurn": "从第 {turn} 轮分叉",
     "composer.actions.addPhotosAndFiles": "添加照片",
     "composer.actions.attachChrome": "附加 Google Chrome",
     "composer.actions.planMode": "计划模式",

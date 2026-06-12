@@ -30,8 +30,15 @@ The current response advertises:
     "thread_start",
     "thread_resume",
     "thread_read",
+    "thread_fork",
+    "thread_compact",
+    "thread_goal",
+    "agent_tree",
+    "approvals_list",
+    "checkpoint_restore",
     "turn_start",
     "turn_interrupt",
+    "approval_decision",
     "events_replay"
   ],
   "supported_streams": ["events_subscribe"],
@@ -49,6 +56,7 @@ The current response advertises:
 | `/thread/start` | `POST` | Create durable thread state and load a runtime actor. |
 | `/thread/read` | `POST` | Read a renderable thread view. Uses live state when loaded. |
 | `/thread/resume` | `POST` | Load an existing thread from persisted state. |
+| `/agent/tree` | `POST` | Read the root-thread agent roster and nested subagent activity. |
 | `/turn/start` | `POST` | Submit one user turn. Returns after the turn is accepted, not after completion. |
 | `/turn/interrupt` | `POST` | Interrupt an active turn or a pending approval wait. |
 | `/thread/op` | `POST` | Generic tagged `BoundaryOp` dispatch route. |
@@ -115,6 +123,193 @@ message order.
 
 Persisted thread context wins on resume. Unsupported request overrides are
 reported in `ignored_overrides`.
+
+Thread forks are created through the generic `POST /thread/op` route:
+
+```json
+{
+  "type": "thread_fork",
+  "thread_id": "session_parent",
+  "at_turn_id": "turn_1",
+  "workspace_root": "."
+}
+```
+
+`workspace_root` is optional and uses the same canonicalization policy as
+`thread/read`. If the parent runtime is already loaded, the loaded runtime's
+workspace is used after normal workspace mismatch checks. The parent rollout is
+read only; fork creation does not rewrite or append to the parent.
+
+The response names the new cold thread:
+
+```json
+{
+  "type": "thread_fork",
+  "new_thread_id": "session_child",
+  "parent_thread_id": "session_parent",
+  "fork_point_turn_id": "turn_1"
+}
+```
+
+The new thread has `ThreadMeta.thread_source = "fork"` and a transcript prefix
+built from the parent's rollout through `at_turn_id`. Original turn IDs are
+preserved in the forked transcript. The app-server records a fork edge in the
+workspace fork edge store, but does not load a runtime for the child; clients
+should open it through normal `thread/read` or `thread/resume` flows.
+
+Fork errors:
+
+- `thread not found`: no rollout exists for `thread_id` in the resolved
+  workspace.
+- `invalid request: cannot fork while a turn is in progress`: the parent has an
+  active turn in the current app-server process.
+- `fork point turn id <id> was not found in parent history`: `at_turn_id` is not
+  present in the parent's response history.
+- Persistence errors: rollout or fork-edge storage could not be read or written.
+
+## Agent Tree
+
+`POST /agent/tree` reads the root thread for a conversation and returns the
+nested subagent roster:
+
+```json
+{
+  "thread_id": "session_...",
+  "workspace_root": "."
+}
+```
+
+The response is rooted at the conversation root thread, even when `thread_id`
+names a descendant:
+
+```json
+{
+  "root": {
+    "thread_id": "session_...",
+    "root_thread_id": "session_...",
+    "depth": 0,
+    "agent_path": "root",
+    "status": "running",
+    "current_tool": "read_file",
+    "tokens_used": 52340,
+    "children": [
+      {
+        "thread_id": "session_child",
+        "parent_thread_id": "session_...",
+        "root_thread_id": "session_...",
+        "depth": 1,
+        "agent_path": "root/researcher",
+        "status": "idle",
+        "agent_type": "explorer",
+        "agent_role": "research role",
+        "agent_nickname": "Rhea",
+        "last_task_message": "map the inspector state",
+        "last_activity": "also check activeSessionId consumers"
+      }
+    ]
+  }
+}
+```
+
+`current_tool` and `tokens_used` are additive optional fields. `current_tool`
+is the most recent tool invocation start without a matching completed, failed,
+or cancelled event for that thread. For approval-waiting tools, a matching
+`approval_decision` also resolves that in-flight tool. `tokens_used` is the
+thread's latest total token count when token usage has been reported. Older
+payloads omit both fields when the values are unavailable.
+
+## Approval Inbox Listing
+
+Clients can list pending approvals across loaded threads with the generic
+boundary op route:
+
+```json
+{
+  "type": "approvals_list",
+  "workspace_root": "."
+}
+```
+
+`workspace_root` is optional. When present, the list is scoped to loaded
+runtimes whose live snapshot belongs to that workspace.
+
+The response contains the actionable inbox projection:
+
+```json
+{
+  "type": "approvals_list",
+  "approvals": [
+    {
+      "thread_id": "session_...",
+      "approval_id": "approval_1",
+      "kind": "command",
+      "summary": "run_command: rm -rf scratch",
+      "detail": "rm -rf scratch",
+      "goal_id": "goal_...",
+      "requested_at_ms": 1710000000000,
+      "checkpoint_id": "8f3..."
+    }
+  ]
+}
+```
+
+`kind` is currently `command`; patch approvals can use the same shape later.
+For command approvals, `summary` is a compact command line and `detail` is the
+full command. `goal_id` is populated only when the app-server has a goal store
+configured and the approval's thread currently has an active goal. If there is
+no goal store, no goal, or a non-active goal, `goal_id` is `null` or omitted.
+`checkpoint_id` is populated for approval-gated mutating commands when a git
+workspace checkpoint was created before the approval request. It is omitted
+when the workspace is not a git repository or checkpoint creation failed.
+
+Loaded-runtime invariant: the Approval Inbox lists pending approvals from
+loaded runtimes because the in-memory `PolicyManager` is the source of truth
+for actionable approvals. A thread waiting for approval is loaded by
+definition. Cold historical `approval_requested` events are transcript history,
+not inbox items.
+
+## Checkpoint Restore
+
+Clients can restore a git workspace checkpoint with the generic boundary op
+route:
+
+```json
+{
+  "type": "checkpoint_restore",
+  "workspace_root": ".",
+  "checkpoint_id": "8f3..."
+}
+```
+
+`workspace_root` is required and scopes the restore. The app-server
+canonicalizes it with the same workspace override policy used by thread
+operations, then restores only that workspace from the named checkpoint.
+`checkpoint_id` must come from an approval-derived checkpoint: the id must
+match an `approval_requested` event with `checkpoint_id` in a loaded runtime's
+persisted rollout for the same workspace. Raw checkpoint refs created outside
+the approval flow are rejected.
+
+The response summarizes the restore:
+
+```json
+{
+  "type": "checkpoint_restored",
+  "workspace_root": "/absolute/path/to/workspace",
+  "checkpoint_id": "8f3...",
+  "status": "restored",
+  "message": "workspace restored from checkpoint"
+}
+```
+
+Restore is rejected as an invalid request if any loaded runtime in the target
+workspace has an active turn (`active_turn_id` is present). The check is
+conservative across all loaded runtimes for the workspace and runs while a
+short-lived workspace restore guard is held. While that guard is active, new
+turn starts and approval decisions in the same workspace are rejected before
+they can mutate the workspace. Missing checkpoint refs and other restore
+failures are returned as invalid requests. Clients should treat restore as
+destructive to uncommitted changes made after the checkpoint and present their
+own confirmation before calling this op.
 
 ## Permission Profiles
 
@@ -425,13 +620,14 @@ running turn and records `turn_interrupted`. For a waiting approval state, it
 clears pending approvals from the runtime overlay, cancels policy-side waiters,
 and records `turn_interrupted`.
 
-Risky command approvals are exposed as events:
+Risky command approvals are exposed as events and inbox items:
 
-- `approval_requested`: command execution is waiting for a decision.
+- `approval_requested`: command execution is waiting for a decision. It may
+  include `checkpoint_id` when a pre-action workspace checkpoint exists.
 - `approval_decision`: approval or denial has been recorded.
 
-Approval decisions are currently submitted through the `run_command` tool with
-an `approval_id` and `decision`.
+Approval decisions are submitted with the `approval_decision` boundary op using
+the `thread_id`, optional `turn_id`, `approval_id`, and `decision`.
 
 ## Error Statuses
 

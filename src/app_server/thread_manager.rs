@@ -6,16 +6,18 @@ use tokio::sync::broadcast;
 use crate::app_server::override_policy::ensure_supported_permission_profile;
 use crate::app_server::protocol::{
     AgentRunResponse, AgentTreeParams, AgentTreeResponse, ApprovalDecisionParams,
-    ApprovalDecisionResponse, BoundaryCapability, BoundaryOp, BoundaryOpResponse,
+    ApprovalDecisionResponse, ApprovalsListParams, ApprovalsListResponse, BoundaryCapability,
+    BoundaryOp, BoundaryOpResponse, CheckpointRestoreParams, CheckpointRestoreResponse,
     EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, InitializeParams,
-    InitializeResponse, RunParams, ThreadCompactParams, ThreadCompactResponse, ThreadReadParams,
-    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
-    ThreadStartResponse, TurnContextOverrides, TurnInterruptParams, TurnInterruptResponse,
-    TurnStartParams, TurnStartResponse, BOUNDARY_PROTOCOL_VERSION,
+    InitializeResponse, RunParams, ThreadCompactParams, ThreadCompactResponse, ThreadForkParams,
+    ThreadForkResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, TurnContextOverrides,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    BOUNDARY_PROTOCOL_VERSION,
 };
 use crate::app_server::request_processors::{
-    agent_processor, compaction_processor, events_processor, goal_processor, thread_processor,
-    turn_processor,
+    agent_processor, approvals_processor, checkpoint_processor, compaction_processor,
+    events_processor, fork_processor, goal_processor, thread_processor, turn_processor,
 };
 use crate::app_server::services::AppServerServices;
 use crate::config::AgentConfig;
@@ -204,9 +206,12 @@ impl ThreadManager {
                 BoundaryCapability::ThreadStart,
                 BoundaryCapability::ThreadResume,
                 BoundaryCapability::ThreadRead,
+                BoundaryCapability::ThreadFork,
                 BoundaryCapability::ThreadCompact,
                 BoundaryCapability::ThreadGoal,
                 BoundaryCapability::AgentTree,
+                BoundaryCapability::ApprovalsList,
+                BoundaryCapability::CheckpointRestore,
                 BoundaryCapability::TurnStart,
                 BoundaryCapability::TurnInterrupt,
                 BoundaryCapability::ApprovalDecision,
@@ -225,6 +230,10 @@ impl ThreadManager {
         thread_processor::thread_read(self.services.as_ref(), params)
     }
 
+    pub async fn thread_fork(&self, params: ThreadForkParams) -> Result<ThreadForkResponse> {
+        fork_processor::thread_fork(self.services.as_ref(), params).await
+    }
+
     pub async fn thread_compact(
         &self,
         params: ThreadCompactParams,
@@ -236,8 +245,22 @@ impl ThreadManager {
         thread_processor::thread_resume(self.services.as_ref(), params)
     }
 
-    pub fn agent_tree(&self, params: AgentTreeParams) -> Result<AgentTreeResponse> {
-        agent_processor::agent_tree(self.services.as_ref(), params)
+    pub async fn agent_tree(&self, params: AgentTreeParams) -> Result<AgentTreeResponse> {
+        agent_processor::agent_tree(self.services.as_ref(), params).await
+    }
+
+    pub async fn approvals_list(
+        &self,
+        params: ApprovalsListParams,
+    ) -> Result<ApprovalsListResponse> {
+        approvals_processor::approvals_list(self.services.as_ref(), params).await
+    }
+
+    pub async fn checkpoint_restore(
+        &self,
+        params: CheckpointRestoreParams,
+    ) -> Result<CheckpointRestoreResponse> {
+        checkpoint_processor::checkpoint_restore(self.services.as_ref(), params).await
     }
 
     pub async fn turn_start(&self, params: TurnStartParams) -> Result<TurnStartResponse> {
@@ -285,6 +308,10 @@ impl ThreadManager {
             BoundaryOp::ThreadRead(params) => {
                 self.thread_read(params).map(BoundaryOpResponse::ThreadRead)
             }
+            BoundaryOp::ThreadFork(params) => self
+                .thread_fork(params)
+                .await
+                .map(BoundaryOpResponse::ThreadFork),
             BoundaryOp::ThreadCompact(params) => self
                 .thread_compact(params)
                 .await
@@ -307,9 +334,18 @@ impl ThreadManager {
                     .await
                     .map(BoundaryOpResponse::ThreadGoalCleared)
             }
-            BoundaryOp::AgentTree(params) => {
-                self.agent_tree(params).map(BoundaryOpResponse::AgentTree)
-            }
+            BoundaryOp::AgentTree(params) => self
+                .agent_tree(params)
+                .await
+                .map(BoundaryOpResponse::AgentTree),
+            BoundaryOp::ApprovalsList(params) => self
+                .approvals_list(params)
+                .await
+                .map(BoundaryOpResponse::ApprovalsList),
+            BoundaryOp::CheckpointRestore(params) => self
+                .checkpoint_restore(params)
+                .await
+                .map(BoundaryOpResponse::CheckpointRestored),
             BoundaryOp::TurnStart(params) => self
                 .turn_start_direct(params)
                 .await
@@ -359,8 +395,8 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::app_server::protocol::{
-        AgentTreeParams, ApprovalDecisionStatus, BoundaryOpResponse, ThreadGoalSetParams,
-        ThreadGoalStatus,
+        AgentTreeParams, ApprovalDecisionStatus, ApprovalsListParams, BoundaryOpResponse,
+        ThreadGoalSetParams, ThreadGoalStatus,
     };
     use crate::config::ThinkingMode;
     use crate::events::{RuntimeEvent, RuntimeEventKind};
@@ -368,16 +404,19 @@ mod tests {
     use crate::llm::{LlmRequestOptions, MockLlm};
     use crate::mcp::client::{McpCallOutput, McpClient, McpClientFactory, McpToolDefinition};
     use crate::mcp::config::McpServerConfig;
-    use crate::policy::PolicyMode;
+    use crate::policy::{PendingCommandApproval, PolicyMode};
     use crate::resolved::{ModelRef, ResolvedCredential, ResolvedModelConfig};
     use crate::resolver::ModelResolver;
-    use crate::session::{ThreadLineage, ThreadSnapshot, ThreadSource};
+    use crate::session::{ApprovalId, ApprovalStatus, ThreadLineage, ThreadSnapshot, ThreadSource};
     use crate::state::rollout::{
         rollout_paths, thread_meta_from_snapshot, RolloutItem, RolloutStore,
     };
     use crate::state::spawn_edges::ThreadSpawnEdge;
     use crate::tools::ToolSpec;
-    use crate::types::{ConversationMessage, EventId, LlmCompletion, ThreadId, ToolCall, TurnId};
+    use crate::types::{
+        ConversationMessage, EventId, LlmCompletion, ThreadId, TokenUsage, TokenUsageInfo,
+        ToolCall, ToolStatus, TurnId,
+    };
 
     struct RecordingToolsLlm {
         observed_tools: Arc<Mutex<Vec<Vec<String>>>>,
@@ -1610,6 +1649,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_tree_reports_tokens_used_from_loaded_runtime_snapshot() {
+        let dir = tempdir().unwrap();
+        let usage = TokenUsage {
+            input_tokens: 40,
+            cached_input_tokens: 5,
+            output_tokens: 10,
+            reasoning_output_tokens: 2,
+            total_tokens: 52,
+        };
+        let manager = ThreadManager::with_llm(
+            AgentConfig {
+                workspace_root: dir.path().to_path_buf(),
+                cwd: dir.path().to_path_buf(),
+                ..AgentConfig::default()
+            },
+            Box::new(MockLlm::new_completions(vec![LlmCompletion {
+                turn: AssistantTurn {
+                    text: Some("counted".into()),
+                    tool_calls: vec![],
+                    reasoning: vec![],
+                },
+                token_usage: Some(usage.clone()),
+            }])),
+            || ToolRegistry::new(),
+        );
+        let started = manager
+            .thread_start(ThreadStartParams {
+                workspace_root: None,
+                cwd: None,
+                permission_profile: None,
+            })
+            .expect("thread start");
+
+        manager
+            .run_turn_through_runtime(TurnStartParams {
+                thread_id: started.thread.id.clone(),
+                prompt: "count tokens".into(),
+                input: vec![],
+                workspace_root: None,
+                turn_mode: Default::default(),
+                turn_context: None,
+            })
+            .await
+            .expect("turn");
+
+        let replay = manager
+            .events_replay(EventsReplayParams {
+                thread_id: started.thread.id.clone(),
+                workspace_root: None,
+                after_event_id: None,
+                limit: None,
+                include_snapshot: false,
+                event_kinds: vec![],
+            })
+            .expect("events replay");
+        assert!(replay.events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                RuntimeEventKind::TokenCount { info: Some(info) }
+                    if info.total_token_usage.total_tokens == usage.total_tokens
+            )
+        }));
+
+        let tree = manager
+            .agent_tree(AgentTreeParams {
+                thread_id: started.thread.id,
+                workspace_root: None,
+            })
+            .await
+            .expect("agent tree");
+
+        assert_eq!(tree.root.tokens_used, Some(usage.total_tokens));
+    }
+
+    #[tokio::test]
     async fn run_turn_rejects_loaded_runtime_workspace_mismatch() {
         let thread_dir = tempdir().unwrap();
         let other_dir = tempdir().unwrap();
@@ -1721,6 +1835,169 @@ mod tests {
             .expect("approval decision should restore command from loaded workspace");
 
         assert_eq!(decision.status, ApprovalDecisionStatus::Denied);
+    }
+
+    #[tokio::test]
+    async fn turn_start_rejects_while_checkpoint_restore_guard_is_active() {
+        let dir = tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let manager = ThreadManager::with_llm(
+            AgentConfig {
+                workspace_root: root.clone(),
+                cwd: root.clone(),
+                ..AgentConfig::default()
+            },
+            Box::new(MockLlm::new(vec![AssistantTurn {
+                text: Some("should not run during restore".into()),
+                tool_calls: vec![],
+                reasoning: vec![],
+            }])),
+            || ToolRegistry::new(),
+        );
+        let started = manager
+            .thread_start(ThreadStartParams {
+                workspace_root: None,
+                cwd: None,
+                permission_profile: None,
+            })
+            .expect("thread start");
+        let _restore_guard = manager
+            .services
+            .runtime_loader
+            .begin_workspace_restore(&root)
+            .expect("restore guard");
+
+        let err = manager
+            .turn_start(TurnStartParams {
+                thread_id: started.thread.id,
+                prompt: "must reject".into(),
+                input: vec![],
+                workspace_root: None,
+                turn_mode: Default::default(),
+                turn_context: None,
+            })
+            .await
+            .expect_err("turn start should reject while restore is guarded");
+
+        assert!(matches!(
+            err.downcast_ref::<crate::app_server::AppServerError>(),
+            Some(crate::app_server::AppServerError::InvalidRequest(message))
+                if message.contains("checkpoint restore is in progress")
+        ));
+    }
+
+    #[tokio::test]
+    async fn approval_decision_rejects_while_checkpoint_restore_guard_is_active() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("scratch")).unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let manager = ThreadManager::with_llm(
+            AgentConfig {
+                workspace_root: root.clone(),
+                cwd: root.clone(),
+                policy_mode: PolicyMode::Enforced,
+                ..AgentConfig::default()
+            },
+            Box::new(MockLlm::new(vec![AssistantTurn {
+                text: Some("try risky command".into()),
+                tool_calls: vec![ToolCall {
+                    id: "call_restore_guarded_approval".into(),
+                    name: "run_command".into(),
+                    arguments: serde_json::json!({ "command": "rm -rf scratch" }),
+                    thought_signature: None,
+                }],
+                reasoning: vec![],
+            }])),
+            || {
+                let mut registry = ToolRegistry::new();
+                registry.register(crate::tools::run_command::RunCommandTool);
+                registry
+            },
+        );
+        let started = manager
+            .thread_start(ThreadStartParams {
+                workspace_root: None,
+                cwd: None,
+                permission_profile: None,
+            })
+            .expect("thread start");
+        let turn = manager
+            .turn_start(TurnStartParams {
+                thread_id: started.thread.id.clone(),
+                prompt: "request approval".into(),
+                input: vec![],
+                workspace_root: None,
+                turn_mode: Default::default(),
+                turn_context: None,
+            })
+            .await
+            .expect("turn start");
+        let approval_id = wait_for_approval_requested(&manager, &started.thread.id).await;
+        let _restore_guard = manager
+            .services
+            .runtime_loader
+            .begin_workspace_restore(&root)
+            .expect("restore guard");
+
+        let err = manager
+            .approval_decision(ApprovalDecisionParams {
+                thread_id: started.thread.id,
+                turn_id: Some(turn.turn.id),
+                approval_id,
+                decision: ApprovalDecisionStatus::Approved,
+                note: Some("must reject".into()),
+                workspace_root: None,
+            })
+            .await
+            .expect_err("approval decision should reject while restore is guarded");
+
+        assert!(matches!(
+            err.downcast_ref::<crate::app_server::AppServerError>(),
+            Some(crate::app_server::AppServerError::InvalidRequest(message))
+                if message.contains("checkpoint restore is in progress")
+        ));
+        assert!(
+            root.join("scratch").exists(),
+            "rejected approval decision must not run the command"
+        );
+    }
+
+    #[tokio::test]
+    async fn approvals_list_omits_policy_pending_items_without_loaded_runtime() {
+        let dir = tempdir().unwrap();
+        let manager = ThreadManager::with_llm(
+            AgentConfig {
+                workspace_root: dir.path().to_path_buf(),
+                cwd: dir.path().to_path_buf(),
+                policy_mode: PolicyMode::Enforced,
+                ..AgentConfig::default()
+            },
+            Box::new(MockLlm::new(vec![])),
+            ToolRegistry::new,
+        );
+        let thread_id = ThreadId::new("thread_unloaded_pending_approval");
+        manager
+            .services
+            .policy
+            .create_command_approval(
+                thread_id,
+                "run_command",
+                "rm -rf scratch",
+                dir.path().to_path_buf(),
+                None,
+                false,
+                "approval required".into(),
+            )
+            .await;
+
+        let listed = manager
+            .approvals_list(ApprovalsListParams {
+                workspace_root: None,
+            })
+            .await
+            .expect("approvals list");
+
+        assert!(listed.approvals.is_empty());
     }
 
     async fn wait_for_approval_requested(
@@ -1985,6 +2262,7 @@ mod tests {
                 thread_id: started.thread.id.clone(),
                 workspace_root: None,
             })
+            .await
             .expect("agent tree");
         assert!(tree.root.children.is_empty());
     }
@@ -2477,6 +2755,7 @@ mod tests {
                 thread_id: started.thread.id.clone(),
                 workspace_root: None,
             })
+            .await
             .expect("agent tree");
         assert!(tree
             .root
@@ -2504,6 +2783,113 @@ mod tests {
         assert!(!child_tool_names.contains(&"write_file".to_string()));
         assert!(!child_tool_names.contains(&"run_command".to_string()));
         assert!(!child_tool_names.contains(&"spawn_agent".to_string()));
+    }
+
+    #[tokio::test]
+    async fn cold_turn_start_rehydrates_subagent_tools() {
+        let dir = tempdir().unwrap();
+        let observed_tools = Arc::new(Mutex::new(Vec::new()));
+        let manager = ThreadManager::with_llm(
+            AgentConfig {
+                workspace_root: dir.path().to_path_buf(),
+                cwd: dir.path().to_path_buf(),
+                ..AgentConfig::default()
+            },
+            Box::new(RecordingToolsLlm {
+                observed_tools: observed_tools.clone(),
+            }),
+            crate::default_tool_registry,
+        );
+        let thread_id = ThreadId::new("thread_cold_subagent_tools");
+        let snapshot = ThreadSnapshot::new_thread(
+            thread_id.clone(),
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+        let rollout_paths = rollout_paths(dir.path(), &thread_id);
+        RolloutStore::new(rollout_paths.rollout_path)
+            .append_items_blocking(&[RolloutItem::ThreadMeta(thread_meta_from_snapshot(
+                &snapshot,
+            ))])
+            .expect("write cold thread meta");
+
+        manager
+            .run_turn_through_runtime(TurnStartParams {
+                thread_id,
+                prompt: "which tools are visible?".into(),
+                input: vec![],
+                workspace_root: None,
+                turn_mode: Default::default(),
+                turn_context: None,
+            })
+            .await
+            .expect("cold turn start");
+
+        let tools = observed_tools.lock().unwrap();
+        let names = tools.first().expect("observed tool names");
+        assert!(names.contains(&"spawn_agent".to_string()));
+        assert!(names.contains(&"list_agents".to_string()));
+        assert!(names.contains(&"close_agent".to_string()));
+        assert!(names.contains(&"send_message".to_string()));
+        assert!(names.contains(&"followup_task".to_string()));
+        assert!(names.contains(&"wait_agent".to_string()));
+    }
+
+    #[tokio::test]
+    async fn cold_background_turn_start_rehydrates_subagent_tools() {
+        let dir = tempdir().unwrap();
+        let observed_tools = Arc::new(Mutex::new(Vec::new()));
+        let manager = ThreadManager::with_llm(
+            AgentConfig {
+                workspace_root: dir.path().to_path_buf(),
+                cwd: dir.path().to_path_buf(),
+                ..AgentConfig::default()
+            },
+            Box::new(RecordingToolsLlm {
+                observed_tools: observed_tools.clone(),
+            }),
+            crate::default_tool_registry,
+        );
+        let thread_id = ThreadId::new("thread_cold_background_subagent_tools");
+        let snapshot = ThreadSnapshot::new_thread(
+            thread_id.clone(),
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+        let rollout_paths = rollout_paths(dir.path(), &thread_id);
+        RolloutStore::new(rollout_paths.rollout_path)
+            .append_items_blocking(&[RolloutItem::ThreadMeta(thread_meta_from_snapshot(
+                &snapshot,
+            ))])
+            .expect("write cold thread meta");
+
+        manager
+            .turn_start(TurnStartParams {
+                thread_id,
+                prompt: "which tools are visible?".into(),
+                input: vec![],
+                workspace_root: None,
+                turn_mode: Default::default(),
+                turn_context: None,
+            })
+            .await
+            .expect("cold background turn start");
+
+        for _ in 0..50 {
+            if !observed_tools.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let tools = observed_tools.lock().unwrap();
+        let names = tools.first().expect("observed tool names");
+        assert!(names.contains(&"spawn_agent".to_string()));
+        assert!(names.contains(&"list_agents".to_string()));
+        assert!(names.contains(&"close_agent".to_string()));
+        assert!(names.contains(&"send_message".to_string()));
+        assert!(names.contains(&"followup_task".to_string()));
+        assert!(names.contains(&"wait_agent".to_string()));
     }
 
     #[tokio::test]
@@ -2863,8 +3249,8 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn agent_tree_projects_root_descendants_closed_roster_and_metadata() {
+    #[tokio::test]
+    async fn agent_tree_projects_root_descendants_closed_roster_and_metadata() {
         let dir = tempdir().unwrap();
         let manager = ThreadManager::with_llm(
             AgentConfig {
@@ -3052,6 +3438,7 @@ mod tests {
                 thread_id: root.clone(),
                 workspace_root: None,
             })
+            .await
             .expect("agent tree");
 
         assert_eq!(response.root.thread_id.as_ref(), Some(&root));
@@ -3097,6 +3484,467 @@ mod tests {
             tests_node.last_task_message.as_deref(),
             Some("cover the panel reducer")
         );
+    }
+
+    #[tokio::test]
+    async fn agent_tree_marks_pending_approval_child_as_waiting_approval() {
+        let dir = tempdir().unwrap();
+        let manager = ThreadManager::with_llm(
+            AgentConfig {
+                workspace_root: dir.path().to_path_buf(),
+                cwd: dir.path().to_path_buf(),
+                ..AgentConfig::default()
+            },
+            Box::new(ResumeTreeSubagentLlm {
+                child_prompts: Arc::new(Mutex::new(Vec::new())),
+            }),
+            || ToolRegistry::new(),
+        );
+
+        let root = ThreadId::new("thread_root");
+        let reviewer = ThreadId::new("thread_reviewer");
+
+        write_agent_thread(
+            dir.path(),
+            ThreadSnapshot::new_thread(
+                root.clone(),
+                dir.path().to_path_buf(),
+                dir.path().to_path_buf(),
+            ),
+            vec![RuntimeEvent {
+                event_id: EventId::new("evt_spawn_reviewer"),
+                thread_id: root.clone(),
+                turn_id: Some(TurnId::new("turn_root")),
+                kind: RuntimeEventKind::SubagentSpawned {
+                    invocation_id: "inv_reviewer".into(),
+                    tool_call_id: "call_reviewer".into(),
+                    parent_thread_id: root.clone(),
+                    child_thread_id: reviewer.clone(),
+                    task_name: "reviewer".into(),
+                    message_preview: "inspect the approval gate".into(),
+                },
+            }],
+        );
+        write_agent_thread(
+            dir.path(),
+            subagent_snapshot(
+                dir.path(),
+                reviewer.clone(),
+                root.clone(),
+                root.clone(),
+                1,
+                "root/reviewer",
+                Some(AgentType::Reviewer),
+                None,
+                None,
+            ),
+            vec![],
+        );
+
+        ThreadSpawnEdgeStore::for_workspace(dir.path())
+            .upsert_edge_blocking(ThreadSpawnEdge::open(
+                root.clone(),
+                reviewer.clone(),
+                root.clone(),
+                "root/reviewer",
+            ))
+            .expect("reviewer edge");
+        manager
+            .services
+            .policy
+            .restore_command_approval(PendingCommandApproval {
+                approval_id: ApprovalId::new("approval_agent_tree"),
+                thread_id: reviewer.clone(),
+                tool_name: "run_command".into(),
+                command: "rm -rf scratch".into(),
+                cwd: dir.path().to_path_buf(),
+                timeout_secs: None,
+                persistent: false,
+                reason: "requires review".into(),
+                checkpoint_id: None,
+            })
+            .await;
+
+        let response = manager
+            .agent_tree(AgentTreeParams {
+                thread_id: root,
+                workspace_root: None,
+            })
+            .await
+            .expect("agent tree");
+
+        let reviewer_node = response
+            .root
+            .children
+            .iter()
+            .find(|node| node.thread_id.as_ref() == Some(&reviewer))
+            .expect("reviewer node");
+        assert_eq!(reviewer_node.status.as_str(), "waiting_approval");
+    }
+
+    #[tokio::test]
+    async fn agent_tree_projects_child_current_tool_and_tokens_used() {
+        let dir = tempdir().unwrap();
+        let manager = ThreadManager::with_llm(
+            AgentConfig {
+                workspace_root: dir.path().to_path_buf(),
+                cwd: dir.path().to_path_buf(),
+                ..AgentConfig::default()
+            },
+            Box::new(ResumeTreeSubagentLlm {
+                child_prompts: Arc::new(Mutex::new(Vec::new())),
+            }),
+            || ToolRegistry::new(),
+        );
+
+        let root = ThreadId::new("thread_root");
+        let worker = ThreadId::new("thread_worker");
+        let turn_id = TurnId::new("turn_worker");
+        let token_info = TokenUsageInfo {
+            total_token_usage: TokenUsage {
+                total_tokens: 12_345,
+                ..TokenUsage::default()
+            },
+            last_token_usage: TokenUsage {
+                total_tokens: 345,
+                ..TokenUsage::default()
+            },
+            model_context_window: Some(128_000),
+        };
+        let worker_snapshot = subagent_snapshot(
+            dir.path(),
+            worker.clone(),
+            root.clone(),
+            root.clone(),
+            1,
+            "root/worker",
+            None,
+            None,
+            None,
+        );
+
+        write_agent_thread(
+            dir.path(),
+            ThreadSnapshot::new_thread(
+                root.clone(),
+                dir.path().to_path_buf(),
+                dir.path().to_path_buf(),
+            ),
+            vec![RuntimeEvent {
+                event_id: EventId::new("evt_spawn_worker"),
+                thread_id: root.clone(),
+                turn_id: Some(TurnId::new("turn_root")),
+                kind: RuntimeEventKind::SubagentSpawned {
+                    invocation_id: "inv_worker".into(),
+                    tool_call_id: "call_worker".into(),
+                    parent_thread_id: root.clone(),
+                    child_thread_id: worker.clone(),
+                    task_name: "worker".into(),
+                    message_preview: "inspect token and tool state".into(),
+                },
+            }],
+        );
+        write_agent_thread(
+            dir.path(),
+            worker_snapshot,
+            vec![
+                RuntimeEvent {
+                    event_id: EventId::new("evt_token_count"),
+                    thread_id: worker.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    kind: RuntimeEventKind::TokenCount {
+                        info: Some(token_info),
+                    },
+                },
+                RuntimeEvent {
+                    event_id: EventId::new("evt_completed_start"),
+                    thread_id: worker.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    kind: RuntimeEventKind::ToolInvocationStarted {
+                        invocation_id: "inv_completed".into(),
+                        tool_call_id: "call_completed".into(),
+                        tool_name: "read_file".into(),
+                        mutating: false,
+                    },
+                },
+                RuntimeEvent {
+                    event_id: EventId::new("evt_completed_done"),
+                    thread_id: worker.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    kind: RuntimeEventKind::ToolInvocationCompleted {
+                        invocation_id: "inv_completed".into(),
+                        tool_call_id: "call_completed".into(),
+                        tool_name: "read_file".into(),
+                        status: ToolStatus::Success,
+                    },
+                },
+                RuntimeEvent {
+                    event_id: EventId::new("evt_active_start"),
+                    thread_id: worker.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    kind: RuntimeEventKind::ToolInvocationStarted {
+                        invocation_id: "inv_active".into(),
+                        tool_call_id: "call_active".into(),
+                        tool_name: "search_files".into(),
+                        mutating: false,
+                    },
+                },
+                RuntimeEvent {
+                    event_id: EventId::new("evt_failed_start"),
+                    thread_id: worker.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    kind: RuntimeEventKind::ToolInvocationStarted {
+                        invocation_id: "inv_failed".into(),
+                        tool_call_id: "call_failed".into(),
+                        tool_name: "write_file".into(),
+                        mutating: true,
+                    },
+                },
+                RuntimeEvent {
+                    event_id: EventId::new("evt_failed_done"),
+                    thread_id: worker.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    kind: RuntimeEventKind::ToolInvocationFailed {
+                        invocation_id: "inv_failed".into(),
+                        tool_call_id: "call_failed".into(),
+                        tool_name: "write_file".into(),
+                        message: "write failed".into(),
+                    },
+                },
+                RuntimeEvent {
+                    event_id: EventId::new("evt_cancelled_start"),
+                    thread_id: worker.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    kind: RuntimeEventKind::ToolInvocationStarted {
+                        invocation_id: "inv_cancelled".into(),
+                        tool_call_id: "call_cancelled".into(),
+                        tool_name: "run_command".into(),
+                        mutating: true,
+                    },
+                },
+                RuntimeEvent {
+                    event_id: EventId::new("evt_cancelled_done"),
+                    thread_id: worker.clone(),
+                    turn_id: Some(turn_id),
+                    kind: RuntimeEventKind::ToolInvocationCancelled {
+                        invocation_id: "inv_cancelled".into(),
+                        tool_call_id: "call_cancelled".into(),
+                        tool_name: "run_command".into(),
+                        reason: "interrupted".into(),
+                    },
+                },
+            ],
+        );
+        let stored_worker =
+            crate::app_server::thread_store::read_thread_state_from_storage(dir.path(), &worker)
+                .expect("read stored worker")
+                .expect("stored worker state");
+        assert_eq!(
+            stored_worker
+                .snapshot
+                .token_info
+                .as_ref()
+                .map(|info| info.total_token_usage.total_tokens),
+            Some(12_345)
+        );
+
+        ThreadSpawnEdgeStore::for_workspace(dir.path())
+            .upsert_edge_blocking(ThreadSpawnEdge::open(
+                root.clone(),
+                worker.clone(),
+                root.clone(),
+                "root/worker",
+            ))
+            .expect("worker edge");
+
+        let response = manager
+            .agent_tree(AgentTreeParams {
+                thread_id: root,
+                workspace_root: None,
+            })
+            .await
+            .expect("agent tree");
+
+        let worker_node = response
+            .root
+            .children
+            .iter()
+            .find(|node| node.thread_id.as_ref() == Some(&worker))
+            .expect("worker node");
+        assert_eq!(worker_node.current_tool.as_deref(), Some("search_files"));
+        assert_eq!(worker_node.tokens_used, Some(12_345));
+    }
+
+    #[tokio::test]
+    async fn agent_tree_clears_current_tool_after_approval_decision() {
+        let dir = tempdir().unwrap();
+        let manager = ThreadManager::with_llm(
+            AgentConfig {
+                workspace_root: dir.path().to_path_buf(),
+                cwd: dir.path().to_path_buf(),
+                ..AgentConfig::default()
+            },
+            Box::new(ResumeTreeSubagentLlm {
+                child_prompts: Arc::new(Mutex::new(Vec::new())),
+            }),
+            || ToolRegistry::new(),
+        );
+
+        let root = ThreadId::new("thread_root");
+        let gated = ThreadId::new("thread_gated");
+        let active = ThreadId::new("thread_active");
+        let approval_id = ApprovalId::new("approval_gated_tool");
+        let turn_id = TurnId::new("turn_child");
+
+        write_agent_thread(
+            dir.path(),
+            ThreadSnapshot::new_thread(
+                root.clone(),
+                dir.path().to_path_buf(),
+                dir.path().to_path_buf(),
+            ),
+            vec![
+                RuntimeEvent {
+                    event_id: EventId::new("evt_spawn_gated"),
+                    thread_id: root.clone(),
+                    turn_id: Some(TurnId::new("turn_root")),
+                    kind: RuntimeEventKind::SubagentSpawned {
+                        invocation_id: "inv_spawn_gated".into(),
+                        tool_call_id: "call_spawn_gated".into(),
+                        parent_thread_id: root.clone(),
+                        child_thread_id: gated.clone(),
+                        task_name: "gated".into(),
+                        message_preview: "run an approval-gated tool".into(),
+                    },
+                },
+                RuntimeEvent {
+                    event_id: EventId::new("evt_spawn_active"),
+                    thread_id: root.clone(),
+                    turn_id: Some(TurnId::new("turn_root")),
+                    kind: RuntimeEventKind::SubagentSpawned {
+                        invocation_id: "inv_spawn_active".into(),
+                        tool_call_id: "call_spawn_active".into(),
+                        parent_thread_id: root.clone(),
+                        child_thread_id: active.clone(),
+                        task_name: "active".into(),
+                        message_preview: "keep a tool active".into(),
+                    },
+                },
+            ],
+        );
+        write_agent_thread(
+            dir.path(),
+            subagent_snapshot(
+                dir.path(),
+                gated.clone(),
+                root.clone(),
+                root.clone(),
+                1,
+                "root/gated",
+                None,
+                None,
+                None,
+            ),
+            vec![
+                RuntimeEvent {
+                    event_id: EventId::new("evt_gated_start"),
+                    thread_id: gated.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    kind: RuntimeEventKind::ToolInvocationStarted {
+                        invocation_id: "inv_gated".into(),
+                        tool_call_id: "call_gated".into(),
+                        tool_name: "run_command".into(),
+                        mutating: true,
+                    },
+                },
+                RuntimeEvent {
+                    event_id: EventId::new("evt_gated_waiting"),
+                    thread_id: gated.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    kind: RuntimeEventKind::ToolInvocationWaitingApproval {
+                        invocation_id: "inv_gated".into(),
+                        approval_id: approval_id.clone(),
+                        reason: "approval required".into(),
+                    },
+                },
+                RuntimeEvent {
+                    event_id: EventId::new("evt_gated_decision"),
+                    thread_id: gated.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    kind: RuntimeEventKind::ApprovalDecision {
+                        approval_id,
+                        status: ApprovalStatus::Denied,
+                        note: Some("denied".into()),
+                    },
+                },
+            ],
+        );
+        write_agent_thread(
+            dir.path(),
+            subagent_snapshot(
+                dir.path(),
+                active.clone(),
+                root.clone(),
+                root.clone(),
+                1,
+                "root/active",
+                None,
+                None,
+                None,
+            ),
+            vec![RuntimeEvent {
+                event_id: EventId::new("evt_active_start"),
+                thread_id: active.clone(),
+                turn_id: Some(turn_id),
+                kind: RuntimeEventKind::ToolInvocationStarted {
+                    invocation_id: "inv_active".into(),
+                    tool_call_id: "call_active".into(),
+                    tool_name: "search_files".into(),
+                    mutating: false,
+                },
+            }],
+        );
+
+        let edge_store = ThreadSpawnEdgeStore::for_workspace(dir.path());
+        edge_store
+            .upsert_edge_blocking(ThreadSpawnEdge::open(
+                root.clone(),
+                gated.clone(),
+                root.clone(),
+                "root/gated",
+            ))
+            .expect("gated edge");
+        edge_store
+            .upsert_edge_blocking(ThreadSpawnEdge::open(
+                root.clone(),
+                active.clone(),
+                root.clone(),
+                "root/active",
+            ))
+            .expect("active edge");
+
+        let response = manager
+            .agent_tree(AgentTreeParams {
+                thread_id: root,
+                workspace_root: None,
+            })
+            .await
+            .expect("agent tree");
+
+        let gated_node = response
+            .root
+            .children
+            .iter()
+            .find(|node| node.thread_id.as_ref() == Some(&gated))
+            .expect("gated node");
+        let active_node = response
+            .root
+            .children
+            .iter()
+            .find(|node| node.thread_id.as_ref() == Some(&active))
+            .expect("active node");
+        assert_eq!(gated_node.current_tool, None);
+        assert_eq!(active_node.current_tool.as_deref(), Some("search_files"));
     }
 
     #[tokio::test]

@@ -102,6 +102,8 @@ pub enum RuntimeEventKind {
         approval_id: ApprovalId,
         tool_name: String,
         reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint_id: Option<String>,
         #[serde(default)]
         permission_profile: PermissionProfile,
         #[serde(default = "crate::config::default_boundary_none")]
@@ -163,6 +165,17 @@ pub enum RuntimeEventKind {
     ThreadGoalContinuationSuppressed {
         goal_id: String,
         reason: String,
+    },
+    ThreadGoalTurnStarted {
+        goal_id: String,
+    },
+    ThreadGoalToolCompleted {
+        goal_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changed_files: Vec<String>,
+    },
+    ThreadGoalReport {
+        report: crate::app_server::protocol::ThreadGoalReport,
     },
     RuntimeError {
         message: String,

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Mutex;
 
@@ -10,6 +11,7 @@ use crate::session::ApprovalId;
 use crate::types::{EventId, ThreadId};
 
 static APPROVAL_COUNTER: AtomicU64 = AtomicU64::new(1);
+static PENDING_APPROVAL_ORDER_COUNTER: AtomicU64 = AtomicU64::new(1);
 static POLICY_EVENT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -56,6 +58,28 @@ pub enum PolicyDecision {
     ReviewRequired,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingApprovalSummary {
+    pub thread_id: ThreadId,
+    pub approval_id: ApprovalId,
+    pub detail: PendingApprovalDetail,
+    pub requested_at_ms: u64,
+    pub checkpoint_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PendingApprovalDetail {
+    Command {
+        tool_name: String,
+        command: String,
+        cwd: PathBuf,
+        timeout_secs: Option<u64>,
+        persistent: bool,
+        reason: String,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct PendingCommandApproval {
     pub approval_id: ApprovalId,
@@ -66,11 +90,49 @@ pub struct PendingCommandApproval {
     pub timeout_secs: Option<u64>,
     pub persistent: bool,
     pub reason: String,
+    pub checkpoint_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingCommandApprovalRecord {
+    approval: PendingCommandApproval,
+    requested_at_ms: u64,
+    created_order: u64,
+    checkpoint_id: Option<String>,
+}
+
+impl PendingCommandApprovalRecord {
+    fn new(approval: PendingCommandApproval) -> Self {
+        let checkpoint_id = approval.checkpoint_id.clone();
+        Self {
+            approval,
+            requested_at_ms: current_time_ms(),
+            created_order: next_pending_approval_order(),
+            checkpoint_id,
+        }
+    }
+
+    fn summary(&self) -> PendingApprovalSummary {
+        PendingApprovalSummary {
+            thread_id: self.approval.thread_id.clone(),
+            approval_id: self.approval.approval_id.clone(),
+            detail: PendingApprovalDetail::Command {
+                tool_name: self.approval.tool_name.clone(),
+                command: self.approval.command.clone(),
+                cwd: self.approval.cwd.clone(),
+                timeout_secs: self.approval.timeout_secs,
+                persistent: self.approval.persistent,
+                reason: self.approval.reason.clone(),
+            },
+            requested_at_ms: self.requested_at_ms,
+            checkpoint_id: self.checkpoint_id.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
 pub struct PolicyManager {
-    pending: Arc<Mutex<HashMap<String, PendingCommandApproval>>>,
+    pending: Arc<Mutex<HashMap<String, PendingCommandApprovalRecord>>>,
 }
 
 impl PolicyManager {
@@ -111,20 +173,56 @@ impl PolicyManager {
             timeout_secs,
             persistent,
             reason,
+            checkpoint_id: None,
         };
 
-        self.pending
-            .lock()
-            .await
-            .insert(approval.approval_id.as_str().to_string(), approval.clone());
+        self.pending.lock().await.insert(
+            approval.approval_id.as_str().to_string(),
+            PendingCommandApprovalRecord::new(approval.clone()),
+        );
         approval
     }
 
     pub async fn restore_command_approval(&self, approval: PendingCommandApproval) {
-        self.pending
+        let key = approval.approval_id.as_str().to_string();
+        let mut pending = self.pending.lock().await;
+        if let Some(record) = pending.get_mut(&key) {
+            let checkpoint_id = approval
+                .checkpoint_id
+                .clone()
+                .or_else(|| record.checkpoint_id.clone());
+            record.approval = approval;
+            record.approval.checkpoint_id = checkpoint_id.clone();
+            record.checkpoint_id = checkpoint_id;
+        } else {
+            pending.insert(key, PendingCommandApprovalRecord::new(approval));
+        }
+    }
+
+    pub async fn attach_checkpoint_id(
+        &self,
+        approval_id: &ApprovalId,
+        checkpoint_id: String,
+    ) -> bool {
+        let mut pending = self.pending.lock().await;
+        let Some(record) = pending.get_mut(approval_id.as_str()) else {
+            return false;
+        };
+        record.checkpoint_id = Some(checkpoint_id.clone());
+        record.approval.checkpoint_id = Some(checkpoint_id);
+        true
+    }
+
+    pub async fn list_pending(&self) -> Vec<PendingApprovalSummary> {
+        let mut pending = self
+            .pending
             .lock()
             .await
-            .insert(approval.approval_id.as_str().to_string(), approval);
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        pending.sort_by_key(|record| record.created_order);
+        pending.into_iter().map(|record| record.summary()).collect()
     }
 
     pub async fn take_pending_command(
@@ -135,6 +233,11 @@ impl PolicyManager {
             .lock()
             .await
             .remove(approval_id.as_str())
+            .map(|record| {
+                let mut approval = record.approval;
+                approval.checkpoint_id = record.checkpoint_id;
+                approval
+            })
             .ok_or_else(|| format!("unknown approval id: {}", approval_id.as_str()))
     }
 
@@ -142,7 +245,7 @@ impl PolicyManager {
         self.pending
             .lock()
             .await
-            .retain(|_, approval| &approval.thread_id != thread_id);
+            .retain(|_, record| &record.approval.thread_id != thread_id);
     }
 
     pub async fn pending_count_for_thread(&self, thread_id: &ThreadId) -> usize {
@@ -150,7 +253,7 @@ impl PolicyManager {
             .lock()
             .await
             .values()
-            .filter(|approval| &approval.thread_id == thread_id)
+            .filter(|record| &record.approval.thread_id == thread_id)
             .count()
     }
 }
@@ -163,6 +266,17 @@ pub fn new_policy_event_id() -> EventId {
 fn new_approval_id() -> ApprovalId {
     let next = APPROVAL_COUNTER.fetch_add(1, Ordering::Relaxed);
     ApprovalId::new(format!("approval_{next}"))
+}
+
+fn next_pending_approval_order() -> u64 {
+    PENDING_APPROVAL_ORDER_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn hard_deny_reason(command: &str) -> Option<&'static str> {

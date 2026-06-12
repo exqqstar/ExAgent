@@ -192,7 +192,7 @@ pub(in crate::app_server) fn start_thread_with_options(
     }
 }
 
-fn rehydrate_agent_control(
+pub(super) fn rehydrate_agent_control(
     services: &AppServerServices,
     workspace_root: &Path,
     requested_thread_id: &ThreadId,

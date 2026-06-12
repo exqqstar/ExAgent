@@ -12,7 +12,8 @@ use std::convert::Infallible;
 
 pub use crate::app_server::protocol::{
     AgentRunResponse, AgentTreeParams as AgentTreeRequest, AgentTreeResponse, BoundaryOp,
-    BoundaryOpResponse, EventsReplayParams as EventsReplayRequest, EventsReplayResponse,
+    BoundaryOpResponse, CheckpointRestoreParams as CheckpointRestoreRequest,
+    CheckpointRestoreResponse, EventsReplayParams as EventsReplayRequest, EventsReplayResponse,
     EventsSubscribeParams as EventsSubscribeRequest, InitializeParams as InitializeRequest,
     InitializeResponse, RunParams as RunRequest, ThreadReadParams as ThreadReadRequest,
     ThreadReadResponse, ThreadResumeParams as ThreadResumeRequest, ThreadResumeResponse,

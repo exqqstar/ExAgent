@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
 use crate::app_server::override_policy::OverridePolicy;
 use crate::app_server::protocol::{
@@ -8,6 +8,7 @@ use crate::app_server::protocol::{
     TurnContextOverrides, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
     TurnStartResponse, TurnState, TurnStatus, TurnView,
 };
+use crate::app_server::request_processors::thread_processor;
 use crate::app_server::services::AppServerServices;
 use crate::app_server::thread_store::{
     read_thread_state_from_storage, thread_exists_in_storage, StoredThreadState,
@@ -15,6 +16,7 @@ use crate::app_server::thread_store::{
 use crate::app_server::AppServerError;
 use crate::events::RuntimeEventKind;
 use crate::policy::PendingCommandApproval;
+use crate::runtime::subagent::AgentControl;
 use crate::runtime::thread_runtime::{ThreadOpResult, ThreadRuntimeError, ThreadTurnContext};
 use crate::runtime::thread_session::RuntimeOverlay;
 use crate::runtime::turn_mode::TurnMode;
@@ -69,24 +71,34 @@ pub(in crate::app_server) async fn run_turn_through_runtime(
     let input = params.effective_input();
     let config = OverridePolicy::merge_turn_start(&services.base_config, params.workspace_root)?;
     let thread_id = params.thread_id;
-    let runtime = services.runtime_loader.ensure_runtime_loaded(
-        &thread_id,
-        config,
-        requested_workspace_root,
-        services,
-    )?;
-    let live_view = runtime.live_view();
-    let runtime_workspace_root = live_view.snapshot.workspace_root.clone();
-    let turn_context = resolve_turn_context(
-        services,
-        &live_view.snapshot,
-        params.turn_context,
-        params.turn_mode,
-    )
-    .await?;
-    let result = runtime
-        .submit_user_input_parts_and_wait(input, turn_context)
+    let (runtime_workspace_root, completion_rx) = {
+        let _thread_op_guard = services
+            .runtime_loader
+            .begin_thread_runtime_op(&thread_id)
+            .await?;
+        let runtime =
+            ensure_runtime_loaded_for_turn(services, &thread_id, config, requested_workspace_root)?;
+        let live_view = runtime.live_view();
+        let runtime_workspace_root = live_view.snapshot.workspace_root.clone();
+        let _workspace_op_guard = services
+            .runtime_loader
+            .begin_workspace_runtime_op(&runtime_workspace_root)?;
+        let turn_context = resolve_turn_context(
+            services,
+            &live_view.snapshot,
+            params.turn_context,
+            params.turn_mode,
+        )
+        .await?;
+        let (_turn_id, completion_rx) = runtime
+            .start_user_input_parts_with_completion(input, turn_context)
+            .await
+            .map_err(map_thread_runtime_error)?;
+        (runtime_workspace_root, completion_rx)
+    };
+    let result = completion_rx
         .await
+        .map_err(|_| anyhow!("thread runtime stopped before completing op"))?
         .map_err(map_thread_runtime_error)?;
     let ThreadOpResult::UserInput { final_turn, .. } = result else {
         return Err(AppServerError::InvalidRequest(
@@ -107,13 +119,16 @@ pub(in crate::app_server) async fn start_turn_in_background(
     let input = params.effective_input();
     let config = OverridePolicy::merge_turn_start(&services.base_config, params.workspace_root)?;
     let thread_id = params.thread_id;
-    let runtime = services.runtime_loader.ensure_runtime_loaded(
-        &thread_id,
-        config,
-        requested_workspace_root,
-        services,
-    )?;
+    let _thread_op_guard = services
+        .runtime_loader
+        .begin_thread_runtime_op(&thread_id)
+        .await?;
+    let runtime =
+        ensure_runtime_loaded_for_turn(services, &thread_id, config, requested_workspace_root)?;
     let live_view = runtime.live_view();
+    let _workspace_op_guard = services
+        .runtime_loader
+        .begin_workspace_runtime_op(&live_view.snapshot.workspace_root)?;
     let turn_context = resolve_turn_context(
         services,
         &live_view.snapshot,
@@ -127,6 +142,33 @@ pub(in crate::app_server) async fn start_turn_in_background(
         .map_err(map_thread_runtime_error)?;
 
     Ok(TurnStartStarted { thread_id, turn_id })
+}
+
+fn ensure_runtime_loaded_for_turn(
+    services: &AppServerServices,
+    thread_id: &ThreadId,
+    config: crate::config::AgentConfig,
+    requested_workspace_root: bool,
+) -> Result<std::sync::Arc<crate::runtime::thread_runtime::ThreadRuntime>> {
+    let subagent_control = cold_turn_subagent_control(services, thread_id, &config.workspace_root)?;
+    services.runtime_loader.ensure_runtime_loaded_with_control(
+        thread_id,
+        config,
+        requested_workspace_root,
+        services,
+        subagent_control,
+    )
+}
+
+fn cold_turn_subagent_control(
+    services: &AppServerServices,
+    thread_id: &ThreadId,
+    workspace_root: &Path,
+) -> Result<Option<std::sync::Arc<AgentControl>>> {
+    if services.runtime_loader.runtime_for(thread_id).is_some() {
+        return Ok(None);
+    }
+    thread_processor::rehydrate_agent_control(services, workspace_root, thread_id).map(Some)
 }
 
 pub(in crate::app_server) async fn turn_interrupt(
@@ -195,6 +237,9 @@ pub(in crate::app_server) async fn approval_decision(
     )? {
         let runtime = loaded.runtime;
         let workspace_root = loaded.workspace_root;
+        let _workspace_op_guard = services
+            .runtime_loader
+            .begin_workspace_runtime_op(&workspace_root)?;
         restore_pending_command_approval_from_storage(
             services,
             &workspace_root,
@@ -226,6 +271,9 @@ pub(in crate::app_server) async fn approval_decision(
     {
         let overlay = RuntimeOverlay::from_events(&stored.events);
         if overlay.has_pending_approval_id(&params.approval_id) {
+            let _workspace_op_guard = services
+                .runtime_loader
+                .begin_workspace_runtime_op(&config.workspace_root)?;
             let status = approval_decision_status_to_session(&params.decision);
             let thread_id = params.thread_id.clone();
             if let Some(approval) =
@@ -341,20 +389,27 @@ fn pending_command_approval_from_stored_state(
     stored: &StoredThreadState,
     approval_id: &ApprovalId,
 ) -> Option<PendingCommandApproval> {
-    let (tool_name, reason, command) = stored.events.iter().rev().find_map(|event| match &event
-        .kind
-    {
-        RuntimeEventKind::ApprovalRequested {
-            approval_id: event_approval_id,
-            tool_name,
-            reason,
-            command: Some(command),
-            ..
-        } if event_approval_id == approval_id => {
-            Some((tool_name.clone(), reason.clone(), command.clone()))
-        }
-        _ => None,
-    })?;
+    let (tool_name, reason, checkpoint_id, command) =
+        stored
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                RuntimeEventKind::ApprovalRequested {
+                    approval_id: event_approval_id,
+                    tool_name,
+                    reason,
+                    checkpoint_id,
+                    command: Some(command),
+                    ..
+                } if event_approval_id == approval_id => Some((
+                    tool_name.clone(),
+                    reason.clone(),
+                    checkpoint_id.clone(),
+                    command.clone(),
+                )),
+                _ => None,
+            })?;
     if !matches!(tool_name.as_str(), "run_command" | "exec_command") {
         return None;
     }
@@ -370,6 +425,7 @@ fn pending_command_approval_from_stored_state(
         timeout_secs: command.timeout_secs,
         persistent: command.persistent,
         reason,
+        checkpoint_id,
     })
 }
 

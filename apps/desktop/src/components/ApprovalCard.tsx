@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { submitApproval } from "@/stores/workbenchStore";
 import type { TranscriptMessage } from "@/types";
 
-export function ApprovalCard({ message }: { message: TranscriptMessage }) {
+export function ApprovalCard({ message, readOnly = false }: { message: TranscriptMessage; readOnly?: boolean }) {
   return (
     <article className="message-card rounded-lg border border-warning/40 px-4 py-3">
       <div className="flex items-start gap-3">
@@ -14,14 +14,16 @@ export function ApprovalCard({ message }: { message: TranscriptMessage }) {
             <span className="type-code-sm text-subtle">{message.timestamp}</span>
           </div>
           <p className="type-body-md mt-2 whitespace-pre-wrap text-muted">{message.body}</p>
-          <div className="mt-3 flex items-center gap-2">
-            <Button type="button" size="sm" onClick={() => void submitApproval(message, "approved")}>
-              Approve
-            </Button>
-            <Button type="button" size="sm" variant="danger" onClick={() => void submitApproval(message, "denied")}>
-              Deny
-            </Button>
-          </div>
+          {readOnly ? null : (
+            <div className="mt-3 flex items-center gap-2">
+              <Button type="button" size="sm" onClick={() => void submitApproval(message, "approved")}>
+                Approve
+              </Button>
+              <Button type="button" size="sm" variant="danger" onClick={() => void submitApproval(message, "denied")}>
+                Deny
+              </Button>
+            </div>
+          )}
         </div>
       </div>
     </article>

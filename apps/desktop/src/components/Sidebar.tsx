@@ -7,6 +7,7 @@ import {
   FolderPlus,
   FolderOpen,
   GitBranch,
+  GitCompareArrows,
   MoreHorizontal,
   Pencil,
   Pin,
@@ -50,6 +51,7 @@ import { SettingsDialog } from "@/components/SettingsDialog";
 import { exagentClient } from "@/api/exagentClient";
 import type { getWorkbenchState } from "@/stores/workbenchStore";
 import type { ProjectSummary, SessionStatus, SessionSummary } from "@/types";
+import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 type WorkbenchState = ReturnType<typeof getWorkbenchState>;
@@ -68,6 +70,7 @@ const statusVariant: Record<SessionStatus, "neutral" | "success" | "warning" | "
 };
 
 export function Sidebar({ state }: { state: WorkbenchState }) {
+  const { t } = useI18n();
   const activeProject = state.projects.find((project) => project.id === state.activeProjectId);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const renamingSession = state.sessions.find((session) => session.id === renamingSessionId) ?? null;
@@ -189,6 +192,129 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
   }
 
   const confirmationCopy = projectConfirmation ? projectConfirmationText(projectConfirmation) : null;
+
+  function forkLabelForSession(session: SessionSummary) {
+    if (!session.forkPointTurnId) {
+      return null;
+    }
+    return t("sessions.forkedFromTurn").replace("{turn}", forkTurnLabel(session.forkPointTurnId));
+  }
+
+  function renderSessionBranch(node: SessionBranchNode, expanded: boolean) {
+    const forkLabel = forkLabelForSession(node.session);
+    return (
+      <div key={node.session.id} className={cn("min-w-0", node.children.length > 0 && "space-y-0.5")}>
+        {renderSessionRow(node.session, expanded, forkLabel)}
+        {node.children.length > 0 ? (
+          <div
+            data-session-branch-group
+            className="ml-[7px] min-w-0 space-y-0.5 overflow-hidden border-l border-border pl-2.5"
+          >
+            {node.children.map((child) => renderSessionBranch(child, expanded))}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderSessionRow(session: SessionSummary, expanded: boolean, forkLabel: string | null) {
+    const sessionButtonLabel = forkLabel ? `Forked session ${session.title}, ${forkLabel}` : undefined;
+    return (
+      <div
+        className={cn(
+          "type-label-sm group flex w-full items-center gap-1.5 rounded-md border border-transparent pr-1.5 text-muted transition-colors duration-150 hover:border-border hover:bg-surface-2 hover:text-ink",
+          session.id === state.activeSessionId && "active-rail border-border-strong bg-surface-2 text-ink"
+        )}
+      >
+        <button
+          type="button"
+          tabIndex={expanded ? undefined : -1}
+          aria-label={sessionButtonLabel}
+          onClick={() => openProjectSession(session)}
+          className={cn(
+            "flex min-w-0 flex-1 items-center gap-2 rounded-md py-1 pr-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus",
+            forkLabel ? "pl-2" : "pl-6"
+          )}
+        >
+          <span className="min-w-0 flex-1 overflow-hidden">
+            <span className="block truncate">{session.title}</span>
+            {forkLabel ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span
+                    className="mt-0.5 flex min-w-0 items-center gap-1 text-subtle"
+                    aria-label={forkLabel}
+                  >
+                    <GitBranch aria-hidden className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{forkLabel}</span>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>{forkLabel}</TooltipContent>
+              </Tooltip>
+            ) : null}
+          </span>
+          <Badge variant={statusVariant[session.status]}>{session.status.replace("_", " ")}</Badge>
+        </button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              tabIndex={expanded ? undefined : -1}
+              className="h-6 w-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+              aria-label={`Archive ${session.title}`}
+              onClick={() => void state.archiveSession(session.id)}
+            >
+              <Archive className="h-3.5 w-3.5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Archive session</TooltipContent>
+        </Tooltip>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              tabIndex={expanded ? undefined : -1}
+              className="h-6 w-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+              aria-label={`Session actions for ${session.title}`}
+            >
+              <MoreHorizontal className="h-3.5 w-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            {session.forkParentThreadId && session.forkPointTurnId ? (
+              <>
+                <DropdownMenuItem onSelect={() => void state.openBranchCompare(session.id, session.projectId)}>
+                  <GitCompareArrows className="mr-2 h-4 w-4" />
+                  Compare with parent
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+              </>
+            ) : null}
+            <DropdownMenuItem
+              onSelect={() => {
+                setRenamingSessionId(session.id);
+              }}
+            >
+              <Pencil className="mr-2 h-4 w-4" />
+              Rename session
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void state.pinSession(session.id, !session.pinned)}>
+              <Pin className="mr-2 h-4 w-4" />
+              {session.pinned ? "Unpin session" : "Pin session"}
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void state.archiveSession(session.id)}>
+              <Archive className="mr-2 h-4 w-4" />
+              Archive session
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
@@ -359,73 +485,7 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
                     <div className="min-h-0 overflow-hidden">
                       <div className="mb-1 ml-2 mr-1.5">
                         <div className="space-y-0.5">
-                          {sessions.map((session) => (
-                            <div
-                              key={session.id}
-                              className={cn(
-                                "type-label-sm group flex w-full items-center gap-1.5 rounded-md border border-transparent pr-1.5 text-muted transition-colors duration-150 hover:border-border hover:bg-surface-2 hover:text-ink",
-                                session.id === state.activeSessionId && "active-rail border-border-strong bg-surface-2 text-ink"
-                              )}
-                            >
-                              <button
-                                type="button"
-                                tabIndex={expanded ? undefined : -1}
-                                onClick={() => openProjectSession(session)}
-                                className="flex min-w-0 flex-1 items-center gap-2 rounded-md py-1 pl-6 pr-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
-                              >
-                                <span className="min-w-0 flex-1 truncate">{session.title}</span>
-                                <Badge variant={statusVariant[session.status]}>{session.status.replace("_", " ")}</Badge>
-                              </button>
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="icon"
-                                    tabIndex={expanded ? undefined : -1}
-                                    className="h-6 w-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-                                    aria-label={`Archive ${session.title}`}
-                                    onClick={() => void state.archiveSession(session.id)}
-                                  >
-                                    <Archive className="h-3.5 w-3.5" />
-                                  </Button>
-                                </TooltipTrigger>
-                                <TooltipContent>Archive session</TooltipContent>
-                              </Tooltip>
-                              <DropdownMenu>
-                                <DropdownMenuTrigger asChild>
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="icon"
-                                    tabIndex={expanded ? undefined : -1}
-                                    className="h-6 w-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-                                    aria-label={`Session actions for ${session.title}`}
-                                  >
-                                    <MoreHorizontal className="h-3.5 w-3.5" />
-                                  </Button>
-                                </DropdownMenuTrigger>
-                                <DropdownMenuContent align="end">
-                                  <DropdownMenuItem
-                                    onSelect={() => {
-                                      setRenamingSessionId(session.id);
-                                    }}
-                                  >
-                                    <Pencil className="mr-2 h-4 w-4" />
-                                    Rename session
-                                  </DropdownMenuItem>
-                                  <DropdownMenuItem onSelect={() => void state.pinSession(session.id, !session.pinned)}>
-                                    <Pin className="mr-2 h-4 w-4" />
-                                    {session.pinned ? "Unpin session" : "Pin session"}
-                                  </DropdownMenuItem>
-                                  <DropdownMenuItem onSelect={() => void state.archiveSession(session.id)}>
-                                    <Archive className="mr-2 h-4 w-4" />
-                                    Archive session
-                                  </DropdownMenuItem>
-                                </DropdownMenuContent>
-                              </DropdownMenu>
-                            </div>
-                          ))}
+                          {buildSessionBranchRows(sessions).map((node) => renderSessionBranch(node, expanded))}
                           {loadingSessions ? (
                             <p className="type-body-sm px-2 py-1.5 text-subtle">Loading sessions...</p>
                           ) : null}
@@ -565,6 +625,51 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+type SessionBranchNode = {
+  session: SessionSummary;
+  children: SessionBranchNode[];
+};
+
+function buildSessionBranchRows(sessions: SessionSummary[]): SessionBranchNode[] {
+  const sessionsById = new Map(sessions.map((session) => [session.id, session]));
+  const childrenByParent = new Map<string, SessionSummary[]>();
+  const childIds = new Set<string>();
+
+  for (const session of sessions) {
+    const parentId = session.forkParentThreadId;
+    if (!parentId || !sessionsById.has(parentId)) {
+      continue;
+    }
+    childIds.add(session.id);
+    const children = childrenByParent.get(parentId) ?? [];
+    children.push(session);
+    childrenByParent.set(parentId, children);
+  }
+
+  const visited = new Set<string>();
+  const toNode = (session: SessionSummary): SessionBranchNode => {
+    visited.add(session.id);
+    const children = (childrenByParent.get(session.id) ?? [])
+      .filter((child) => !visited.has(child.id))
+      .map(toNode);
+    return { session, children };
+  };
+
+  const roots = sessions.filter((session) => !childIds.has(session.id)).map(toNode);
+
+  for (const session of sessions) {
+    if (!visited.has(session.id)) {
+      roots.push({ session, children: [] });
+    }
+  }
+
+  return roots;
+}
+
+function forkTurnLabel(turnId: string) {
+  return turnId.match(/(\d+)$/)?.[1] ?? turnId;
 }
 
 function projectConfirmationText(confirmation: Exclude<ProjectConfirmation, null>) {

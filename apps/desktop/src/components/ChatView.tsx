@@ -1,4 +1,4 @@
-import { Blocks, Bug, CircleAlert, FileText, FolderPlus } from "lucide-react";
+import { Blocks, Bug, CircleAlert, FileText, FolderPlus, X } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Composer } from "@/components/Composer";
@@ -12,7 +12,17 @@ import { cn } from "@/lib/utils";
 type WorkbenchState = ReturnType<typeof getWorkbenchState>;
 
 export function ChatView({ state }: { state: WorkbenchState }) {
+  if (state.compareView) {
+    return <BranchCompareView state={state} compare={state.compareView} />;
+  }
+
   const empty = !state.loading && state.transcript.length === 0;
+  const activeSession = state.sessions.find((session) => session.id === state.activeSessionId);
+  const forkDisabled =
+    state.loading ||
+    Boolean(state.activeTurnId) ||
+    activeSession?.status === "running" ||
+    activeSession?.status === "awaiting_approval";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -26,7 +36,12 @@ export function ChatView({ state }: { state: WorkbenchState }) {
               <>
                 <ScrollArea className="min-h-0 flex-1">
                   <div className="mx-auto flex w-full max-w-[920px] flex-col gap-5 pb-5 pt-1">
-                    <TranscriptList messages={state.transcript} loading={state.loading} />
+                    <TranscriptList
+                      messages={state.transcript}
+                      loading={state.loading}
+                      forkDisabled={forkDisabled}
+                      onForkFromTurn={state.forkThreadFromTurn}
+                    />
                   </div>
                 </ScrollArea>
 
@@ -49,6 +64,93 @@ export function ChatView({ state }: { state: WorkbenchState }) {
         </div>
       </div>
     </div>
+  );
+}
+
+function BranchCompareView({
+  state,
+  compare
+}: {
+  state: WorkbenchState;
+  compare: NonNullable<WorkbenchState["compareView"]>;
+}) {
+  const sharedTurnLabel =
+    compare.sharedTurnCount === 1 ? "1 shared turn" : `${compare.sharedTurnCount} shared turns`;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {state.error ? <ChatError message={state.error} /> : null}
+      <div className="min-h-0 flex-1 px-2 py-2">
+        <div className="mx-auto flex h-full w-full max-w-[1280px] flex-col gap-3">
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-surface-1 px-4 py-3">
+            <p className="type-label-md text-ink">{sharedTurnLabel}</p>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-label="Close branch compare"
+              onClick={state.closeCompareView}
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+          {compare.error ? (
+            <div role="alert" className="rounded-lg border border-danger/30 bg-danger/8 px-4 py-3 text-danger">
+              <p className="type-body-sm break-words">{compare.error}</p>
+            </div>
+          ) : null}
+          <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 xl:grid-cols-2">
+            <ComparePane
+              label="Parent branch transcript"
+              title={compare.parentTitle}
+              eyebrow="Parent branch"
+              messages={compare.parentTranscript}
+              loading={compare.loading}
+            />
+            <ComparePane
+              label="Fork branch transcript"
+              title={compare.childTitle}
+              eyebrow="Fork branch"
+              messages={compare.childTranscript}
+              loading={compare.loading}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ComparePane({
+  label,
+  title,
+  eyebrow,
+  messages,
+  loading
+}: {
+  label: string;
+  title: string;
+  eyebrow: string;
+  messages: WorkbenchState["transcript"];
+  loading: boolean;
+}) {
+  return (
+    <section aria-label={label} className="flex min-h-0 min-w-0 flex-col rounded-lg border border-border bg-surface-1">
+      <div className="border-b border-border px-4 py-3">
+        <p className="type-label-sm text-muted">{eyebrow}</p>
+        <h2 className="type-title-md truncate text-ink">{title}</h2>
+      </div>
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="px-4 py-4">
+          <TranscriptList
+            messages={messages}
+            loading={loading}
+            emptyLabel="No post-fork turns in this branch."
+            readOnly
+          />
+        </div>
+      </ScrollArea>
+    </section>
   );
 }
 

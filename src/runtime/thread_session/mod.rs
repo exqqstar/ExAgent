@@ -6,6 +6,7 @@ pub(crate) use events::{LiveEventSink, ThreadEventRecorder};
 pub(crate) use overlay::{ActiveToolInvocation, RuntimeOverlay};
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use tokio::sync::{broadcast, oneshot, watch, Notify};
@@ -154,6 +155,11 @@ impl Drop for ThreadSessionStoppedGuard {
 }
 
 impl ThreadSession {
+    pub(crate) fn persisted_runtime_events(&self) -> anyhow::Result<Vec<RuntimeEvent>> {
+        let rollout_items = RolloutStore::read_items_blocking(self.rollout_store.path())?;
+        Ok(events_from_rollout_items(&rollout_items))
+    }
+
     pub fn new(options: ThreadSessionOptions) -> anyhow::Result<Self> {
         let ThreadSessionOptions {
             thread_id,
@@ -247,6 +253,15 @@ impl ThreadSession {
 
     pub(crate) fn next_turn_index_seed(&self) -> u64 {
         self.next_turn_index_seed
+    }
+
+    pub(crate) fn workspace_root(&self) -> PathBuf {
+        self.live_state
+            .read()
+            .expect("thread session live state rwlock poisoned")
+            .snapshot
+            .workspace_root
+            .clone()
     }
 
     pub(crate) fn set_status(&self, status: ThreadRuntimeStatus) {
@@ -627,6 +642,7 @@ mod tests {
                 EventId::new("approval_evt_test_1"),
                 "run_command".to_string(),
                 "policy requires review".to_string(),
+                None,
                 crate::config::PermissionProfile::FullAccess,
                 crate::config::default_boundary_none(),
                 crate::config::default_boundary_none(),

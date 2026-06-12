@@ -1,4 +1,4 @@
-use crate::app_server::protocol::{ThreadGoal, ThreadGoalStatus};
+use crate::app_server::protocol::{ThreadGoal, ThreadGoalReport, ThreadGoalStatus};
 
 pub(crate) fn active_goal_snapshot_prompt(goal: &ThreadGoal) -> String {
     format!(
@@ -69,6 +69,29 @@ pub(crate) fn objective_updated_prompt(goal: &ThreadGoal) -> String {
     )
 }
 
+pub(crate) fn goal_report_summary_prompt(report: &ThreadGoalReport) -> String {
+    format!(
+        "Write one concise paragraph for a goal completion report. \
+         Use the structured facts below. Do not invent files, approvals, tests, or outcomes.\n\n\
+         Objective:\n{}\n\n\
+         Final status: {}\n\
+         Turns run: {}\n\
+         Tokens used: {}\n\
+         Token budget: {}\n\
+         Time used seconds: {}\n\
+         Changed files: {}\n\
+         Pending approvals: {}",
+        escape_xml(&report.objective),
+        status_label(report.final_status),
+        report.turns_run,
+        report.tokens_used,
+        budget_label(report.token_budget),
+        report.time_used_seconds,
+        changed_files_label(&report.changed_files),
+        report.pending_approvals_count,
+    )
+}
+
 fn status_label(status: ThreadGoalStatus) -> &'static str {
     match status {
         ThreadGoalStatus::Active => "active",
@@ -90,6 +113,13 @@ fn remaining_label(goal: &ThreadGoal) -> String {
     goal.token_budget
         .map(|budget| budget.saturating_sub(goal.tokens_used).max(0).to_string())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn changed_files_label(files: &[String]) -> String {
+    if files.is_empty() {
+        return "none".to_string();
+    }
+    files.join(", ")
 }
 
 fn escape_xml(value: &str) -> String {
@@ -158,6 +188,29 @@ mod tests {
 
         assert!(prompt.contains("new objective supersedes the previous goal objective"));
         assert!(prompt.contains("<objective>\nnew objective\n</objective>"));
+    }
+
+    #[test]
+    fn goal_report_summary_prompt_uses_structured_fields() {
+        let prompt = goal_report_summary_prompt(&ThreadGoalReport {
+            goal_id: "goal_1".to_string(),
+            objective: "ship <report>".to_string(),
+            final_status: ThreadGoalStatus::Complete,
+            turns_run: 2,
+            tokens_used: 120,
+            token_budget: Some(200),
+            time_used_seconds: 30,
+            changed_files: vec!["src/runtime/goal/runtime.rs".to_string()],
+            pending_approvals_count: 1,
+            summary: String::new(),
+        });
+
+        assert!(prompt.contains("Write one concise paragraph"));
+        assert!(prompt.contains("ship &lt;report&gt;"));
+        assert!(prompt.contains("Final status: complete"));
+        assert!(prompt.contains("Turns run: 2"));
+        assert!(prompt.contains("src/runtime/goal/runtime.rs"));
+        assert!(prompt.contains("Pending approvals: 1"));
     }
 
     fn goal(objective: &str) -> ThreadGoal {

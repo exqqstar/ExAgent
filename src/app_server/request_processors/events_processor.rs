@@ -189,6 +189,15 @@ fn runtime_event_kind_matches(filter: &RuntimeEventKindFilter, kind: &RuntimeEve
             RuntimeEventKindFilter::TokenCount,
             RuntimeEventKind::TokenCount { .. },
         ) | (
+            RuntimeEventKindFilter::ThreadGoalTurnStarted,
+            RuntimeEventKind::ThreadGoalTurnStarted { .. },
+        ) | (
+            RuntimeEventKindFilter::ThreadGoalToolCompleted,
+            RuntimeEventKind::ThreadGoalToolCompleted { .. },
+        ) | (
+            RuntimeEventKindFilter::ThreadGoalReport,
+            RuntimeEventKind::ThreadGoalReport { .. },
+        ) | (
             RuntimeEventKindFilter::RuntimeError,
             RuntimeEventKind::RuntimeError { .. },
         )

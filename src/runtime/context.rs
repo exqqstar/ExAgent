@@ -115,6 +115,7 @@ impl ContextManager {
     pub(crate) fn sync_snapshot(&self, snapshot: &mut ThreadSnapshot) {
         snapshot.conversation = self.items.clone();
         snapshot.reference_turn_context = self.reference_turn_context.clone();
+        snapshot.token_info = self.token_info.clone();
     }
 
     #[cfg(test)]

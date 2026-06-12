@@ -163,6 +163,8 @@ fn sample_thread_view(id: ThreadId) -> ThreadView {
         status: ThreadStatus::Idle,
         active_turn: None,
         turns: vec![],
+        model: None,
+        thinking_mode: None,
         goal: None,
     }
 }

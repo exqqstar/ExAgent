@@ -65,6 +65,11 @@ type BranchCompareView = {
   error: string | null;
 };
 
+type ThreadSelection = {
+  selectedModel: ModelRef | null;
+  selectedThinkingMode: ThinkingMode | null;
+};
+
 type WorkbenchState = WorkbenchSnapshot & {
   loading: boolean;
   error: string | null;
@@ -77,6 +82,7 @@ type WorkbenchState = WorkbenchSnapshot & {
   search: string;
   activeProviderId: string | null;
   providerSettings: ProviderSettingsResponse | null;
+  selectionByThreadId: Record<string, ThreadSelection>;
   eventUnlisten: Unlisten | null;
   appliedRuntimeEventIds: Set<string>;
   selectedAgentThreadId: string | null;
@@ -182,6 +188,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   search: "",
   activeProviderId: DEFAULT_PROVIDER_ID,
   providerSettings: null,
+  selectionByThreadId: {},
   eventUnlisten: null,
   appliedRuntimeEventIds: new Set(),
   selectedAgentThreadId: null,
@@ -425,11 +432,15 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     const requestId = ++openSessionRequestSequence;
     resetSelectedAgentThread(get, set);
     get().eventUnlisten?.();
+    const restoredSelection = selectionForThread(get(), sessionId);
     set({
       activeSessionId: sessionId,
       activeTurnId: null,
       loading: true,
       error: null,
+      activeProviderId: restoredSelection.activeProviderId,
+      selectedModel: restoredSelection.selectedModel,
+      selectedThinkingMode: restoredSelection.selectedThinkingMode,
       eventUnlisten: null,
       transcript: [],
       events: [],
@@ -474,12 +485,17 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       }
       const representedEventIds = threadViewEventIds(read.thread);
       const readStatus = sessionStatusFromThreadStatus(read.thread.status);
+      const readSelection = selectionForThread(get(), sessionId, threadViewSelection(read.thread));
       set({
         sessions: updateSessionStatus(get().sessions, sessionId, readStatus),
         activeTurnId: activeTurnIdFromThread(read.thread),
         transcript: threadViewToTranscript(read.thread),
         currentGoal: read.thread.goal ?? null,
         agents: buildAgentForest(sessionId, rootAgentStatus(readStatus), agentRecordsFromThreadView(read.thread)),
+        activeProviderId: readSelection.activeProviderId,
+        selectedModel: readSelection.selectedModel,
+        selectedThinkingMode: readSelection.selectedThinkingMode,
+        selectionByThreadId: withThreadSelection(get().selectionByThreadId, sessionId, readSelection),
         appliedRuntimeEventIds: representedEventIds,
         loading: false
       });
@@ -702,7 +718,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     }
     const input = buildTurnInput(prompt, attachments);
     const inputForTurn = attachments.length > 0 ? input : [];
-    const normalized = normalizeWorkbenchSelection(get());
+    const normalized = normalizeActiveWorkbenchSelection(get());
     if (inputContainsImage(input) && !selectedModelInputModalities(normalized, get()).includes("image")) {
       set({
         error: "The selected model does not support image input. Choose a vision-capable model before sending photos."
@@ -727,6 +743,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
           activeSessionId: threadId,
           events: [],
           changedFiles: [],
+          selectionByThreadId: withThreadSelection(get().selectionByThreadId, threadId, normalized),
           appliedRuntimeEventIds: new Set()
         });
         await get().openSession(threadId);
@@ -768,7 +785,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       set({
         activeProviderId: normalized.activeProviderId,
         selectedModel: normalized.selectedModel,
-        selectedThinkingMode: normalized.selectedThinkingMode
+        selectedThinkingMode: normalized.selectedThinkingMode,
+        selectionByThreadId: withThreadSelection(get().selectionByThreadId, threadId, normalized)
       });
       const started = await exagentClient.startTurn(
         projectId,
@@ -1349,7 +1367,12 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     set({
       activeProviderId: normalized.activeProviderId,
       selectedModel: normalized.selectedModel,
-      selectedThinkingMode: normalized.selectedThinkingMode
+      selectedThinkingMode: normalized.selectedThinkingMode,
+      selectionByThreadId: withThreadSelection(
+        get().selectionByThreadId,
+        get().activeSessionId,
+        normalized
+      )
     });
   },
 
@@ -1358,7 +1381,14 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       ...get(),
       selectedThinkingMode
     });
-    set({ selectedThinkingMode: normalized.selectedThinkingMode });
+    set({
+      selectedThinkingMode: normalized.selectedThinkingMode,
+      selectionByThreadId: withThreadSelection(
+        get().selectionByThreadId,
+        get().activeSessionId,
+        normalized
+      )
+    });
   },
 
   applyProviderSettings(settings) {
@@ -1371,7 +1401,12 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       activeProviderId: normalized.activeProviderId,
       providerSettings: settings,
       selectedModel: normalized.selectedModel,
-      selectedThinkingMode: normalized.selectedThinkingMode
+      selectedThinkingMode: normalized.selectedThinkingMode,
+      selectionByThreadId: withThreadSelection(
+        get().selectionByThreadId,
+        get().activeSessionId,
+        normalized
+      )
     });
   },
 
@@ -1388,7 +1423,12 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     set({
       activeProviderId: normalized.activeProviderId,
       selectedModel: normalized.selectedModel,
-      selectedThinkingMode: normalized.selectedThinkingMode
+      selectedThinkingMode: normalized.selectedThinkingMode,
+      selectionByThreadId: withThreadSelection(
+        get().selectionByThreadId,
+        get().activeSessionId,
+        normalized
+      )
     });
   },
 
@@ -1405,6 +1445,11 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         activeProviderId: normalized.activeProviderId,
         selectedModel: normalized.selectedModel,
         selectedThinkingMode: normalized.selectedThinkingMode,
+        selectionByThreadId: withThreadSelection(
+          get().selectionByThreadId,
+          get().activeSessionId,
+          normalized
+        ),
         error: null
       });
     } catch (error) {
@@ -2552,10 +2597,11 @@ function applyTranscriptEvent(
     return upsertToolInvocationMessage(nextTranscript, toolMessage);
   }
 
-  const transcriptMessage = runtimeEventToTranscript(event);
-  if (!transcriptMessage) {
+  const rawTranscriptMessage = runtimeEventToTranscript(event);
+  if (!rawTranscriptMessage) {
     return nextTranscript;
   }
+  const transcriptMessage = withKnownTurnStatus(nextTranscript, rawTranscriptMessage);
   const finalizedStreamingTranscript = finalizeStreamingTranscriptMessage(nextTranscript, transcriptMessage);
   if (finalizedStreamingTranscript) {
     return finalizedStreamingTranscript;
@@ -2673,6 +2719,23 @@ function finalizeStreamingTranscriptMessage(
   const next = [...transcript];
   next[index] = finalized;
   return next;
+}
+
+function withKnownTurnStatus(
+  transcript: TranscriptMessage[],
+  message: TranscriptMessage
+): TranscriptMessage {
+  if (message.turnStatus || !message.threadId || !message.turnId) {
+    return message;
+  }
+  const known = transcript.find(
+    (item) =>
+      item.threadId === message.threadId &&
+      item.turnId === message.turnId &&
+      typeof item.turnStatus === "string" &&
+      item.turnStatus.length > 0
+  );
+  return known?.turnStatus ? { ...message, turnStatus: known.turnStatus } : message;
 }
 
 function findStreamingTranscriptIndex(
@@ -3360,9 +3423,10 @@ type SelectionState = Pick<
 
 function normalizeWorkbenchSelection(state: Partial<SelectionState>) {
   const activeProviderId = activeProviderIdFromSettings(state.providerSettings, state.activeProviderId);
+  const requestedModel = normalizeModelRef(state.selectedModel ?? null, activeProviderId);
   const selectedModel = isProviderConfigurationRequired(state.providerSettings)
     ? null
-    : normalizeModelRef(state.selectedModel ?? null, activeProviderId) ??
+    : selectableModelRef(requestedModel, state.providerSettings) ??
       providerConfigModelRef(state.providerSettings) ??
       modelRefFromString(state.runtimeSettings?.default_model, activeProviderId);
   const selectedThinkingMode = normalizeThinkingModeForModel(
@@ -3375,6 +3439,106 @@ function normalizeWorkbenchSelection(state: Partial<SelectionState>) {
     activeProviderId,
     selectedModel,
     selectedThinkingMode
+  };
+}
+
+function normalizeActiveWorkbenchSelection(state: WorkbenchState) {
+  const activeThreadSelection = state.activeSessionId
+    ? state.selectionByThreadId[state.activeSessionId]
+    : null;
+  return normalizeWorkbenchSelection({
+    ...state,
+    selectedModel: activeThreadSelection ? activeThreadSelection.selectedModel : state.selectedModel,
+    selectedThinkingMode: activeThreadSelection
+      ? activeThreadSelection.selectedThinkingMode
+      : state.selectedThinkingMode
+  });
+}
+
+function selectionForThread(
+  state: WorkbenchState,
+  threadId: string,
+  fallbackSelection?: ThreadSelection | null
+) {
+  const scopedSelection = state.selectionByThreadId[threadId] ?? null;
+  const requestedSelection = scopedSelection ?? fallbackSelection ?? null;
+  return normalizeWorkbenchSelection({
+    providerSettings: state.providerSettings,
+    runtimeSettings: state.runtimeSettings,
+    activeProviderId: state.activeProviderId,
+    selectedModel: requestedSelection?.selectedModel ?? null,
+    selectedThinkingMode: requestedSelection?.selectedThinkingMode ?? null
+  });
+}
+
+function threadViewSelection(thread: ThreadView): ThreadSelection | null {
+  return thread.model
+    ? {
+        selectedModel: thread.model,
+        selectedThinkingMode: thread.thinking_mode ?? null
+      }
+    : null;
+}
+
+function selectableModelRef(
+  model: ModelRef | null,
+  settings?: ProviderSettingsResponse | null
+): ModelRef | null {
+  if (!model) {
+    return null;
+  }
+  if (!settings) {
+    return model;
+  }
+  if (isProviderConfigurationRequired(settings)) {
+    return null;
+  }
+  return modelIsSelectable(model, settings) ? model : null;
+}
+
+function modelIsSelectable(model: ModelRef, settings: ProviderSettingsResponse) {
+  const providerId = model.provider_id;
+  const modelId = model.model_id;
+  if (settings.config.provider_id === providerId && settings.config.model === modelId) {
+    return true;
+  }
+  if (settings.connected_provider?.id === providerId && settings.connected_provider.model === modelId) {
+    return true;
+  }
+  if (
+    settings.configured_providers.some(
+      (provider) => provider.provider_id === providerId && provider.model === modelId
+    )
+  ) {
+    return true;
+  }
+
+  const providerOptions = settings.model_options.filter((option) => option.provider_id === providerId);
+  if (providerOptions.some((option) => option.id === modelId)) {
+    return true;
+  }
+
+  const providerIsConfigured =
+    settings.config.provider_id === providerId ||
+    settings.connected_provider?.id === providerId ||
+    settings.configured_providers.some((provider) => provider.provider_id === providerId);
+  return providerIsConfigured && providerOptions.length === 0;
+}
+
+function withThreadSelection(
+  selectionByThreadId: Record<string, ThreadSelection>,
+  threadId: string | null,
+  selection: ReturnType<typeof normalizeWorkbenchSelection>
+) {
+  if (!threadId) {
+    return selectionByThreadId;
+  }
+  return {
+    ...selectionByThreadId,
+    [threadId]: {
+      selectedModel: selection.selectedModel,
+      selectedThinkingMode: selection.selectedThinkingMode
+    }
   };
 }
 

@@ -215,6 +215,10 @@ pub struct ThreadView {
     pub active_turn: Option<TurnView>,
     pub turns: Vec<TurnView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_mode: Option<ThinkingMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<ThreadGoal>,
 }
 

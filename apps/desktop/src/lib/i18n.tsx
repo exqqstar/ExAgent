@@ -44,6 +44,7 @@ export type TranslationKey =
   | "approvals.inbox.status.rollbackRestored"
   | "approvals.inbox.status.rollbackFailedAfterReject"
   | "transcript.actions.forkFromHere"
+  | "transcript.actions.forkFromReply"
   | "sessions.forkedFromTurn"
   | "composer.actions.addPhotosAndFiles"
   | "composer.actions.attachChrome"
@@ -219,6 +220,7 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "approvals.inbox.status.rollbackRestored": "Rejected {approvalId} and restored checkpoint {checkpointId}.",
     "approvals.inbox.status.rollbackFailedAfterReject": "Rejected {approvalId}, but rollback failed: {error}",
     "transcript.actions.forkFromHere": "Fork from here",
+    "transcript.actions.forkFromReply": "Fork from this reply",
     "sessions.forkedFromTurn": "forked from turn {turn}",
     "composer.actions.addPhotosAndFiles": "Add photos",
     "composer.actions.attachChrome": "Attach Google Chrome",
@@ -385,6 +387,7 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "approvals.inbox.status.rollbackRestored": "已拒绝 {approvalId} 并恢复检查点 {checkpointId}。",
     "approvals.inbox.status.rollbackFailedAfterReject": "已拒绝 {approvalId}，但回滚失败：{error}",
     "transcript.actions.forkFromHere": "从这里分叉",
+    "transcript.actions.forkFromReply": "从这条回复分叉",
     "sessions.forkedFromTurn": "从第 {turn} 轮分叉",
     "composer.actions.addPhotosAndFiles": "添加照片",
     "composer.actions.attachChrome": "附加 Google Chrome",

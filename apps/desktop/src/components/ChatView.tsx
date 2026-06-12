@@ -41,6 +41,7 @@ export function ChatView({ state }: { state: WorkbenchState }) {
                       loading={state.loading}
                       forkDisabled={forkDisabled}
                       onForkFromTurn={state.forkThreadFromTurn}
+                      groupTurnActivity
                     />
                   </div>
                 </ScrollArea>
@@ -147,6 +148,7 @@ function ComparePane({
             loading={loading}
             emptyLabel="No post-fork turns in this branch."
             readOnly
+            groupTurnActivity
           />
         </div>
       </ScrollArea>

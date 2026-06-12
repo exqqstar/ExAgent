@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { exagentClient } from "@/api/exagentClient";
 import { __resetWorkbenchStoreRuntimeForTests, useWorkbenchStore } from "@/stores/workbenchStore";
-import type { AgentTreeResponse, BackendRuntimeEvent, ThreadReadResponse } from "@/types";
+import type {
+  AgentTreeResponse,
+  BackendRuntimeEvent,
+  ProviderModelView,
+  ProviderSettingsResponse,
+  RuntimeSettingsResponse,
+  ThreadReadResponse
+} from "@/types";
 
 describe("workbenchStore runtime events", () => {
   beforeEach(() => {
@@ -71,6 +78,50 @@ describe("workbenchStore runtime events", () => {
       expect.objectContaining({ body: "Child answer", threadId: "thread-child" })
     ]);
   });
+
+  it("copies known completed turn status onto a late assistant transcript message", () => {
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      activeSessionId: "thread-late-final",
+      transcript: [
+        {
+          id: "user-late-final",
+          role: "user",
+          body: "Prompt",
+          timestamp: "now",
+          threadId: "thread-late-final",
+          turnId: "turn-late-final",
+          turnStatus: "completed"
+        }
+      ],
+      loading: false
+    });
+
+    useWorkbenchStore.getState().applyRuntimeEvent({
+      event_id: "evt-late-assistant",
+      thread_id: "thread-late-final",
+      turn_id: "turn-late-final",
+      kind: {
+        type: "assistant_turn",
+        turn: {
+          text: "Late final answer",
+          tool_calls: []
+        }
+      }
+    });
+
+    expect(useWorkbenchStore.getState().transcript).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "evt-late-assistant",
+          role: "assistant",
+          body: "Late final answer",
+          turnStatus: "completed"
+        })
+      ])
+    );
+  });
+
   it("stores token count events by thread id", () => {
     useWorkbenchStore.setState({
       ...useWorkbenchStore.getInitialState(),
@@ -397,6 +448,180 @@ describe("workbenchStore runtime events", () => {
       expect.objectContaining({ body: "Root answer", threadId: "thread-root" })
     ]);
     expect(useWorkbenchStore.getState().tokenUsageByThreadId["thread-child"]?.total.total_tokens).toBe(1600);
+  });
+
+  it("keeps selected models scoped to their active thread session", async () => {
+    vi.spyOn(exagentClient, "resumeThread").mockImplementation(async (_projectId, threadId) =>
+      threadReadResponse(threadId)
+    );
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(vi.fn());
+    vi.spyOn(exagentClient, "replayEvents").mockImplementation(async (_projectId, threadId) => ({
+      thread_id: threadId,
+      events: []
+    }));
+    vi.spyOn(exagentClient, "agentTree").mockImplementation(async (_projectId, threadId) =>
+      agentTreeResponse(threadId)
+    );
+    vi.spyOn(exagentClient, "listApprovals").mockResolvedValue({ approvals: [] });
+    const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
+      thread_id: "thread-a",
+      turn: {
+        id: "turn-a",
+        status: "in_progress",
+        items: []
+      }
+    });
+
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      activeProjectId: "project",
+      activeSessionId: "thread-a",
+      activeProviderId: "openai",
+      sessions: [
+        {
+          id: "thread-a",
+          projectId: "project",
+          title: "Thread A",
+          updatedAt: "now",
+          status: "idle"
+        },
+        {
+          id: "thread-b",
+          projectId: "project",
+          title: "Thread B",
+          updatedAt: "now",
+          status: "idle"
+        }
+      ],
+      providerSettings: openAiProviderSettings(),
+      runtimeSettings: runtimeSettings(),
+      selectedModel: { provider_id: "openai", model_id: "gpt-5.5" },
+      selectedThinkingMode: null
+    });
+
+    useWorkbenchStore.getState().setSelectedModel({ provider_id: "openai", model_id: "gpt-4.1-mini" });
+    await useWorkbenchStore.getState().openSession("thread-b");
+    useWorkbenchStore.getState().setSelectedModel({ provider_id: "openai", model_id: "gpt-5.5" });
+    await useWorkbenchStore.getState().openSession("thread-a");
+
+    expect(useWorkbenchStore.getState().selectedModel).toEqual({
+      provider_id: "openai",
+      model_id: "gpt-4.1-mini"
+    });
+
+    useWorkbenchStore.getState().setComposerValue("Use the original model");
+    await useWorkbenchStore.getState().sendPrompt();
+
+    expect(startTurn).toHaveBeenCalledWith(
+      "project",
+      "thread-a",
+      "Use the original model",
+      expect.objectContaining({
+        model: {
+          provider_id: "openai",
+          model_id: "gpt-4.1-mini"
+        }
+      })
+    );
+  });
+
+  it("restores a reopened thread session model from the backend thread view", async () => {
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        ...threadReadResponse("thread-a").thread,
+        model: {
+          provider_id: "openai",
+          model_id: "gpt-4.1-mini"
+        },
+        thinking_mode: null
+      }
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(vi.fn());
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "thread-a",
+      events: []
+    });
+    vi.spyOn(exagentClient, "agentTree").mockResolvedValue(agentTreeResponse("thread-a"));
+    vi.spyOn(exagentClient, "listApprovals").mockResolvedValue({ approvals: [] });
+
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      activeProjectId: "project",
+      activeSessionId: null,
+      activeProviderId: "openai",
+      sessions: [
+        {
+          id: "thread-a",
+          projectId: "project",
+          title: "Thread A",
+          updatedAt: "now",
+          status: "idle"
+        }
+      ],
+      providerSettings: openAiProviderSettings(),
+      runtimeSettings: runtimeSettings(),
+      selectedModel: { provider_id: "openai", model_id: "gpt-5.5" },
+      selectedThinkingMode: null,
+      selectionByThreadId: {}
+    });
+
+    await useWorkbenchStore.getState().openSession("thread-a");
+
+    expect(useWorkbenchStore.getState().selectedModel).toEqual({
+      provider_id: "openai",
+      model_id: "gpt-4.1-mini"
+    });
+  });
+
+  it("falls back to the configured provider model when a reopened thread references an unavailable model", async () => {
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        ...threadReadResponse("thread-stale").thread,
+        model: {
+          provider_id: "removed-provider",
+          model_id: "removed-model"
+        },
+        thinking_mode: null
+      }
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(vi.fn());
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "thread-stale",
+      events: []
+    });
+    vi.spyOn(exagentClient, "agentTree").mockResolvedValue(agentTreeResponse("thread-stale"));
+    vi.spyOn(exagentClient, "listApprovals").mockResolvedValue({ approvals: [] });
+
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      activeProjectId: "project",
+      activeSessionId: null,
+      activeProviderId: "openai",
+      sessions: [
+        {
+          id: "thread-stale",
+          projectId: "project",
+          title: "Thread Stale",
+          updatedAt: "now",
+          status: "idle"
+        }
+      ],
+      providerSettings: openAiProviderSettings(),
+      runtimeSettings: runtimeSettings(),
+      selectedModel: { provider_id: "openai", model_id: "gpt-5.5" },
+      selectedThinkingMode: null,
+      selectionByThreadId: {}
+    });
+
+    await useWorkbenchStore.getState().openSession("thread-stale");
+
+    expect(useWorkbenchStore.getState().selectedModel).toEqual({
+      provider_id: "openai",
+      model_id: "gpt-5.5"
+    });
   });
 
   it("debounces agent tree refreshes for agent-relevant runtime event bursts", async () => {
@@ -853,6 +1078,92 @@ function agentTreeResponse(
       current_tool: fields.currentTool ?? null,
       children: []
     }
+  };
+}
+
+function openAiProviderSettings(): ProviderSettingsResponse {
+  return {
+    providers: [
+      {
+        id: "openai",
+        name: "OpenAI",
+        description: "OpenAI models",
+        recommended: true,
+        supported: true,
+        auth_mode: "api_key_required",
+        protocol: "openai_chat_completions",
+        default_base_url: "https://api.openai.com/v1",
+        default_model: "gpt-5.5",
+        supports_model_discovery: true,
+        supports_tools: true,
+        unsupported_reason: null
+      }
+    ],
+    active_provider_id: "openai",
+    active_credential_id: null,
+    credentials: [],
+    config: {
+      provider_id: "openai",
+      base_url: "https://api.openai.com/v1",
+      model: "gpt-5.5",
+      has_api_key: true,
+      has_credential: false,
+      credential_kind: "api_key",
+      credential_source: "environment",
+      auth_required: true
+    },
+    connected_provider: {
+      id: "openai",
+      name: "OpenAI",
+      model: "gpt-5.5",
+      base_url: "https://api.openai.com/v1"
+    },
+    last_connection: null,
+    configured_providers: [
+      {
+        provider_id: "openai",
+        base_url: "https://api.openai.com/v1",
+        model: "gpt-5.5",
+        has_api_key: true,
+        has_credential: false,
+        credential_kind: "api_key",
+        credential_source: "environment",
+        auth_required: true
+      }
+    ],
+    model_options: [
+      modelOption("gpt-4.1-mini"),
+      modelOption("gpt-5.5")
+    ]
+  };
+}
+
+function modelOption(modelId: string): ProviderModelView {
+  return {
+    provider_id: "openai",
+    id: modelId,
+    display_name: modelId,
+    context_window: 128000,
+    supports_tools: true,
+    capabilities: {
+      supports_tools: true,
+      thinking: {
+        supported: false,
+        modes: []
+      },
+      reasoning: null,
+      input_modalities: ["text", "image"]
+    }
+  };
+}
+
+function runtimeSettings(): RuntimeSettingsResponse {
+  return {
+    default_model: "gpt-5.5",
+    default_thinking_mode: null,
+    presets: [],
+    mcp_servers: [],
+    skill_roots: []
   };
 }
 

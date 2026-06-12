@@ -321,6 +321,7 @@ function AgentThreadTabPanel({
         loading={view?.loading ?? false}
         emptyLabel="No conversation recorded for this agent."
         className="gap-4"
+        groupTurnActivity={false}
       />
     );
   }
@@ -332,6 +333,7 @@ function AgentThreadTabPanel({
         loading={view?.loading ?? false}
         emptyLabel="No reasoning recorded for this agent."
         className="gap-4"
+        groupTurnActivity={false}
       />
     );
   }
@@ -343,6 +345,7 @@ function AgentThreadTabPanel({
         loading={view?.loading ?? false}
         emptyLabel="No tool activity recorded for this agent."
         className="gap-4"
+        groupTurnActivity={false}
       />
     );
   }

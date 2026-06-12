@@ -1,7 +1,9 @@
 use crate::app_server::protocol::{
     ThreadItem, ThreadStatus, ThreadView, TurnState, TurnStatus, TurnView,
 };
+use crate::config::ThinkingMode;
 use crate::events::{RuntimeEvent, RuntimeEventKind};
+use crate::resolved::ModelRef;
 use crate::session::{ApprovalId, ApprovalStatus};
 use crate::state::fork_history::FORK_CONTEXT_TURN_ID;
 use crate::state::rollout::ResponseItem;
@@ -50,10 +52,31 @@ pub(in crate::app_server) fn latest_turn_state(events: &[RuntimeEvent]) -> Optio
     })
 }
 
+#[cfg(test)]
 pub(in crate::app_server) fn build_thread_view(
     thread_id: ThreadId,
     status: ThreadStatus,
     active_turn: Option<TurnState>,
+    events: Vec<RuntimeEvent>,
+    response_items: &[ResponseItem],
+) -> ThreadView {
+    build_thread_view_with_selection(
+        thread_id,
+        status,
+        active_turn,
+        None,
+        None,
+        events,
+        response_items,
+    )
+}
+
+pub(in crate::app_server) fn build_thread_view_with_selection(
+    thread_id: ThreadId,
+    status: ThreadStatus,
+    active_turn: Option<TurnState>,
+    model: Option<ModelRef>,
+    thinking_mode: Option<ThinkingMode>,
     events: Vec<RuntimeEvent>,
     response_items: &[ResponseItem],
 ) -> ThreadView {
@@ -70,6 +93,8 @@ pub(in crate::app_server) fn build_thread_view(
         status,
         active_turn: active_turn_view,
         turns,
+        model,
+        thinking_mode,
         goal: None,
     }
 }

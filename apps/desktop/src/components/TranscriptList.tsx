@@ -8,7 +8,7 @@ import {
   Info,
   Terminal
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ApprovalCard } from "@/components/ApprovalCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -44,6 +44,91 @@ const toolStatusLabel: Record<NonNullable<TranscriptMessage["toolStatus"]>, stri
   cancelled: "Cancelled"
 };
 
+type TranscriptRenderItem =
+  | { type: "message"; message: TranscriptMessage }
+  | {
+      type: "activity";
+      id: string;
+      threadId?: string;
+      turnId?: string;
+      turnStatus?: string;
+      messages: TranscriptMessage[];
+      defaultExpanded: boolean;
+    };
+
+const activityRoles = new Set<TranscriptMessage["role"]>(["reasoning", "tool", "approval"]);
+
+function transcriptRenderItems(messages: TranscriptMessage[], groupTurnActivity: boolean): TranscriptRenderItem[] {
+  if (!groupTurnActivity) {
+    return messages.map((message) => ({ type: "message", message }));
+  }
+
+  const result: TranscriptRenderItem[] = [];
+  let index = 0;
+
+  while (index < messages.length) {
+    const message = messages[index];
+    if (!message.threadId || !message.turnId) {
+      result.push({ type: "message", message });
+      index += 1;
+      continue;
+    }
+
+    const turnMessages: TranscriptMessage[] = [];
+    const { threadId, turnId } = message;
+    while (
+      index < messages.length &&
+      messages[index].threadId === threadId &&
+      messages[index].turnId === turnId
+    ) {
+      turnMessages.push(messages[index]);
+      index += 1;
+    }
+
+    result.push(...renderItemsForTurn(threadId, turnId, turnMessages));
+  }
+
+  return result;
+}
+
+function renderItemsForTurn(threadId: string, turnId: string, messages: TranscriptMessage[]): TranscriptRenderItem[] {
+  const activity = messages.filter((message) => activityRoles.has(message.role));
+  const visible = messages.filter((message) => !activityRoles.has(message.role));
+
+  if (activity.length === 0) {
+    return messages.map((message) => ({ type: "message", message }));
+  }
+
+  const firstActivityIndex = messages.findIndex((message) => activityRoles.has(message.role));
+  const firstVisibleAfterActivity = visible.findIndex((message) => messages.indexOf(message) > firstActivityIndex);
+  const insertIndex = firstVisibleAfterActivity === -1 ? visible.length : firstVisibleAfterActivity;
+  const turnStatus = messages.find((message) => message.turnStatus)?.turnStatus;
+  const hasFinalAssistant = messages.some(isFinalAssistantMessage);
+  const hasActiveTool = activity.some(
+    (message) => message.toolStatus === "running" || message.toolStatus === "waiting_approval"
+  );
+  const group: TranscriptRenderItem = {
+    type: "activity",
+    id: `activity-${threadId}-${turnId}`,
+    threadId,
+    turnId,
+    turnStatus,
+    messages: activity,
+    defaultExpanded: hasActiveTool || !hasFinalAssistant
+  };
+  const items: TranscriptRenderItem[] = visible.map((message) => ({ type: "message", message }));
+  items.splice(insertIndex, 0, group);
+  return items;
+}
+
+function isFinalAssistantMessage(message: TranscriptMessage) {
+  return (
+    message.role === "assistant" &&
+    message.body.trim().length > 0 &&
+    !message.id.startsWith("stream-assistant-")
+  );
+}
+
 export function TranscriptList({
   messages,
   loading = false,
@@ -51,6 +136,7 @@ export function TranscriptList({
   className,
   forkDisabled = false,
   readOnly = false,
+  groupTurnActivity = false,
   onForkFromTurn
 }: {
   messages: TranscriptMessage[];
@@ -59,6 +145,7 @@ export function TranscriptList({
   className?: string;
   forkDisabled?: boolean;
   readOnly?: boolean;
+  groupTurnActivity?: boolean;
   onForkFromTurn?: (threadId: string, turnId: string) => void;
 }) {
   const { t } = useI18n();
@@ -71,18 +158,24 @@ export function TranscriptList({
     return <p className="type-body-md text-muted">{emptyLabel}</p>;
   }
 
+  const renderItems = transcriptRenderItems(messages, groupTurnActivity);
+
   return (
     <div className={cn("flex flex-col gap-5", className)}>
-      {messages.map((message) => (
-        <TranscriptItem
-          key={message.id}
-          message={message}
-          forkDisabled={forkDisabled}
-          forkLabel={t("transcript.actions.forkFromHere")}
-          readOnly={readOnly}
-          onForkFromTurn={onForkFromTurn}
-        />
-      ))}
+      {renderItems.map((item) =>
+        item.type === "activity" ? (
+          <TurnActivityGroup key={item.id} group={item} readOnly={readOnly} />
+        ) : (
+          <TranscriptItem
+            key={item.message.id}
+            message={item.message}
+            forkDisabled={forkDisabled}
+            forkLabel={t("transcript.actions.forkFromReply")}
+            readOnly={readOnly}
+            onForkFromTurn={onForkFromTurn}
+          />
+        )
+      )}
     </div>
   );
 }
@@ -107,29 +200,8 @@ export function TranscriptItem({
   if (message.role === "user") {
     const images = imageInputs(message.input);
     const hasBody = message.body.trim().length > 0;
-    const canFork = Boolean(
-      onForkFromTurn && message.threadId && message.turnId && message.turnStatus === "completed"
-    );
     return (
       <article className="group flex items-start justify-end gap-2" aria-label="User message">
-        {canFork && message.threadId && message.turnId ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                disabled={forkDisabled}
-                aria-label={forkLabel}
-                className="mt-1 h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
-                onClick={() => onForkFromTurn?.(message.threadId as string, message.turnId as string)}
-              >
-                <GitBranchPlus className="h-3.5 w-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{forkLabel}</TooltipContent>
-          </Tooltip>
-        ) : null}
         <div className="user-bubble max-w-[min(74%,680px)] rounded-lg px-4 py-2.5 text-ink sm:max-w-[min(68%,680px)]">
           {hasBody ? <p className="type-body-lg whitespace-pre-wrap break-words">{message.body}</p> : null}
           {images.length > 0 ? <UserImageGrid images={images} hasBody={hasBody} /> : null}
@@ -139,11 +211,32 @@ export function TranscriptItem({
   }
 
   if (message.role === "assistant") {
+    const canFork = Boolean(
+      !readOnly && onForkFromTurn && message.threadId && message.turnId && message.turnStatus === "completed"
+    );
     return (
-      <article className="w-full max-w-[780px] py-1" aria-label="Assistant message">
-        <div className="type-body-lg break-words text-muted">
+      <article className="group flex w-full max-w-[780px] items-start gap-2 py-1" aria-label="Assistant message">
+        <div className="min-w-0 flex-1 type-body-lg break-words text-muted">
           <AssistantText text={message.body} />
         </div>
+        {canFork && message.threadId && message.turnId ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                disabled={forkDisabled}
+                aria-label={forkLabel}
+                className="mt-0.5 h-7 w-7 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+                onClick={() => onForkFromTurn?.(message.threadId as string, message.turnId as string)}
+              >
+                <GitBranchPlus className="h-3.5 w-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{forkLabel}</TooltipContent>
+          </Tooltip>
+        ) : null}
       </article>
     );
   }
@@ -185,6 +278,112 @@ export function TranscriptItem({
       )}
     </article>
   );
+}
+
+function TurnActivityGroup({
+  group,
+  readOnly
+}: {
+  group: Extract<TranscriptRenderItem, { type: "activity" }>;
+  readOnly: boolean;
+}) {
+  const [expanded, setExpanded] = useState(group.defaultExpanded);
+  const [manuallyChanged, setManuallyChanged] = useState(false);
+  const summary = activitySummary(group.messages);
+
+  useEffect(() => {
+    if (!manuallyChanged) {
+      setExpanded(group.defaultExpanded);
+    }
+  }, [group.defaultExpanded, manuallyChanged]);
+
+  return (
+    <section className="w-full max-w-[780px]" aria-label="Turn activity">
+      <button
+        type="button"
+        className="group flex min-h-8 w-full items-center gap-2 rounded-md py-1 text-left text-muted transition-colors hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+        aria-expanded={expanded}
+        onClick={() => {
+          setManuallyChanged(true);
+          setExpanded((value) => !value);
+        }}
+      >
+        <ChevronRight className={cn("h-4 w-4 shrink-0 transition-transform", expanded && "rotate-90")} />
+        <span className="type-label-md text-muted">Activity</span>
+        <span className="type-label-sm min-w-0 truncate text-subtle">{summary}</span>
+      </button>
+      {expanded ? (
+        <div className="mt-2 space-y-2 border-l border-border pl-4">
+          {group.messages.map((message) => (
+            <TurnActivityMessage key={message.id} message={message} readOnly={readOnly} />
+          ))}
+        </div>
+      ) : null}
+      <div className="mt-3 border-t border-border" aria-hidden="true" />
+    </section>
+  );
+}
+
+function TurnActivityMessage({ message, readOnly }: { message: TranscriptMessage; readOnly: boolean }) {
+  if (message.role === "reasoning") {
+    const body = message.body.trim();
+    return (
+      <div className="min-w-0">
+        <div className="flex min-w-0 items-center gap-2">
+          <Info className="h-3.5 w-3.5 shrink-0 text-subtle" />
+          <span className="type-label-md text-ink">{message.title ?? "Reasoning"}</span>
+        </div>
+        {body ? (
+          <div className="type-body-md mt-1 text-muted">
+            <AssistantText text={body} />
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (message.role === "approval") {
+    return <ApprovalCard message={message} readOnly={readOnly} />;
+  }
+
+  const Icon = message.status ? statusIcon[message.status] : Terminal;
+  const badgeLabel = message.toolStatus ? toolStatusLabel[message.toolStatus] : roleLabel[message.role];
+  const isToolOutput = message.role === "tool" && message.invocationId && message.body.trim().length > 0;
+
+  return (
+    <div className="min-w-0 rounded-md border border-border bg-surface-1 px-3 py-2">
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <Icon className="h-3.5 w-3.5 shrink-0 text-muted" />
+          <span className="type-label-md min-w-0 truncate text-ink">{message.title ?? roleLabel[message.role]}</span>
+          <Badge variant={message.status ?? "neutral"}>{badgeLabel}</Badge>
+          {message.mutating ? <Badge variant="warning">Mutating</Badge> : null}
+        </div>
+        <time className="type-label-sm shrink-0 text-subtle">{message.timestamp}</time>
+      </div>
+      {message.body.trim().length > 0 ? (
+        isToolOutput ? (
+          <pre className="type-code-sm mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded border border-border bg-surface-2/80 px-3 py-2 text-muted">
+            {message.body}
+          </pre>
+        ) : (
+          <p className="type-body-md mt-2 whitespace-pre-wrap break-words text-muted">{message.body}</p>
+        )
+      ) : null}
+    </div>
+  );
+}
+
+function activitySummary(messages: TranscriptMessage[]) {
+  const reasoningCount = messages.filter((message) => message.role === "reasoning").length;
+  const toolCount = messages.filter((message) => message.role === "tool").length;
+  const approvalCount = messages.filter((message) => message.role === "approval").length;
+  const parts = [
+    reasoningCount > 0 ? `${reasoningCount} reasoning` : null,
+    toolCount > 0 ? `${toolCount} ${toolCount === 1 ? "tool" : "tools"}` : null,
+    approvalCount > 0 ? `${approvalCount} ${approvalCount === 1 ? "approval" : "approvals"}` : null
+  ].filter(Boolean);
+  return parts.join(" · ");
 }
 
 function GoalReportCard({ message }: { message: TranscriptMessage }) {

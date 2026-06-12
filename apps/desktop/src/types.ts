@@ -273,6 +273,8 @@ export interface ThreadView {
   status: string;
   active_turn: TurnView | null;
   turns: TurnView[];
+  model?: ModelRef | null;
+  thinking_mode?: ThinkingMode | null;
   goal?: ThreadGoal | null;
 }
 

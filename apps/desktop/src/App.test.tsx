@@ -1392,7 +1392,7 @@ describe("AppShell", () => {
     });
   });
 
-  it("forks a historical user turn and opens the new thread", async () => {
+  it("forks a historical assistant reply and opens the new thread", async () => {
     const user = userEvent.setup();
     const forkThread = vi.spyOn(exagentClient, "forkThread").mockResolvedValue({
       new_thread_id: "session-fork",
@@ -1480,8 +1480,12 @@ describe("AppShell", () => {
 
     render(<App />);
 
-    await user.hover(screen.getByRole("article", { name: "User message" }));
-    await user.click(screen.getByRole("button", { name: "Fork from here" }));
+    const userMessage = screen.getByRole("article", { name: "User message" });
+    await user.hover(userMessage);
+    expect(within(userMessage).queryByRole("button", { name: "Fork from this reply" })).not.toBeInTheDocument();
+
+    await user.hover(screen.getByRole("article", { name: "Assistant message" }));
+    await user.click(screen.getByRole("button", { name: "Fork from this reply" }));
 
     expect(forkThread).toHaveBeenCalledWith("project-exagent", {
       threadId: "session-parent",
@@ -1493,7 +1497,7 @@ describe("AppShell", () => {
     expect(screen.getByText("Fork transcript")).toBeInTheDocument();
   });
 
-  it("makes a live completed user turn forkable without reopening", async () => {
+  it("makes a live completed assistant reply forkable without reopening", async () => {
     const user = userEvent.setup();
     const startTurn = vi.spyOn(exagentClient, "startTurn").mockResolvedValue({
       thread_id: "session-live",
@@ -1569,7 +1573,22 @@ describe("AppShell", () => {
     });
     expect(startTurn).toHaveBeenCalled();
 
-    expect(screen.queryByRole("button", { name: "Fork from here" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Fork from this reply" })).not.toBeInTheDocument();
+
+    act(() => {
+      useWorkbenchStore.getState().applyRuntimeEvent({
+        event_id: "evt-live-assistant",
+        thread_id: "session-live",
+        turn_id: "turn-live",
+        kind: {
+          type: "assistant_turn",
+          turn: {
+            text: "Live answer",
+            tool_calls: [],
+          },
+        },
+      });
+    });
 
     act(() => {
       useWorkbenchStore.getState().applyRuntimeEvent({
@@ -1580,8 +1599,8 @@ describe("AppShell", () => {
       });
     });
 
-    await user.hover(screen.getByRole("article", { name: "User message" }));
-    const forkButton = screen.getByRole("button", { name: "Fork from here" });
+    await user.hover(screen.getByRole("article", { name: "Assistant message" }));
+    const forkButton = screen.getByRole("button", { name: "Fork from this reply" });
     expect(forkButton).toBeEnabled();
 
     await user.click(forkButton);
@@ -1683,7 +1702,7 @@ describe("AppShell", () => {
     );
   });
 
-  it("does not offer fork for a user message in an in-progress active turn", async () => {
+  it("does not offer fork for an in-progress active turn", async () => {
     const user = userEvent.setup();
     const forkThread = vi.spyOn(exagentClient, "forkThread").mockResolvedValue({
       new_thread_id: "session-fork",
@@ -1745,7 +1764,7 @@ describe("AppShell", () => {
 
     await user.hover(screen.getByRole("article", { name: "User message" }));
 
-    expect(screen.queryByRole("button", { name: "Fork from here" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Fork from this reply" })).not.toBeInTheDocument();
     expect(forkThread).not.toHaveBeenCalled();
   });
 
@@ -1769,7 +1788,10 @@ describe("AppShell", () => {
           {
             id: "turn-completed",
             status: "completed",
-            items: [{ type: "user_message", text: "Completed prompt" }],
+            items: [
+              { type: "user_message", text: "Completed prompt" },
+              { type: "assistant_message", text: "Completed answer" },
+            ],
           },
         ],
       },
@@ -1809,8 +1831,8 @@ describe("AppShell", () => {
       await useWorkbenchStore.getState().openSession("session-awaiting");
     });
 
-    await user.hover(screen.getByRole("article", { name: "User message" }));
-    const forkButton = screen.getByRole("button", { name: "Fork from here" });
+    await user.hover(screen.getByRole("article", { name: "Assistant message" }));
+    const forkButton = screen.getByRole("button", { name: "Fork from this reply" });
 
     expect(forkButton).toBeDisabled();
     await user.click(forkButton);
@@ -1984,7 +2006,7 @@ describe("AppShell", () => {
     expect(within(parentPane).getByText("Parent-only follow-up")).toBeInTheDocument();
     expect(within(forkPane).getByText("Fork-only follow-up")).toBeInTheDocument();
     expect(screen.queryByLabelText("Message ExAgent")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Fork from here" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Fork from this reply" })).not.toBeInTheDocument();
 
     await user.keyboard("{Escape}");
 
@@ -4986,7 +5008,7 @@ describe("AppShell", () => {
     );
   });
 
-  it("renders reasoning messages as collapsible transcript blocks", async () => {
+  it("groups turn activity before the final assistant reply and collapses it after completion", async () => {
     const user = userEvent.setup();
     vi.spyOn(exagentClient, "getWorkbenchSnapshot").mockResolvedValue({
       projects: [
@@ -5010,6 +5032,15 @@ describe("AppShell", () => {
       activeSessionId: "session-desktop",
       transcript: [
         {
+          id: "user-message",
+          role: "user",
+          body: "Explain the provider shape",
+          timestamp: "history",
+          threadId: "session-desktop",
+          turnId: "turn-reasoning",
+          turnStatus: "completed",
+        },
+        {
           id: "reasoning-message",
           role: "reasoning",
           title: "Reasoning",
@@ -5017,6 +5048,20 @@ describe("AppShell", () => {
           timestamp: "history",
           threadId: "session-desktop",
           turnId: "turn-reasoning",
+          turnStatus: "completed",
+        },
+        {
+          id: "tool-message",
+          role: "tool",
+          title: "read_file",
+          body: "Tool completed.",
+          timestamp: "history",
+          status: "success",
+          threadId: "session-desktop",
+          turnId: "turn-reasoning",
+          turnStatus: "completed",
+          toolName: "read_file",
+          toolStatus: "completed",
         },
         {
           id: "assistant-message",
@@ -5025,6 +5070,7 @@ describe("AppShell", () => {
           timestamp: "history",
           threadId: "session-desktop",
           turnId: "turn-reasoning",
+          turnStatus: "completed",
         },
       ],
       events: [],
@@ -5043,22 +5089,24 @@ describe("AppShell", () => {
     });
     render(<App />);
 
-    const reasoningArticle = await screen.findByLabelText("Reasoning message");
-    const reasoningToggle = within(reasoningArticle).getByRole("button", {
-      name: /Reasoning/,
+    const activityGroup = await screen.findByLabelText("Turn activity");
+    const activityToggle = within(activityGroup).getByRole("button", {
+      name: /Activity/,
     });
-    expect(reasoningToggle).toHaveAttribute("aria-expanded", "false");
+    expect(activityToggle).toHaveAttribute("aria-expanded", "false");
     expect(
       screen.queryByText("Checked the provider response shape."),
     ).not.toBeInTheDocument();
+    expect(screen.queryByText("read_file")).not.toBeInTheDocument();
+    expect(screen.getByText("Final answer.")).toBeInTheDocument();
 
-    await user.click(reasoningToggle);
+    await user.click(activityToggle);
 
-    expect(reasoningToggle).toHaveAttribute("aria-expanded", "true");
+    expect(activityToggle).toHaveAttribute("aria-expanded", "true");
     expect(
       screen.getByText("Checked the provider response shape."),
     ).toBeInTheDocument();
-    expect(screen.getByText("Final answer.")).toBeInTheDocument();
+    expect(screen.getByText("read_file")).toBeInTheDocument();
   });
 
   it("uses the saved provider for prompts without reloading the workbench", async () => {
@@ -6003,6 +6051,67 @@ describe("AppShell", () => {
     expect(screen.queryByText("legacy exec duplicate")).not.toBeInTheDocument();
   });
 
+  it("keeps live turn activity expanded until the assistant reply arrives", async () => {
+    render(<App />);
+
+    await screen.findByLabelText("Message ExAgent");
+    act(() => {
+      useWorkbenchStore.setState({
+        activeSessionId: "session-desktop",
+        transcript: [],
+        events: [],
+        sessions: [
+          {
+            id: "session-desktop",
+            projectId: "project-exagent",
+            title: "Desktop GUI workbench",
+            updatedAt: "local preview",
+            status: "running",
+          },
+        ],
+        loading: false,
+      });
+    });
+
+    act(() => {
+      useWorkbenchStore.getState().applyRuntimeEvent({
+        event_id: "evt-reasoning-delta-live",
+        thread_id: "session-desktop",
+        turn_id: "turn-live-activity",
+        kind: {
+          type: "reasoning_delta",
+          delta: "checking files",
+        },
+      });
+    });
+
+    const liveGroup = screen.getByLabelText("Turn activity");
+    const liveToggle = within(liveGroup).getByRole("button", { name: /Activity/ });
+    expect(liveToggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("checking files")).toBeInTheDocument();
+
+    act(() => {
+      useWorkbenchStore.getState().applyRuntimeEvent({
+        event_id: "evt-assistant-final-live",
+        thread_id: "session-desktop",
+        turn_id: "turn-live-activity",
+        kind: {
+          type: "assistant_turn",
+          turn: {
+            text: "Done.",
+            tool_calls: [],
+          },
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(liveToggle).toHaveAttribute("aria-expanded", "false");
+    });
+    expect(screen.getByText("Done.")).toBeInTheDocument();
+    expect(screen.queryByText("checking files")).not.toBeInTheDocument();
+  });
+
   it("streams reasoning and assistant deltas into stable transcript messages", async () => {
     render(<App />);
 
@@ -6128,7 +6237,12 @@ describe("AppShell", () => {
       body: "hello world",
       turnId: "turn-stream",
     });
-    expect(screen.getByText("think first")).toBeInTheDocument();
+    const streamActivityGroup = screen.getByLabelText("Turn activity");
+    expect(within(streamActivityGroup).getByRole("button", { name: /Activity/ })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.queryByText("think first")).not.toBeInTheDocument();
     expect(screen.getByText("hello world")).toBeInTheDocument();
   });
 

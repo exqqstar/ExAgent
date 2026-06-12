@@ -2483,6 +2483,75 @@ async fn turn_context_model_reaches_turn_context_without_mutating_later_turns() 
 }
 
 #[tokio::test]
+async fn thread_read_exposes_latest_reference_model_and_thinking_mode() {
+    let dir = tempdir().unwrap();
+    let workspace = dir.path().to_path_buf();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            model: ResolvedModelConfig::from_provider_profile(
+                "openai",
+                "base-model",
+                None,
+                ResolvedCredential::None,
+                None,
+            ),
+            workspace_root: workspace.clone(),
+            cwd: workspace.clone(),
+            thinking_mode: Some(ThinkingMode::Low),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![AssistantTurn {
+            text: Some("done".into()),
+            tool_calls: vec![],
+            reasoning: vec![],
+        }])),
+        ToolRegistry::new,
+    );
+
+    let thread = service
+        .thread_start(ThreadStartParams {
+            workspace_root: Some(workspace.display().to_string()),
+            cwd: None,
+            permission_profile: None,
+        })
+        .unwrap();
+    let turn = service
+        .turn_start(TurnStartParams {
+            thread_id: thread.thread.id.clone(),
+            prompt: "run with persisted model selection".into(),
+            input: vec![],
+            workspace_root: Some(workspace.display().to_string()),
+            turn_mode: Default::default(),
+            turn_context: Some(TurnContextOverrides {
+                cwd: None,
+                model: Some(ModelRef::new("openai", "override-model")),
+                thinking_mode: Some(ThinkingMode::High),
+                clear_thinking_mode: false,
+            }),
+        })
+        .await
+        .unwrap();
+    wait_for_turn_completed(&service, &thread.thread.id, &turn.turn.id).await;
+
+    let read = service
+        .thread_read(ThreadReadParams {
+            thread_id: thread.thread.id,
+            workspace_root: Some(workspace.display().to_string()),
+        })
+        .unwrap();
+    let thread_json = serde_json::to_value(read.thread).unwrap();
+
+    assert_eq!(
+        thread_json["model"],
+        serde_json::json!({
+            "provider_id": "openai",
+            "model_id": "override-model"
+        })
+    );
+    assert_eq!(thread_json["thinking_mode"], serde_json::json!("high"));
+}
+
+#[tokio::test]
 async fn turn_start_rejects_invalid_context_override_before_accepting_input() {
     let dir = tempdir().unwrap();
     let outside = tempdir().unwrap();

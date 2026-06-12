@@ -10,7 +10,7 @@ use crate::app_server::protocol::{
     TurnStatus,
 };
 use crate::app_server::services::AppServerServices;
-use crate::app_server::thread_projection::{build_thread_view, latest_turn_state};
+use crate::app_server::thread_projection::{build_thread_view_with_selection, latest_turn_state};
 use crate::app_server::thread_store::{read_thread_state_from_storage, thread_exists_in_storage};
 use crate::app_server::AppServerError;
 use crate::config::AgentConfig;
@@ -72,6 +72,8 @@ pub(in crate::app_server) fn thread_start(
             status: ThreadStatus::Idle,
             active_turn: None,
             turns: vec![],
+            model: None,
+            thinking_mode: None,
             goal: None,
         },
     })
@@ -228,7 +230,7 @@ pub(in crate::app_server) fn thread_read_resolved(
 pub(in crate::app_server) fn thread_read_from_state_view(
     services: &AppServerServices,
     thread_id: ThreadId,
-    _snapshot: ThreadSnapshot,
+    snapshot: ThreadSnapshot,
     response_items: Vec<ResponseItem>,
     overlay: RuntimeOverlay,
     events: Vec<RuntimeEvent>,
@@ -247,9 +249,25 @@ pub(in crate::app_server) fn thread_read_from_state_view(
     } else {
         ThreadStatus::Idle
     };
+    let model = snapshot
+        .reference_turn_context
+        .as_ref()
+        .map(|context| context.model.clone());
+    let thinking_mode = snapshot
+        .reference_turn_context
+        .as_ref()
+        .and_then(|context| context.thinking_mode);
 
     ThreadReadResponse {
-        thread: build_thread_view(thread_id, status, active_turn, events, &response_items),
+        thread: build_thread_view_with_selection(
+            thread_id,
+            status,
+            active_turn,
+            model,
+            thinking_mode,
+            events,
+            &response_items,
+        ),
     }
 }
 

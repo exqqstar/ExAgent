@@ -194,7 +194,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(resolved.canonical_path, std::fs::canonicalize(skill_path).unwrap());
+        assert_eq!(
+            resolved.canonical_path,
+            std::fs::canonicalize(skill_path).unwrap()
+        );
         assert!(resolved.was_absolute);
     }
 
@@ -223,9 +226,12 @@ mod tests {
         std::fs::write(workspace.path().join("notes.txt"), "workspace").unwrap();
         std::fs::write(skill_root.path().join("notes.txt"), "skill").unwrap();
 
-        let resolved =
-            resolve_readable_path(workspace.path(), &[skill_root.path().to_path_buf()], "notes.txt")
-                .unwrap();
+        let resolved = resolve_readable_path(
+            workspace.path(),
+            &[skill_root.path().to_path_buf()],
+            "notes.txt",
+        )
+        .unwrap();
 
         assert_eq!(
             resolved.canonical_path,

@@ -341,7 +341,11 @@ async fn search_files_workspace_query_does_not_include_skill_roots() {
     let skill_root = root_parent.path().join("skills");
     let skill_path = skill_root.join("my-skill").join("SKILL.md");
     std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
-    std::fs::write(workspace.path().join("notes.txt"), "skill-marker workspace\n").unwrap();
+    std::fs::write(
+        workspace.path().join("notes.txt"),
+        "skill-marker workspace\n",
+    )
+    .unwrap();
     std::fs::write(&skill_path, "skill-marker skill\n").unwrap();
 
     let result = execute_search_files_with_skill_roots(
@@ -356,7 +360,9 @@ async fn search_files_workspace_query_does_not_include_skill_roots() {
     .await;
 
     assert_eq!(result.status, ToolStatus::Success);
-    assert!(result.content.contains("notes.txt:1: skill-marker workspace"));
+    assert!(result
+        .content
+        .contains("notes.txt:1: skill-marker workspace"));
     assert!(!result.content.contains("skill-marker skill"));
 }
 

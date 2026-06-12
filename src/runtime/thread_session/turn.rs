@@ -1519,7 +1519,7 @@ const AVAILABLE_SKILLS_INSTRUCTIONS: &str = "## Available skills\n\
 A skill is a reusable procedural guide stored in a SKILL.md file. Each entry below lists its name, scope, description, and file path.\n\n\
 ### How to use skills\n\
 - Trigger: if the user names a skill (with `$skill-name` or plain text) OR the task clearly matches a skill's description below, use that skill for this turn. If several match, use the minimal set that covers the request.\n\
-- Loading: when you decide to use a skill, open its SKILL.md at the listed path with your file-reading tool and follow it. An explicitly invoked skill's body may already be included below; if so, use it directly. Read only what you need.\n\
+- Loading: when you decide to use a skill, open its SKILL.md at the listed path with your file-reading tool and follow it. Listed paths may be outside the workspace but are readable when they are under a configured skill root. An explicitly invoked skill's body may already be included below; if so, use it directly. If reading a listed path fails, say so briefly and continue with the best alternative. Read only what you need.\n\
 - Scope: do not carry skills across turns unless they are mentioned again.\n\
 - Fallback: if a skill cannot be applied cleanly (missing files, unclear instructions), say so briefly and continue with the best alternative.\n\n\
 ### Skills\n";

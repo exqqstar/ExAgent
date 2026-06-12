@@ -1,5 +1,15 @@
-import { Activity, ArrowDownToLine, Bot, Brain, CircleAlert, Gauge, MessageSquareText, Wrench } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  Activity,
+  ArrowDownToLine,
+  Bot,
+  Brain,
+  ChevronRight,
+  CircleAlert,
+  Gauge,
+  MessageSquareText,
+  Wrench
+} from "lucide-react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { TokenUsagePanel, tokenUsageSummary } from "@/components/TokenUsagePanel";
 import { TranscriptList } from "@/components/TranscriptList";
 import { Badge } from "@/components/ui/badge";
@@ -69,6 +79,8 @@ export function AgentThreadViewer({
 }) {
   const [activeTab, setActiveTab] = useState<AgentThreadTab>("conversation");
   const [following, setFollowing] = useState(true);
+  const [tokenUsageOpen, setTokenUsageOpen] = useState(false);
+  const tokenUsagePanelId = useId();
   const scrollAreaRef = useRef<HTMLDivElement | null>(null);
   const detachScrollListenerRef = useRef<(() => void) | null>(null);
   const latestRef = useRef<HTMLDivElement | null>(null);
@@ -126,6 +138,10 @@ export function AgentThreadViewer({
   }, [threadId]);
 
   useEffect(() => {
+    setTokenUsageOpen(false);
+  }, [threadId]);
+
+  useEffect(() => {
     return () => detachScrollListenerRef.current?.();
   }, []);
 
@@ -143,8 +159,8 @@ export function AgentThreadViewer({
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
-      <DialogContent className="flex h-[min(720px,calc(100dvh-48px))] w-[min(880px,calc(100vw-32px))] max-w-none flex-col gap-0 overflow-hidden p-0">
-        <DialogHeader className="shrink-0 border-b border-border px-5 py-4 pr-12">
+      <DialogContent className="flex h-[min(860px,calc(100dvh-32px))] w-[min(920px,calc(100vw-32px))] max-w-none flex-col gap-0 overflow-hidden p-0">
+        <DialogHeader className="shrink-0 border-b border-border px-5 py-3 pr-12">
           <div className="grid min-w-0 grid-cols-[1.25rem_minmax(0,1fr)] items-start gap-x-3">
             <Bot className="mt-1 h-4 w-4 shrink-0 text-subtle" />
             <div className="min-w-0">
@@ -160,23 +176,19 @@ export function AgentThreadViewer({
               <DialogDescription className="mt-1.5 min-w-0 truncate">
                 {agent?.task || agent?.agentPath || threadId || "Agent thread"}
               </DialogDescription>
-              <div className="mt-2 grid min-w-0 gap-1">
+              <div className="mt-2 grid min-w-0 gap-1 sm:grid-cols-2">
                 {threadId ? <MetaRow label="thread" value={compactThreadId(threadId)} title={threadId} mono /> : null}
                 {agent?.agentPath ? <MetaRow label="path" value={agent.agentPath} mono /> : null}
               </div>
             </div>
           </div>
           {threadId ? (
-            <div className="mt-3 border-t border-border pt-3">
-              <div className="mb-1.5 flex min-w-0 items-center justify-between gap-3">
-                <div className="flex min-w-0 items-center gap-2">
-                  <Gauge className="h-3.5 w-3.5 shrink-0 text-subtle" />
-                  <span className="type-label-md text-ink">Token Usage</span>
-                </div>
-                <span className="type-body-sm shrink-0 text-muted">{tokenUsageSummary(tokenUsage)}</span>
-              </div>
-              <TokenUsagePanel usage={tokenUsage} />
-            </div>
+            <TokenUsageDisclosure
+              usage={tokenUsage}
+              open={tokenUsageOpen}
+              panelId={tokenUsagePanelId}
+              onOpenChange={setTokenUsageOpen}
+            />
           ) : null}
         </DialogHeader>
 
@@ -249,6 +261,43 @@ function AgentStatusBadge({ status }: { status: AgentRunStatus }) {
       {needsApproval ? <CircleAlert aria-hidden className="h-3 w-3 shrink-0" /> : null}
       <span>{statusLabel[status]}</span>
     </Badge>
+  );
+}
+
+function TokenUsageDisclosure({
+  usage,
+  open,
+  panelId,
+  onOpenChange
+}: {
+  usage: ThreadTokenUsage | null | undefined;
+  open: boolean;
+  panelId: string;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <div className="mt-2 border-t border-border pt-2">
+      <button
+        type="button"
+        className="flex min-h-8 w-full min-w-0 items-center gap-2 rounded-md px-1 text-left transition-colors hover:bg-surface-2/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+        aria-expanded={open}
+        aria-controls={panelId}
+        onClick={() => onOpenChange(!open)}
+      >
+        <ChevronRight
+          aria-hidden
+          className={cn("h-3.5 w-3.5 shrink-0 text-subtle transition-transform duration-200", open && "rotate-90")}
+        />
+        <Gauge className="h-3.5 w-3.5 shrink-0 text-subtle" />
+        <span className="type-label-md min-w-0 flex-1 truncate text-ink">Token Usage</span>
+        <span className="type-body-sm shrink-0 text-muted">{tokenUsageSummary(usage)}</span>
+      </button>
+      {open ? (
+        <div id={panelId} className="pt-2 pl-6">
+          <TokenUsagePanel usage={usage} />
+        </div>
+      ) : null}
+    </div>
   );
 }
 

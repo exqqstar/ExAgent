@@ -117,17 +117,78 @@ describe("AgentThreadViewer", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("shows token usage for the selected child thread", () => {
+  it("keeps token usage collapsed by default and expands details on request", async () => {
+    const user = userEvent.setup();
+
     render(<AgentThreadViewer agent={agent} view={view} tokenUsage={tokenUsage} onClose={vi.fn()} />);
 
-    expect(screen.getByText("Token Usage")).toBeInTheDocument();
+    const tokenUsageToggle = screen.getByRole("button", { name: /Token Usage\s+1\.6k tokens/i });
+
+    expect(tokenUsageToggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByText("1.6k tokens")).toBeInTheDocument();
+    expect(screen.queryByText("thread total")).not.toBeInTheDocument();
+    expect(screen.queryByText("1,600")).not.toBeInTheDocument();
+
+    await user.click(tokenUsageToggle);
+
+    expect(tokenUsageToggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("thread total")).toBeInTheDocument();
     expect(screen.getByText("1,600")).toBeInTheDocument();
     expect(screen.getByText("input")).toBeInTheDocument();
     expect(screen.getByText("1,200")).toBeInTheDocument();
     expect(screen.getByText("last turn")).toBeInTheDocument();
     expect(screen.getByText("1,050")).toBeInTheDocument();
+
+    await user.click(tokenUsageToggle);
+
+    expect(tokenUsageToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("thread total")).not.toBeInTheDocument();
+  });
+
+  it("resets token usage details when switching child threads", async () => {
+    const user = userEvent.setup();
+    const secondAgent: AgentNode = {
+      ...agent,
+      threadId: "thread-second",
+      name: "second agent",
+      agentPath: "root/second"
+    };
+    const secondView: AgentThreadView = {
+      ...view,
+      threadId: "thread-second",
+      transcript: []
+    };
+    const secondUsage: ThreadTokenUsage = {
+      ...tokenUsage,
+      threadId: "thread-second",
+      total: {
+        input_tokens: 2000,
+        cached_input_tokens: 0,
+        output_tokens: 200,
+        reasoning_output_tokens: 0,
+        total_tokens: 2200
+      },
+      last: {
+        input_tokens: 1500,
+        cached_input_tokens: 0,
+        output_tokens: 100,
+        reasoning_output_tokens: 0,
+        total_tokens: 1600
+      }
+    };
+
+    const { rerender } = render(
+      <AgentThreadViewer agent={agent} view={view} tokenUsage={tokenUsage} onClose={vi.fn()} />
+    );
+
+    await user.click(screen.getByRole("button", { name: /Token Usage\s+1\.6k tokens/i }));
+    expect(screen.getByText("thread total")).toBeInTheDocument();
+
+    rerender(<AgentThreadViewer agent={secondAgent} view={secondView} tokenUsage={secondUsage} onClose={vi.fn()} />);
+
+    const secondToggle = screen.getByRole("button", { name: /Token Usage\s+2\.2k tokens/i });
+    expect(secondToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("thread total")).not.toBeInTheDocument();
   });
 
   it("follows running transcript updates until the user pauses and jumps to latest", async () => {

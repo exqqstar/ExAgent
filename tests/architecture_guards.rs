@@ -144,6 +144,22 @@ fn app_server_runtime_state_is_split_from_thread_manager() {
         !loader_source.contains("use crate::state::rollout"),
         "RuntimeLoader should not know rollout storage details"
     );
+    assert!(
+        loader_source.contains("fn subagent_control_for_cold_load"),
+        "RuntimeSpawner should make cold-load subagent control a required capability"
+    );
+    assert!(
+        !loader_source.contains("read_thread_state_from_storage"),
+        "RuntimeLoader should delegate persisted subagent control reconstruction"
+    );
+    assert!(
+        !loader_source.contains("ThreadSpawnEdgeStore"),
+        "RuntimeLoader should not know spawn edge storage details"
+    );
+    assert!(
+        !loader_source.contains("subagent_lifecycle"),
+        "RuntimeLoader should not have an optional lifecycle fallback branch"
+    );
 
     let manager_source =
         std::fs::read_to_string("src/app_server/thread_manager.rs").expect("read thread manager");

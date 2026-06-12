@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Weak};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -27,7 +28,8 @@ use crate::runtime::thread_runtime::{AgentFactory, WorkspaceRuntimeOpGate};
 use crate::session::{ThreadSnapshot, ThreadSource};
 use crate::state::fork_history::{build_fork_history, ForkTurns};
 use crate::state::rollout::{rollout_paths, thread_meta_from_snapshot, RolloutItem, RolloutStore};
-use crate::state::spawn_edges::{ThreadSpawnEdge, ThreadSpawnEdgeStore};
+use crate::state::spawn_edges::{SpawnEdgeStatus, ThreadSpawnEdge, ThreadSpawnEdgeStore};
+use crate::types::ThreadId;
 
 pub(in crate::app_server) type RegistryFactory = Arc<dyn Fn() -> ToolRegistry + Send + Sync>;
 
@@ -71,12 +73,12 @@ impl AppServerServices {
             #[cfg(test)]
             None,
         );
-        let subagent_lifecycle = Arc::new(AppServerSubagentLifecycle {
-            runtime_loader: runtime_loader.clone(),
+        let subagent_lifecycle = new_subagent_lifecycle(
+            runtime_loader.clone(),
             agent_factory,
-            policy: policy.clone(),
-            model_resolver: model_resolver.clone(),
-        });
+            policy.clone(),
+            model_resolver.clone(),
+        );
         Self {
             base_config,
             llm_factory,
@@ -115,12 +117,12 @@ impl AppServerServices {
             #[cfg(test)]
             None,
         );
-        let subagent_lifecycle = Arc::new(AppServerSubagentLifecycle {
-            runtime_loader: runtime_loader.clone(),
+        let subagent_lifecycle = new_subagent_lifecycle(
+            runtime_loader.clone(),
             agent_factory,
-            policy: policy.clone(),
-            model_resolver: model_resolver.clone(),
-        });
+            policy.clone(),
+            model_resolver.clone(),
+        );
         Self {
             base_config,
             llm_factory,
@@ -159,16 +161,17 @@ impl AppServerServices {
             policy.clone(),
             Some(mcp_client_factory.clone()),
         );
-        let subagent_lifecycle = Arc::new(AppServerSubagentLifecycle {
-            runtime_loader: runtime_loader.clone(),
+        let model_resolver: Arc<dyn ModelResolver> = Arc::new(EnvModelResolver);
+        let subagent_lifecycle = new_subagent_lifecycle(
+            runtime_loader.clone(),
             agent_factory,
-            policy: policy.clone(),
-            model_resolver: Arc::new(EnvModelResolver),
-        });
+            policy.clone(),
+            model_resolver.clone(),
+        );
         Self {
             base_config,
             llm_factory,
-            model_resolver: Arc::new(EnvModelResolver),
+            model_resolver,
             registry_factory,
             exec_sessions,
             policy,
@@ -199,6 +202,59 @@ impl AppServerServices {
     }
 }
 
+fn new_subagent_lifecycle(
+    runtime_loader: RuntimeLoader,
+    agent_factory: AgentFactory,
+    policy: Arc<PolicyManager>,
+    model_resolver: Arc<dyn ModelResolver>,
+) -> Arc<dyn SubagentLifecycle> {
+    let lifecycle: Arc<AppServerSubagentLifecycle> =
+        Arc::<AppServerSubagentLifecycle>::new_cyclic(move |self_ref| {
+            let self_lifecycle: Weak<dyn SubagentLifecycle> = self_ref.clone();
+            AppServerSubagentLifecycle {
+                runtime_loader: runtime_loader.clone(),
+                agent_factory: agent_factory.clone(),
+                policy: policy.clone(),
+                model_resolver: model_resolver.clone(),
+                self_lifecycle,
+            }
+        });
+    lifecycle
+}
+
+fn rehydrated_subagent_control(
+    lifecycle: Weak<dyn SubagentLifecycle>,
+    workspace_root: &Path,
+    requested_thread_id: &ThreadId,
+) -> Result<Arc<AgentControl>> {
+    let requested = read_thread_state_from_storage(workspace_root, requested_thread_id)?
+        .ok_or_else(|| AppServerError::ThreadNotFound(requested_thread_id.clone()))?;
+    let root_thread_id = requested
+        .snapshot
+        .lineage
+        .as_ref()
+        .map(|lineage| lineage.root_thread_id.clone())
+        .unwrap_or_else(|| requested_thread_id.clone());
+    let control = AgentControl::new_root(root_thread_id.clone(), lifecycle);
+
+    if root_thread_id != *requested_thread_id {
+        if let Some(root) = read_thread_state_from_storage(workspace_root, &root_thread_id)? {
+            control.register_thread_from_snapshot(&root.snapshot);
+        }
+    }
+    control.register_thread_from_snapshot(&requested.snapshot);
+
+    let edge_store = ThreadSpawnEdgeStore::for_workspace(workspace_root);
+    for edge in edge_store.list_by_root_blocking(&root_thread_id, Some(SpawnEdgeStatus::Open))? {
+        if let Some(child) = read_thread_state_from_storage(workspace_root, &edge.child_thread_id)?
+        {
+            control.register_thread_from_snapshot(&child.snapshot);
+        }
+    }
+
+    Ok(control)
+}
+
 impl RuntimeSpawner for AppServerServices {
     fn runtime_agent_factory(&self) -> AgentFactory {
         AppServerServices::runtime_agent_factory(self)
@@ -215,6 +271,18 @@ impl RuntimeSpawner for AppServerServices {
     fn goal_store(&self) -> Option<crate::index_db::IndexDb> {
         self.goal_store.clone()
     }
+
+    fn subagent_control_for_cold_load(
+        &self,
+        workspace_root: &Path,
+        thread_id: &ThreadId,
+    ) -> Result<Arc<AgentControl>> {
+        rehydrated_subagent_control(
+            Arc::downgrade(&self.subagent_lifecycle),
+            workspace_root,
+            thread_id,
+        )
+    }
 }
 
 struct AppServerSubagentLifecycle {
@@ -222,6 +290,7 @@ struct AppServerSubagentLifecycle {
     agent_factory: AgentFactory,
     policy: Arc<PolicyManager>,
     model_resolver: Arc<dyn ModelResolver>,
+    self_lifecycle: Weak<dyn SubagentLifecycle>,
 }
 
 impl RuntimeSpawner for AppServerSubagentLifecycle {
@@ -235,6 +304,14 @@ impl RuntimeSpawner for AppServerSubagentLifecycle {
 
     fn workspace_runtime_op_gate(&self) -> Option<Arc<dyn WorkspaceRuntimeOpGate>> {
         Some(Arc::new(self.runtime_loader.clone()))
+    }
+
+    fn subagent_control_for_cold_load(
+        &self,
+        workspace_root: &Path,
+        thread_id: &ThreadId,
+    ) -> Result<Arc<AgentControl>> {
+        rehydrated_subagent_control(self.self_lifecycle.clone(), workspace_root, thread_id)
     }
 }
 

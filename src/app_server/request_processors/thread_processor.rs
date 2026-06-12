@@ -22,7 +22,6 @@ use crate::session::{ThreadLineage, ThreadSnapshot, ThreadSource};
 use crate::state::rollout::{
     rollout_paths, thread_meta_from_snapshot, ResponseItem, RolloutItem, RolloutStore,
 };
-use crate::state::spawn_edges::{SpawnEdgeStatus, ThreadSpawnEdgeStore};
 use crate::types::ThreadId;
 
 pub(in crate::app_server) struct StartThreadOptions {
@@ -173,59 +172,17 @@ pub(in crate::app_server) fn start_thread_with_options(
             if !thread_exists_in_storage(&options.config.workspace_root, &thread_id) {
                 return Err(AppServerError::ThreadNotFound(thread_id).into());
             }
-            let subagent_control = match options.subagent_control {
-                Some(control) => control,
-                None => {
-                    rehydrate_agent_control(services, &options.config.workspace_root, &thread_id)?
-                }
-            };
             let runtime = services.runtime_loader.ensure_runtime_loaded_with_control(
                 &thread_id,
                 options.config,
                 false,
                 services,
-                Some(subagent_control),
+                options.subagent_control,
             )?;
 
             Ok(NewThread { thread_id, runtime })
         }
     }
-}
-
-pub(super) fn rehydrate_agent_control(
-    services: &AppServerServices,
-    workspace_root: &Path,
-    requested_thread_id: &ThreadId,
-) -> Result<Arc<AgentControl>> {
-    let requested = read_thread_state_from_storage(workspace_root, requested_thread_id)?
-        .ok_or_else(|| AppServerError::ThreadNotFound(requested_thread_id.clone()))?;
-    let root_thread_id = requested
-        .snapshot
-        .lineage
-        .as_ref()
-        .map(|lineage| lineage.root_thread_id.clone())
-        .unwrap_or_else(|| requested_thread_id.clone());
-    let control = AgentControl::new_root(
-        root_thread_id.clone(),
-        Arc::downgrade(&services.subagent_lifecycle),
-    );
-
-    if root_thread_id != *requested_thread_id {
-        if let Some(root) = read_thread_state_from_storage(workspace_root, &root_thread_id)? {
-            control.register_thread_from_snapshot(&root.snapshot);
-        }
-    }
-    control.register_thread_from_snapshot(&requested.snapshot);
-
-    let edge_store = ThreadSpawnEdgeStore::for_workspace(workspace_root);
-    for edge in edge_store.list_by_root_blocking(&root_thread_id, Some(SpawnEdgeStatus::Open))? {
-        if let Some(child) = read_thread_state_from_storage(workspace_root, &edge.child_thread_id)?
-        {
-            control.register_thread_from_snapshot(&child.snapshot);
-        }
-    }
-
-    Ok(control)
 }
 
 pub(in crate::app_server) fn thread_read_resolved(

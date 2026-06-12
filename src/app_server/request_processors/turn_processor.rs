@@ -8,7 +8,6 @@ use crate::app_server::protocol::{
     TurnContextOverrides, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
     TurnStartResponse, TurnState, TurnStatus, TurnView,
 };
-use crate::app_server::request_processors::thread_processor;
 use crate::app_server::services::AppServerServices;
 use crate::app_server::thread_store::{
     read_thread_state_from_storage, thread_exists_in_storage, StoredThreadState,
@@ -16,7 +15,6 @@ use crate::app_server::thread_store::{
 use crate::app_server::AppServerError;
 use crate::events::RuntimeEventKind;
 use crate::policy::PendingCommandApproval;
-use crate::runtime::subagent::AgentControl;
 use crate::runtime::thread_runtime::{ThreadOpResult, ThreadRuntimeError, ThreadTurnContext};
 use crate::runtime::thread_session::RuntimeOverlay;
 use crate::runtime::turn_mode::TurnMode;
@@ -76,8 +74,12 @@ pub(in crate::app_server) async fn run_turn_through_runtime(
             .runtime_loader
             .begin_thread_runtime_op(&thread_id)
             .await?;
-        let runtime =
-            ensure_runtime_loaded_for_turn(services, &thread_id, config, requested_workspace_root)?;
+        let runtime = services.runtime_loader.ensure_runtime_loaded(
+            &thread_id,
+            config,
+            requested_workspace_root,
+            services,
+        )?;
         let live_view = runtime.live_view();
         let runtime_workspace_root = live_view.snapshot.workspace_root.clone();
         let _workspace_op_guard = services
@@ -123,8 +125,12 @@ pub(in crate::app_server) async fn start_turn_in_background(
         .runtime_loader
         .begin_thread_runtime_op(&thread_id)
         .await?;
-    let runtime =
-        ensure_runtime_loaded_for_turn(services, &thread_id, config, requested_workspace_root)?;
+    let runtime = services.runtime_loader.ensure_runtime_loaded(
+        &thread_id,
+        config,
+        requested_workspace_root,
+        services,
+    )?;
     let live_view = runtime.live_view();
     let _workspace_op_guard = services
         .runtime_loader
@@ -142,33 +148,6 @@ pub(in crate::app_server) async fn start_turn_in_background(
         .map_err(map_thread_runtime_error)?;
 
     Ok(TurnStartStarted { thread_id, turn_id })
-}
-
-fn ensure_runtime_loaded_for_turn(
-    services: &AppServerServices,
-    thread_id: &ThreadId,
-    config: crate::config::AgentConfig,
-    requested_workspace_root: bool,
-) -> Result<std::sync::Arc<crate::runtime::thread_runtime::ThreadRuntime>> {
-    let subagent_control = cold_turn_subagent_control(services, thread_id, &config.workspace_root)?;
-    services.runtime_loader.ensure_runtime_loaded_with_control(
-        thread_id,
-        config,
-        requested_workspace_root,
-        services,
-        subagent_control,
-    )
-}
-
-fn cold_turn_subagent_control(
-    services: &AppServerServices,
-    thread_id: &ThreadId,
-    workspace_root: &Path,
-) -> Result<Option<std::sync::Arc<AgentControl>>> {
-    if services.runtime_loader.runtime_for(thread_id).is_some() {
-        return Ok(None);
-    }
-    thread_processor::rehydrate_agent_control(services, workspace_root, thread_id).map(Some)
 }
 
 pub(in crate::app_server) async fn turn_interrupt(

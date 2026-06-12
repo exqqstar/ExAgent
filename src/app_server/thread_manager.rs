@@ -2836,6 +2836,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turn_after_cold_events_subscribe_keeps_subagent_tools() {
+        let dir = tempdir().unwrap();
+        let observed_tools = Arc::new(Mutex::new(Vec::new()));
+        let manager = ThreadManager::with_llm(
+            AgentConfig {
+                workspace_root: dir.path().to_path_buf(),
+                cwd: dir.path().to_path_buf(),
+                ..AgentConfig::default()
+            },
+            Box::new(RecordingToolsLlm {
+                observed_tools: observed_tools.clone(),
+            }),
+            crate::default_tool_registry,
+        );
+        let thread_id = ThreadId::new("thread_subscribe_then_turn_subagent_tools");
+        let snapshot = ThreadSnapshot::new_thread(
+            thread_id.clone(),
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+        let rollout_paths = rollout_paths(dir.path(), &thread_id);
+        RolloutStore::new(rollout_paths.rollout_path)
+            .append_items_blocking(&[RolloutItem::ThreadMeta(thread_meta_from_snapshot(
+                &snapshot,
+            ))])
+            .expect("write cold thread meta");
+
+        // Subscribing first loads and caches the runtime; the cached instance
+        // must still carry subagent control when a turn later reuses it.
+        let _rx = manager
+            .events_subscribe(crate::app_server::protocol::EventsSubscribeParams {
+                thread_id: thread_id.clone(),
+                workspace_root: None,
+                after_event_id: None,
+            })
+            .expect("cold events subscribe");
+
+        manager
+            .run_turn_through_runtime(TurnStartParams {
+                thread_id,
+                prompt: "which tools are visible?".into(),
+                input: vec![],
+                workspace_root: None,
+                turn_mode: Default::default(),
+                turn_context: None,
+            })
+            .await
+            .expect("turn after subscribe");
+
+        let tools = observed_tools.lock().unwrap();
+        let names = tools.first().expect("observed tool names");
+        assert!(names.contains(&"spawn_agent".to_string()));
+        assert!(names.contains(&"list_agents".to_string()));
+        assert!(names.contains(&"close_agent".to_string()));
+        assert!(names.contains(&"send_message".to_string()));
+        assert!(names.contains(&"followup_task".to_string()));
+        assert!(names.contains(&"wait_agent".to_string()));
+    }
+
+    #[tokio::test]
     async fn cold_background_turn_start_rehydrates_subagent_tools() {
         let dir = tempdir().unwrap();
         let observed_tools = Arc::new(Mutex::new(Vec::new()));

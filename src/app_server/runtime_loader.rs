@@ -26,6 +26,11 @@ pub(in crate::app_server) trait RuntimeSpawner {
     fn goal_store(&self) -> Option<crate::index_db::IndexDb> {
         None
     }
+    fn subagent_control_for_cold_load(
+        &self,
+        workspace_root: &Path,
+        thread_id: &ThreadId,
+    ) -> Result<Arc<AgentControl>>;
 }
 
 pub(in crate::app_server) struct LoadedRuntime {
@@ -161,17 +166,25 @@ impl RuntimeLoader {
             );
         }
 
+        // Invariant: a loaded runtime always carries an AgentControl. A runtime
+        // cached without one would silently drop the subagent tools from every
+        // later turn on this thread, so when the caller has no control to hand
+        // down (anything other than spawning a child agent) the spawner must
+        // provide one for the cold load, regardless of which request path loads
+        // the thread first.
+        let subagent_control = match subagent_control {
+            Some(control) => control,
+            None => spawner.subagent_control_for_cold_load(&config.workspace_root, thread_id)?,
+        };
         let mut options =
             ThreadRuntimeOptions::new(thread_id.clone(), config, spawner.runtime_agent_factory())
-                .with_policy(spawner.policy());
+                .with_policy(spawner.policy())
+                .with_subagent_control(subagent_control);
         if let Some(gate) = spawner.workspace_runtime_op_gate() {
             options = options.with_workspace_runtime_op_gate(gate);
         }
         if let Some(goal_store) = spawner.goal_store() {
             options = options.with_goal_runtime(Arc::new(GoalRuntime::new(goal_store)));
-        }
-        if let Some(subagent_control) = subagent_control {
-            options = options.with_subagent_control(subagent_control);
         }
         let spawn_result = ThreadRuntime::spawn(options);
         let runtime = match spawn_result {

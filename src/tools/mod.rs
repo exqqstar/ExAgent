@@ -10,6 +10,7 @@ pub mod followup_task;
 pub mod goal;
 pub mod handler;
 pub mod list_agents;
+pub mod list_dir;
 pub mod outcome;
 pub(crate) mod output_projection;
 pub mod read_file;

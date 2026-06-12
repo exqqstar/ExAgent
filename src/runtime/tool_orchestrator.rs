@@ -242,6 +242,7 @@ fn unknown_tool_outcome(call: ToolCall) -> ToolOutcome {
         status: ToolStatus::Error,
         content: format!("Unknown tool: {}", call.name),
         meta: None,
+        parts: Vec::new(),
     })
 }
 
@@ -252,6 +253,7 @@ fn denied_by_agent_profile_outcome(call: ToolCall) -> ToolOutcome {
         status: ToolStatus::Error,
         content: format!("Tool denied by agent profile: {}", call.name),
         meta: None,
+        parts: Vec::new(),
     })
 }
 
@@ -272,6 +274,7 @@ fn approval_required_outcome(
         status: ToolStatus::ReviewRequired,
         content: reason,
         meta: None,
+        parts: Vec::new(),
     })
     .with_effects(effects)
 }

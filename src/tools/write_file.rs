@@ -41,6 +41,7 @@ impl ToolHandler for WriteFileTool {
                     status: ToolStatus::Error,
                     content: err.to_string(),
                     meta: None,
+                    parts: Vec::new(),
                 });
             }
         };
@@ -52,6 +53,7 @@ impl ToolHandler for WriteFileTool {
                 status: ToolStatus::Success,
                 content: format!("Wrote {}", resolved.canonical_path.display()),
                 meta: Some(workspace_path_meta(&resolved)),
+                parts: Vec::new(),
             }),
             Err(err) => ToolOutcome::from_result(ToolResult {
                 tool_call_id: call.id,
@@ -59,6 +61,7 @@ impl ToolHandler for WriteFileTool {
                 status: ToolStatus::Error,
                 content: err.to_string(),
                 meta: None,
+                parts: Vec::new(),
             }),
         }
     }

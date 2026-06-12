@@ -204,6 +204,7 @@ fn success_json(tool_call_id: String, tool_name: String, value: serde_json::Valu
         status: ToolStatus::Success,
         content: value.to_string(),
         meta: Some(value),
+        parts: Vec::new(),
     })
 }
 
@@ -214,6 +215,7 @@ fn error(tool_call_id: String, tool_name: String, content: impl Into<String>) ->
         status: ToolStatus::Error,
         content: content.into(),
         meta: None,
+        parts: Vec::new(),
     })
 }
 

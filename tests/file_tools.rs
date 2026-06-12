@@ -4,9 +4,9 @@ use exagent::policy::PolicyManager;
 use exagent::registry::{ToolContext, ToolRegistry};
 use exagent::tools::{
     apply_patch::ApplyPatchTool, list_dir::ListDirTool, read_file::ReadFileTool,
-    search_files::SearchFilesTool, write_file::WriteFileTool,
+    search_files::SearchFilesTool, view_image::ViewImageTool, write_file::WriteFileTool,
 };
-use exagent::types::{ToolCall, ToolStatus};
+use exagent::types::{ConversationContentPart, ImageDetail, InputModality, ToolCall, ToolStatus};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -674,6 +674,119 @@ async fn execute_list_dir_with_skill_roots(
             Some(&ctx),
         )
         .await
+}
+
+async fn execute_view_image(
+    workspace_root: &std::path::Path,
+    arguments: serde_json::Value,
+) -> exagent::types::ToolResult {
+    execute_view_image_with_modalities(
+        workspace_root,
+        vec![InputModality::Text, InputModality::Image],
+        arguments,
+    )
+    .await
+}
+
+async fn execute_view_image_with_modalities(
+    workspace_root: &std::path::Path,
+    input_modalities: Vec<InputModality>,
+    arguments: serde_json::Value,
+) -> exagent::types::ToolResult {
+    let mut registry = ToolRegistry::new();
+    registry.register(ViewImageTool);
+
+    let mut ctx = tool_context(workspace_root);
+    ctx.config.model.capabilities.input_modalities = input_modalities;
+
+    registry
+        .execute(
+            ToolCall {
+                id: "call_view_image".into(),
+                name: "view_image".into(),
+                arguments,
+                thought_signature: None,
+            },
+            Some(&ctx),
+        )
+        .await
+}
+
+fn write_test_png(path: &Path, width: u32, height: u32) {
+    image::RgbImage::new(width, height).save(path).unwrap();
+}
+
+#[tokio::test]
+async fn view_image_returns_local_image_part_and_metadata() {
+    let dir = tempdir().unwrap();
+    let image_path = dir.path().join("screen.png");
+    write_test_png(&image_path, 3, 2);
+    let canonical_path = std::fs::canonicalize(&image_path).unwrap();
+
+    let result = execute_view_image(dir.path(), json!({ "path": "screen.png" })).await;
+
+    assert_eq!(result.status, ToolStatus::Success);
+    assert!(result.content.contains("Viewed image screen.png"));
+    assert_eq!(result.parts.len(), 1);
+    match &result.parts[0] {
+        ConversationContentPart::LocalImage { path, detail } => {
+            assert_eq!(path, &canonical_path);
+            assert_eq!(*detail, Some(ImageDetail::High));
+        }
+        other => panic!("expected local image part, got {other:?}"),
+    }
+    let meta = result.meta.unwrap();
+    assert_eq!(meta["path"], canonical_path.display().to_string());
+    assert_eq!(meta["width"], 3);
+    assert_eq!(meta["height"], 2);
+    assert_eq!(meta["mime"], "image/png");
+}
+
+#[tokio::test]
+async fn view_image_rejects_text_only_models_before_reading_file() {
+    let dir = tempdir().unwrap();
+
+    let result = execute_view_image_with_modalities(
+        dir.path(),
+        vec![InputModality::Text],
+        json!({ "path": "missing.png" }),
+    )
+    .await;
+
+    assert_eq!(result.status, ToolStatus::Error);
+    assert!(result.content.contains("does not support image input"));
+    assert!(!result.content.contains("missing.png"));
+    assert!(result.parts.is_empty());
+}
+
+#[tokio::test]
+async fn view_image_rejects_paths_outside_workspace() {
+    let workspace = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let image_path = outside.path().join("outside.png");
+    write_test_png(&image_path, 1, 1);
+
+    let result = execute_view_image(
+        workspace.path(),
+        json!({ "path": image_path.display().to_string() }),
+    )
+    .await;
+
+    assert_eq!(result.status, ToolStatus::Error);
+    assert!(result.content.contains("workspace"));
+    assert!(result.parts.is_empty());
+}
+
+#[tokio::test]
+async fn view_image_rejects_non_image_files() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "not an image").unwrap();
+
+    let result = execute_view_image(dir.path(), json!({ "path": "notes.txt" })).await;
+
+    assert_eq!(result.status, ToolStatus::Error);
+    assert!(result.content.contains("unsupported image"));
+    assert!(result.parts.is_empty());
 }
 
 #[tokio::test]

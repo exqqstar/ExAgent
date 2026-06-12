@@ -65,6 +65,7 @@ impl ToolHandler for RunCommandTool {
                     status: ToolStatus::Error,
                     content: err.to_string(),
                     meta: None,
+                    parts: Vec::new(),
                 });
             }
         };
@@ -116,6 +117,7 @@ pub(crate) async fn handle_run_command_args(
             status: result.status,
             content: result.content,
             meta: Some(result.meta),
+            parts: Vec::new(),
         })
         .with_effects(result.effects),
         Err(err) => ToolOutcome::from_result(ToolResult {
@@ -124,6 +126,7 @@ pub(crate) async fn handle_run_command_args(
             status: ToolStatus::Error,
             content: err,
             meta: None,
+            parts: Vec::new(),
         }),
     }
 }

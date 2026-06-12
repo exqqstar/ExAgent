@@ -20,6 +20,7 @@ pub mod search_files;
 pub mod send_message;
 pub mod spawn_agent;
 pub mod spec;
+pub mod view_image;
 pub mod wait_agent;
 pub mod write_file;
 pub mod write_stdin;

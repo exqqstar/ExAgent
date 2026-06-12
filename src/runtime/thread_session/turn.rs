@@ -1931,9 +1931,10 @@ fn record_tool_outcome(
     outcome.apply_effects(recorder, snapshot, turn_id)?;
 
     let result = outcome.result;
-    let message = ConversationMessage::tool(
+    let message = ConversationMessage::tool_with_parts(
         result.tool_call_id.clone(),
         model_tool_message_content(&result),
+        result.parts.clone(),
     );
     context_manager.record_items([message.clone()]);
     context_manager.sync_snapshot(snapshot);
@@ -1981,6 +1982,7 @@ mod tests {
     };
 
     use std::collections::VecDeque;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -2006,8 +2008,9 @@ mod tests {
     use crate::state::rollout::{RolloutItem, RolloutStore};
     use crate::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
     use crate::types::{
-        AssistantTurn, ConversationMessage, ImageDetail, InputModality, LlmCompletion, MessageRole,
-        ReasoningBlock, ThreadId, TokenUsage, ToolCall, ToolResult, ToolStatus, TurnId, UserInput,
+        AssistantTurn, ConversationContentPart, ConversationMessage, ImageDetail, InputModality,
+        LlmCompletion, MessageRole, ReasoningBlock, ThreadId, TokenUsage, ToolCall, ToolResult,
+        ToolStatus, TurnId, UserInput,
     };
 
     #[test]
@@ -2020,6 +2023,7 @@ mod tests {
             meta: Some(json!({
                 "changed_files": ["src/runtime/goal/runtime.rs", "src/runtime/goal/runtime.rs"]
             })),
+            parts: Vec::new(),
         };
 
         assert_eq!(
@@ -2040,6 +2044,7 @@ mod tests {
                 "requested_path": "src/new.rs",
                 "path": "/workspace/src/new.rs"
             })),
+            parts: Vec::new(),
         };
 
         assert_eq!(
@@ -2057,6 +2062,7 @@ mod tests {
             status: ToolStatus::Error,
             content: "failed".into(),
             meta: Some(json!({ "normalized_path": "/workspace/src/new.rs" })),
+            parts: Vec::new(),
         };
 
         assert!(changed_files_for_goal_report("write_file", &result).is_empty());
@@ -2386,6 +2392,10 @@ mod tests {
                     "stderr": "runtime stderr that must not enter prompt",
                     "exec_session_id": "exec_secret",
                 })),
+                parts: vec![ConversationContentPart::LocalImage {
+                    path: PathBuf::from("/tmp/tool-result.png"),
+                    detail: Some(ImageDetail::High),
+                }],
             })
         }
     }
@@ -3193,6 +3203,22 @@ mod tests {
         assert!(!second_prompt
             .iter()
             .any(|content| content.contains("exec_secret")));
+
+        let live_view =
+            ThreadSession::live_view_from_state(thread_id.clone(), &session.live_state_handle());
+        let tool_message = live_view
+            .snapshot
+            .conversation
+            .iter()
+            .find(|message| message.role == MessageRole::Tool)
+            .expect("tool message in snapshot conversation");
+        assert_eq!(
+            tool_message.parts,
+            vec![ConversationContentPart::LocalImage {
+                path: PathBuf::from("/tmp/tool-result.png"),
+                detail: Some(ImageDetail::High),
+            }]
+        );
     }
 
     #[tokio::test]

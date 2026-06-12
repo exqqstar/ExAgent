@@ -81,6 +81,7 @@ impl ToolHandler for CwdProbeTool {
             status: ToolStatus::Success,
             content: ctx.config.cwd.display().to_string(),
             meta: None,
+            parts: Vec::new(),
         })
     }
 }

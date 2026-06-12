@@ -37,6 +37,7 @@ impl ToolOutcome {
                 status: ToolStatus::Success,
                 content: model_output.content,
                 meta: None,
+                parts: Vec::new(),
             },
             effects: Vec::new(),
         }

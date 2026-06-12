@@ -91,6 +91,7 @@ impl ToolRegistry {
                 status: ToolStatus::Error,
                 content: format!("Unknown tool: {}", invocation.call.name),
                 meta: None,
+                parts: Vec::new(),
             }),
         }
     }
@@ -103,6 +104,7 @@ impl ToolRegistry {
                 status: ToolStatus::Error,
                 content: format!("Unknown tool: {}", call.name),
                 meta: None,
+                parts: Vec::new(),
             };
         }
         let Some(ctx) = ctx else {
@@ -112,6 +114,7 @@ impl ToolRegistry {
                 status: ToolStatus::Error,
                 content: "Tool context missing".into(),
                 meta: None,
+                parts: Vec::new(),
             };
         };
         let invocation = ToolInvocation {
@@ -129,5 +132,6 @@ fn denied_by_agent_profile_outcome(call: ToolCall) -> ToolOutcome {
         status: ToolStatus::Error,
         content: format!("Tool denied by agent profile: {}", call.name),
         meta: None,
+        parts: Vec::new(),
     })
 }

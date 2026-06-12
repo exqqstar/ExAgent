@@ -449,7 +449,17 @@ export type BackendRuntimeEventKind =
   | { type: "assistant_turn"; turn: { text: string | null; tool_calls: unknown[] } }
   | { type: "reasoning_delta"; delta: string }
   | { type: "reasoning"; summary?: string[]; content?: string[] }
-  | { type: "tool_result"; result: { tool_call_id: string; tool_name: string; content: string; status: string; meta?: unknown } }
+  | {
+      type: "tool_result";
+      result: {
+        tool_call_id: string;
+        tool_name: string;
+        content: string;
+        status: string;
+        meta?: unknown;
+        parts?: unknown[];
+      };
+    }
   | { type: "tool_invocation_started"; invocation_id: string; tool_call_id: string; tool_name: string; mutating: boolean }
   | { type: "tool_invocation_waiting_approval"; invocation_id: string; approval_id: string; reason: string }
   | { type: "tool_invocation_output_delta"; invocation_id: string; stream: "stdout" | "stderr"; chunk: string; sequence: number }

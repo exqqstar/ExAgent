@@ -59,6 +59,7 @@ impl ToolHandler for McpToolHandler {
                     status,
                     content: mcp_content_to_text(&output.content),
                     meta: output.meta,
+                    parts: Vec::new(),
                 })
             }
             Err(err) => ToolOutcome::from_result(ToolResult {
@@ -67,6 +68,7 @@ impl ToolHandler for McpToolHandler {
                 status: ToolStatus::Error,
                 content: format!("MCP tool call failed: {err:#}"),
                 meta: None,
+                parts: Vec::new(),
             }),
         }
     }

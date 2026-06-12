@@ -59,6 +59,7 @@ impl ToolHandler for SearchFilesTool {
                     status: ToolStatus::Error,
                     content: err.to_string(),
                     meta: None,
+                    parts: Vec::new(),
                 })
             }
         };
@@ -84,6 +85,7 @@ impl ToolHandler for SearchFilesTool {
                         "glob": args.glob,
                         "case_insensitive": args.case_insensitive.unwrap_or(false),
                     })),
+                    parts: Vec::new(),
                 })
             }
             Err(err) => ToolOutcome::from_result(ToolResult {
@@ -92,6 +94,7 @@ impl ToolHandler for SearchFilesTool {
                 status: ToolStatus::Error,
                 content: err,
                 meta: None,
+                parts: Vec::new(),
             }),
         }
     }

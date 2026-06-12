@@ -218,7 +218,7 @@ enum AnthropicRequestContent {
     },
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: Vec<AnthropicRequestContent>,
     },
 }
 
@@ -354,7 +354,7 @@ fn build_anthropic_request(
                         .tool_call_id
                         .clone()
                         .ok_or_else(|| anyhow!("Tool messages require tool_call_id"))?,
-                    content: message.content.clone(),
+                    content: anthropic_tool_result_content(message),
                 }],
             }),
         }
@@ -402,6 +402,37 @@ fn anthropic_user_content(message: &ConversationMessage) -> Vec<AnthropicRequest
             }
         })
         .collect()
+}
+
+fn anthropic_tool_result_content(message: &ConversationMessage) -> Vec<AnthropicRequestContent> {
+    let mut content = Vec::new();
+    if !message.content.is_empty() {
+        content.push(AnthropicRequestContent::Text {
+            text: message.content.clone(),
+        });
+    }
+    content.extend(message.parts.iter().filter_map(|part| match part {
+        ConversationContentPart::Text { text } => {
+            (!text.is_empty()).then(|| AnthropicRequestContent::Text { text: text.clone() })
+        }
+        ConversationContentPart::ImageUrl { url, .. } => Some(AnthropicRequestContent::Image {
+            source: anthropic_image_source_from_url(url.clone()),
+        }),
+        ConversationContentPart::LocalImage { path, detail } => {
+            match load_local_image_for_prompt(path, detail.unwrap_or_default()) {
+                Ok(encoded) => Some(AnthropicRequestContent::Image {
+                    source: AnthropicImageSource::Base64 {
+                        media_type: encoded.mime,
+                        data: encoded.base64_data,
+                    },
+                }),
+                Err(err) => Some(AnthropicRequestContent::Text {
+                    text: format!("image unavailable: {err}"),
+                }),
+            }
+        }
+    }));
+    content
 }
 
 fn anthropic_image_source_from_url(url: String) -> AnthropicImageSource {
@@ -473,7 +504,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    use crate::types::{ImageDetail, UserInput};
+    use crate::types::{ConversationContentPart, ImageDetail, UserInput};
 
     #[test]
     fn request_serializes_user_image_url_parts() {
@@ -536,5 +567,44 @@ mod tests {
                     .as_str()
                     .is_some_and(|text| text.contains("image unavailable"))
         }));
+    }
+
+    #[test]
+    fn request_serializes_tool_result_image_parts() {
+        let message = ConversationMessage::tool_with_parts(
+            "toolu_1",
+            "Viewed image",
+            vec![ConversationContentPart::ImageUrl {
+                url: "https://example.com/tool.png".to_string(),
+                detail: Some(ImageDetail::High),
+            }],
+        );
+
+        let request = build_anthropic_request(
+            "claude-sonnet-4-5".to_string(),
+            &[message],
+            &[],
+            &LlmRequestOptions::default(),
+        )
+        .unwrap();
+        let value = serde_json::to_value(request).unwrap();
+
+        assert_eq!(
+            value["messages"][0]["content"],
+            json!([{
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": [
+                    { "type": "text", "text": "Viewed image" },
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "url",
+                            "url": "https://example.com/tool.png"
+                        }
+                    }
+                ]
+            }])
+        );
     }
 }

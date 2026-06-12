@@ -59,12 +59,18 @@ pub struct ResolvedWorkspacePath {
 }
 
 pub fn resolve_workspace_path(root: &Path, raw: &str) -> Result<ResolvedWorkspacePath> {
-    let root = std::fs::canonicalize(root).with_context(|| {
-        format!(
-            "workspace_root does not exist or is not accessible: {}",
-            root.display()
-        )
-    })?;
+    resolve_readable_path(root, &[], raw)
+}
+
+pub fn resolve_readable_path(
+    root: &Path,
+    extra_read_roots: &[PathBuf],
+    raw: &str,
+) -> Result<ResolvedWorkspacePath> {
+    let readable_roots = canonical_read_roots(root, extra_read_roots)?;
+    let root = readable_roots
+        .first()
+        .ok_or_else(|| anyhow!("workspace_root does not exist or is not accessible"))?;
     let requested_path = PathBuf::from(raw);
     let was_absolute = requested_path.is_absolute();
     let candidate = if was_absolute {
@@ -75,7 +81,7 @@ pub fn resolve_workspace_path(root: &Path, raw: &str) -> Result<ResolvedWorkspac
     let normalized_path = normalize_path(&candidate)?;
     let canonical_path = canonicalize_existing_or_missing(&normalized_path)?;
 
-    if !canonical_path.starts_with(&root) {
+    if !path_stays_within_roots(&canonical_path, &readable_roots) {
         bail!("Path must stay within workspace_root");
     }
 
@@ -85,6 +91,30 @@ pub fn resolve_workspace_path(root: &Path, raw: &str) -> Result<ResolvedWorkspac
         canonical_path,
         was_absolute,
     })
+}
+
+pub fn canonical_read_roots(root: &Path, extra_read_roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let root = std::fs::canonicalize(root).with_context(|| {
+        format!(
+            "workspace_root does not exist or is not accessible: {}",
+            root.display()
+        )
+    })?;
+    let mut roots = vec![root];
+
+    for extra_root in extra_read_roots {
+        if let Ok(canonical_root) = std::fs::canonicalize(extra_root) {
+            roots.push(canonical_root);
+        }
+    }
+
+    Ok(roots)
+}
+
+pub fn path_stays_within_roots(canonical_path: &Path, canonical_roots: &[PathBuf]) -> bool {
+    canonical_roots
+        .iter()
+        .any(|root| canonical_path.starts_with(root))
 }
 
 fn normalize_path(path: &Path) -> Result<PathBuf> {
@@ -141,5 +171,122 @@ fn canonicalize_existing_or_missing(path: &Path) -> Result<PathBuf> {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_readable_path, resolve_workspace_path};
+    use tempfile::tempdir;
+
+    #[test]
+    fn resolve_readable_path_accepts_absolute_path_under_extra_root() {
+        let workspace = tempdir().unwrap();
+        let skill_root = tempdir().unwrap();
+        let skill_path = skill_root.path().join("skill").join("SKILL.md");
+        std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+        std::fs::write(&skill_path, "body").unwrap();
+
+        let resolved = resolve_readable_path(
+            workspace.path(),
+            &[skill_root.path().to_path_buf()],
+            &skill_path.display().to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.canonical_path, std::fs::canonicalize(skill_path).unwrap());
+        assert!(resolved.was_absolute);
+    }
+
+    #[test]
+    fn resolve_readable_path_rejects_absolute_path_outside_allowed_roots() {
+        let workspace = tempdir().unwrap();
+        let skill_root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let outside_path = outside.path().join("secret.txt");
+        std::fs::write(&outside_path, "secret").unwrap();
+
+        let err = resolve_readable_path(
+            workspace.path(),
+            &[skill_root.path().to_path_buf()],
+            &outside_path.display().to_string(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "Path must stay within workspace_root");
+    }
+
+    #[test]
+    fn resolve_readable_path_keeps_relative_paths_anchored_to_workspace() {
+        let workspace = tempdir().unwrap();
+        let skill_root = tempdir().unwrap();
+        std::fs::write(workspace.path().join("notes.txt"), "workspace").unwrap();
+        std::fs::write(skill_root.path().join("notes.txt"), "skill").unwrap();
+
+        let resolved =
+            resolve_readable_path(workspace.path(), &[skill_root.path().to_path_buf()], "notes.txt")
+                .unwrap();
+
+        assert_eq!(
+            resolved.canonical_path,
+            std::fs::canonicalize(workspace.path().join("notes.txt")).unwrap()
+        );
+        assert!(!resolved.was_absolute);
+    }
+
+    #[test]
+    fn resolve_readable_path_skips_nonexistent_extra_roots() {
+        let workspace = tempdir().unwrap();
+        let root_parent = tempdir().unwrap();
+        let missing_root = root_parent.path().join("missing-root");
+        let path_under_missing_root = missing_root.join("skill").join("SKILL.md");
+
+        let err = resolve_readable_path(
+            workspace.path(),
+            &[missing_root],
+            &path_under_missing_root.display().to_string(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "Path must stay within workspace_root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_readable_path_rejects_symlink_escape_from_extra_root() {
+        let workspace = tempdir().unwrap();
+        let skill_root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let outside_path = outside.path().join("secret.txt");
+        std::fs::write(&outside_path, "secret").unwrap();
+        let link_path = skill_root.path().join("secret-link.txt");
+        std::os::unix::fs::symlink(&outside_path, &link_path).unwrap();
+
+        let err = resolve_readable_path(
+            workspace.path(),
+            &[skill_root.path().to_path_buf()],
+            &link_path.display().to_string(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "Path must stay within workspace_root");
+    }
+
+    #[test]
+    fn resolve_readable_path_with_empty_extra_roots_matches_workspace_resolver() {
+        let workspace = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let outside_path = outside.path().join("outside.txt");
+        std::fs::write(&outside_path, "outside").unwrap();
+        let raw = outside_path.display().to_string();
+
+        let readable_err = resolve_readable_path(workspace.path(), &[], &raw)
+            .unwrap_err()
+            .to_string();
+        let workspace_err = resolve_workspace_path(workspace.path(), &raw)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(readable_err, workspace_err);
     }
 }

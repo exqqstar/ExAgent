@@ -306,6 +306,60 @@ async fn search_files_returns_matching_lines_under_workspace() {
     assert!(!result.content.contains("fn logout()"));
 }
 
+#[tokio::test]
+async fn search_files_accepts_configured_skill_root_path() {
+    let workspace = tempdir().unwrap();
+    let root_parent = tempdir().unwrap();
+    let skill_root = root_parent.path().join("skills");
+    let skill_path = skill_root.join("my-skill").join("SKILL.md");
+    std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+    std::fs::write(&skill_path, "alpha\nskill-marker line\n").unwrap();
+
+    let result = execute_search_files_with_skill_roots(
+        workspace.path(),
+        vec![skill_root.clone()],
+        json!({
+            "query": "skill-marker",
+            "path": skill_root.display().to_string(),
+            "max_results": 10
+        }),
+    )
+    .await;
+
+    let canonical_skill_path = std::fs::canonicalize(skill_path).unwrap();
+    assert_eq!(result.status, ToolStatus::Success);
+    assert!(result.content.contains(&format!(
+        "{}:2: skill-marker line",
+        canonical_skill_path.display()
+    )));
+}
+
+#[tokio::test]
+async fn search_files_workspace_query_does_not_include_skill_roots() {
+    let workspace = tempdir().unwrap();
+    let root_parent = tempdir().unwrap();
+    let skill_root = root_parent.path().join("skills");
+    let skill_path = skill_root.join("my-skill").join("SKILL.md");
+    std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+    std::fs::write(workspace.path().join("notes.txt"), "skill-marker workspace\n").unwrap();
+    std::fs::write(&skill_path, "skill-marker skill\n").unwrap();
+
+    let result = execute_search_files_with_skill_roots(
+        workspace.path(),
+        vec![skill_root],
+        json!({
+            "query": "skill-marker",
+            "path": ".",
+            "max_results": 10
+        }),
+    )
+    .await;
+
+    assert_eq!(result.status, ToolStatus::Success);
+    assert!(result.content.contains("notes.txt:1: skill-marker workspace"));
+    assert!(!result.content.contains("skill-marker skill"));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn search_files_skips_symlink_escape_outside_workspace() {
@@ -417,10 +471,18 @@ async fn execute_search_files(
     workspace_root: &std::path::Path,
     arguments: serde_json::Value,
 ) -> exagent::types::ToolResult {
+    execute_search_files_with_skill_roots(workspace_root, Vec::new(), arguments).await
+}
+
+async fn execute_search_files_with_skill_roots(
+    workspace_root: &std::path::Path,
+    skills_user_roots: Vec<PathBuf>,
+    arguments: serde_json::Value,
+) -> exagent::types::ToolResult {
     let mut registry = ToolRegistry::new();
     registry.register(SearchFilesTool);
 
-    let ctx = tool_context(workspace_root);
+    let ctx = tool_context_with_skill_roots(workspace_root, skills_user_roots);
 
     registry
         .execute(

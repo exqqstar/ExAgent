@@ -8,6 +8,7 @@ use crate::app_server::protocol::{
 use crate::app_server::services::AppServerServices;
 use crate::app_server::AppServerError;
 use crate::index_db::{GoalUpdate, ThreadGoalRecord, ThreadGoalStatusRecord};
+use crate::runtime::forge::goal_modes::ForgeGoalModeStore;
 use crate::runtime::goal::runtime::GoalRuntimeEvent;
 
 pub(in crate::app_server) async fn thread_goal_set(
@@ -16,6 +17,7 @@ pub(in crate::app_server) async fn thread_goal_set(
 ) -> Result<ThreadGoalSetResponse> {
     let db = goal_store(services)?;
     let current = db.get_thread_goal(&params.thread_id).await?;
+    let creating_new_goal = current.is_none();
     if let Some(objective) = params.objective.as_ref() {
         validate_thread_goal_objective(objective).map_err(AppServerError::InvalidRequest)?;
     }
@@ -67,6 +69,11 @@ pub(in crate::app_server) async fn thread_goal_set(
     };
 
     let goal = thread_goal_from_record(goal);
+    if creating_new_goal {
+        ForgeGoalModeStore::new(db.clone())
+            .replace_for_thread_goal(&params.thread_id, &goal.goal_id, false)
+            .await?;
+    }
     if let Some(runtime) = services.runtime_loader.runtime_for(&params.thread_id) {
         let effect = runtime
             .apply_goal_runtime_event(GoalRuntimeEvent::ExternalSet {
@@ -101,6 +108,9 @@ pub(in crate::app_server) async fn thread_goal_clear(
     let db = goal_store(services)?;
     account_before_external_mutation(services, &params.thread_id).await?;
     let cleared = db.delete_thread_goal(&params.thread_id).await?;
+    ForgeGoalModeStore::new(db.clone())
+        .clear_for_thread(&params.thread_id)
+        .await?;
     if let Some(runtime) = services.runtime_loader.runtime_for(&params.thread_id) {
         let effect = runtime
             .apply_goal_runtime_event(GoalRuntimeEvent::ExternalClear {
@@ -161,6 +171,126 @@ fn thread_goal_from_record(record: ThreadGoalRecord) -> ThreadGoal {
         continuation_suppressed_after_turn_id: record.continuation_suppressed_after_turn_id,
         created_at_ms: record.created_at_ms,
         updated_at_ms: record.updated_at_ms,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::app_server::protocol::{ThreadGoalClearParams, ThreadGoalSetParams};
+    use crate::config::AgentConfig;
+    use crate::index_db::{IndexDb, ProjectUpsert};
+    use crate::resolver::EnvModelResolver;
+    use crate::runtime::forge::goal_modes::ForgeGoalModeStore;
+    use crate::types::ThreadId;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn clear_goal_removes_forge_goal_mode_without_loaded_runtime() {
+        let thread_id = ThreadId::new("thread_goal_clear_mode_without_runtime");
+        let (_dir, services, db, goal_id) = services_with_goal(&thread_id).await;
+        let store = ForgeGoalModeStore::new(db.clone());
+        store
+            .set_intensive(&thread_id, &goal_id, true)
+            .await
+            .unwrap();
+
+        let response = thread_goal_clear(
+            &services,
+            ThreadGoalClearParams {
+                thread_id: thread_id.clone(),
+                workspace_root: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(response.cleared);
+        assert!(!store.is_intensive(&thread_id, &goal_id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn externally_created_goal_replaces_stale_forge_goal_mode() {
+        let thread_id = ThreadId::new("thread_goal_set_replaces_mode_without_runtime");
+        let (_dir, services, db, old_goal_id) = services_with_goal(&thread_id).await;
+        let store = ForgeGoalModeStore::new(db.clone());
+        store
+            .set_intensive(&thread_id, &old_goal_id, true)
+            .await
+            .unwrap();
+        db.delete_thread_goal(&thread_id).await.unwrap();
+
+        let response = thread_goal_set(
+            &services,
+            ThreadGoalSetParams {
+                thread_id: thread_id.clone(),
+                workspace_root: None,
+                objective: Some("external replacement".to_string()),
+                status: None,
+                token_budget: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_ne!(response.goal.goal_id, old_goal_id);
+        assert!(!store.is_intensive(&thread_id, &old_goal_id).await.unwrap());
+        assert!(!store
+            .is_intensive(&thread_id, &response.goal.goal_id)
+            .await
+            .unwrap());
+    }
+
+    async fn services_with_goal(
+        thread_id: &ThreadId,
+    ) -> (tempfile::TempDir, AppServerServices, IndexDb, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let db = IndexDb::open(dir.path().join("index.sqlite"))
+            .await
+            .unwrap();
+        let project = db
+            .upsert_project(ProjectUpsert {
+                name: "Goal Processor".into(),
+                path: workspace.clone(),
+            })
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+INSERT INTO threads (
+  id, project_id, rollout_path, fallback_title, preview, title_source,
+  pinned, status, created_at, updated_at
+)
+VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
+            "#,
+        )
+        .bind(thread_id.as_str())
+        .bind(project.id)
+        .bind(workspace.join("rollout.jsonl").display().to_string())
+        .bind("thread title")
+        .bind("thread preview")
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let goal = db
+            .insert_thread_goal(thread_id, "clear stale mode", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let services = AppServerServices::with_model_resolver(
+            AgentConfig {
+                workspace_root: workspace.clone(),
+                cwd: workspace,
+                ..AgentConfig::default()
+            },
+            Arc::new(EnvModelResolver),
+        )
+        .with_goal_store(db.clone());
+        (dir, services, db, goal.goal_id)
     }
 }
 

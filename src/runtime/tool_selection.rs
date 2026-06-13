@@ -90,7 +90,10 @@ async fn assemble_tool_registry(input: &ToolSelectionInput<'_>) -> Result<ToolRe
 
     if let Some(goal_api) = input.goal_api.clone() {
         registry.register_handler(GetGoalTool::new(goal_api.clone()));
-        registry.register_handler(CreateGoalTool::new(goal_api.clone()));
+        registry.register_handler(CreateGoalTool::new_with_forge_intensive(
+            goal_api.clone(),
+            input.config.forge_review_gate_enabled,
+        ));
         registry.register_handler(UpdateGoalTool::new(goal_api));
     }
 

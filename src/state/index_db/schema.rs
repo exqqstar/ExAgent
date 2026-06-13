@@ -1,6 +1,6 @@
 use sqlx::{Executor, SqlitePool};
 
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 pub async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
     pool.execute("PRAGMA foreign_keys = ON").await?;
@@ -144,6 +144,18 @@ CREATE TABLE IF NOT EXISTS forge_open_questions (
         "#,
     )
     .await?;
+    pool.execute(
+        r#"
+CREATE TABLE IF NOT EXISTS forge_goal_modes (
+  thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  goal_id TEXT NOT NULL,
+  intensive INTEGER NOT NULL DEFAULT 0,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(thread_id, goal_id)
+)
+        "#,
+    )
+    .await?;
     add_column_if_missing(
         pool,
         "forge_review_tickets",
@@ -180,6 +192,10 @@ ADD COLUMN reject_category TEXT CHECK(reject_category IS NULL OR reject_category
     .await?;
     pool.execute(
         "CREATE INDEX IF NOT EXISTS idx_forge_open_questions_thread_status ON forge_open_questions(thread_id, status, question_order)",
+    )
+    .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_forge_goal_modes_thread ON forge_goal_modes(thread_id)",
     )
     .await?;
     pool.execute(&*format!("PRAGMA user_version = {SCHEMA_VERSION}"))
@@ -230,6 +246,7 @@ mod tests {
             "thread_goal_turns",
             "forge_review_tickets",
             "forge_open_questions",
+            "forge_goal_modes",
         ] {
             let exists: Option<(i64,)> =
                 sqlx::query_as("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")

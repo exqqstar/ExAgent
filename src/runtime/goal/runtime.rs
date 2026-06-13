@@ -14,6 +14,7 @@ use crate::index_db::{
     ThreadGoalStatusRecord,
 };
 use crate::runtime::forge::escalation::{decision_for_goal, ForgeEscalationDecision};
+use crate::runtime::forge::goal_modes::ForgeGoalModeStore;
 use crate::runtime::forge::open_questions::OpenQuestionStore;
 use crate::runtime::forge::review::{
     ReviewRejectCategory, ReviewStatus, ReviewStore, ReviewTicket,
@@ -24,6 +25,11 @@ use crate::types::{ThreadId, TokenUsage, TurnId};
 pub(crate) enum GoalTurnTrigger {
     User,
     GoalContinuation,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CreateGoalOptions {
+    pub(crate) intensive: bool,
 }
 
 pub(crate) enum GoalRuntimeEvent<'a> {
@@ -125,14 +131,15 @@ impl GoalToolApi {
         self.runtime.get_goal(thread_id).await
     }
 
-    pub(crate) async fn create_goal(
+    pub(crate) async fn create_goal_with_options(
         &self,
         thread_id: &ThreadId,
         objective: String,
         token_budget: Option<i64>,
+        options: CreateGoalOptions,
     ) -> anyhow::Result<ThreadGoal> {
         self.runtime
-            .create_goal(thread_id, objective, token_budget)
+            .create_goal_with_options(thread_id, objective, token_budget, options)
             .await
     }
 
@@ -297,11 +304,28 @@ impl GoalRuntime {
         Ok(Some(thread_goal_from_record(goal)))
     }
 
+    #[cfg(test)]
     pub(crate) async fn create_goal(
         &self,
         thread_id: &ThreadId,
         objective: String,
         token_budget: Option<i64>,
+    ) -> anyhow::Result<ThreadGoal> {
+        self.create_goal_with_options(
+            thread_id,
+            objective,
+            token_budget,
+            CreateGoalOptions::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn create_goal_with_options(
+        &self,
+        thread_id: &ThreadId,
+        objective: String,
+        token_budget: Option<i64>,
+        options: CreateGoalOptions,
     ) -> anyhow::Result<ThreadGoal> {
         let goal = self
             .db
@@ -309,9 +333,44 @@ impl GoalRuntime {
             .await?
             .ok_or_else(|| anyhow::anyhow!("thread already has a goal"))?;
         let goal = thread_goal_from_record(goal);
+        ForgeGoalModeStore::new(self.db.clone())
+            .replace_for_thread_goal(thread_id, &goal.goal_id, options.intensive)
+            .await?;
         self.mark_active_goal(thread_id, Some(goal.goal_id.clone()))
             .await;
         Ok(goal)
+    }
+
+    pub(crate) async fn continuation_prompt_for_goal(
+        &self,
+        thread_id: &ThreadId,
+        goal: &ThreadGoal,
+    ) -> anyhow::Result<String> {
+        if ForgeGoalModeStore::new(self.db.clone())
+            .is_intensive(thread_id, &goal.goal_id)
+            .await?
+        {
+            Ok(crate::runtime::goal::prompts::forge_intensive_continuation_prompt(goal))
+        } else {
+            Ok(crate::runtime::goal::prompts::continuation_prompt(goal))
+        }
+    }
+
+    pub(crate) async fn active_goal_snapshot_prompt_for_goal(
+        &self,
+        thread_id: &ThreadId,
+        goal: &ThreadGoal,
+    ) -> anyhow::Result<String> {
+        if ForgeGoalModeStore::new(self.db.clone())
+            .is_intensive(thread_id, &goal.goal_id)
+            .await?
+        {
+            Ok(crate::runtime::goal::prompts::forge_intensive_active_goal_snapshot_prompt(goal))
+        } else {
+            Ok(crate::runtime::goal::prompts::active_goal_snapshot_prompt(
+                goal,
+            ))
+        }
     }
 
     pub(crate) async fn update_goal_status_effect(
@@ -609,6 +668,14 @@ impl GoalRuntime {
         previous_goal: Option<ThreadGoal>,
     ) -> anyhow::Result<GoalRuntimeEffect> {
         let active = goal.status == ThreadGoalStatus::Active;
+        if previous_goal
+            .as_ref()
+            .is_none_or(|previous| previous.goal_id != goal.goal_id)
+        {
+            ForgeGoalModeStore::new(self.db.clone())
+                .replace_for_thread_goal(thread_id, &goal.goal_id, false)
+                .await?;
+        }
         let _ = self
             .db
             .reset_thread_goal_continuation_suppression(thread_id, Some(&goal.goal_id))
@@ -642,6 +709,9 @@ impl GoalRuntime {
     }
 
     async fn external_clear(&self, thread_id: &ThreadId) -> anyhow::Result<GoalRuntimeEffect> {
+        ForgeGoalModeStore::new(self.db.clone())
+            .clear_for_thread(thread_id)
+            .await?;
         let mut state = self.state.lock().await;
         state.turn_accounting.remove(thread_id);
         state.wall_clock.remove(thread_id);
@@ -1260,6 +1330,127 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
             Some(goal.goal_id.as_str())
         );
         assert_eq!(snapshot.last_accounted_token_usage.total_tokens, 10);
+    }
+
+    #[tokio::test]
+    async fn intensive_goal_uses_forge_prompt_variants() {
+        let thread_id = ThreadId::new("goal_runtime_intensive_prompt");
+        let (_dir, runtime) = runtime_with_thread(&thread_id).await;
+        let goal = runtime
+            .create_goal_with_options(
+                &thread_id,
+                "finish intensive goal".to_string(),
+                None,
+                CreateGoalOptions { intensive: true },
+            )
+            .await
+            .unwrap();
+
+        let continuation = runtime
+            .continuation_prompt_for_goal(&thread_id, &goal)
+            .await
+            .unwrap();
+        assert!(continuation.contains("agent_type=reviewer"));
+        assert!(continuation.contains("fork_turns=none"));
+
+        let snapshot = runtime
+            .active_goal_snapshot_prompt_for_goal(&thread_id, &goal)
+            .await
+            .unwrap();
+        assert!(snapshot.contains("agent_type=reviewer"));
+        assert!(snapshot.contains("fork_turns=none"));
+    }
+
+    #[tokio::test]
+    async fn standard_goal_uses_standard_prompt_variants() {
+        let thread_id = ThreadId::new("goal_runtime_standard_prompt");
+        let (_dir, runtime) = runtime_with_thread(&thread_id).await;
+        let goal = runtime
+            .create_goal(&thread_id, "finish standard goal".to_string(), None)
+            .await
+            .unwrap();
+
+        let continuation = runtime
+            .continuation_prompt_for_goal(&thread_id, &goal)
+            .await
+            .unwrap();
+        assert_eq!(
+            continuation,
+            crate::runtime::goal::prompts::continuation_prompt(&goal)
+        );
+
+        let snapshot = runtime
+            .active_goal_snapshot_prompt_for_goal(&thread_id, &goal)
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot,
+            crate::runtime::goal::prompts::active_goal_snapshot_prompt(&goal)
+        );
+    }
+
+    #[tokio::test]
+    async fn intensive_mode_is_cleared_when_goal_is_cleared_or_replaced() {
+        let thread_id = ThreadId::new("goal_runtime_intensive_mode_cleanup");
+        let (_dir, runtime) = runtime_with_thread(&thread_id).await;
+        let first = runtime
+            .create_goal_with_options(
+                &thread_id,
+                "finish intensive goal".to_string(),
+                None,
+                CreateGoalOptions { intensive: true },
+            )
+            .await
+            .unwrap();
+        let store = ForgeGoalModeStore::new(runtime.db.clone());
+        assert!(store
+            .is_intensive(&thread_id, &first.goal_id)
+            .await
+            .unwrap());
+
+        runtime
+            .apply(GoalRuntimeEvent::ExternalClear {
+                thread_id: &thread_id,
+            })
+            .await
+            .unwrap();
+        assert!(!store
+            .is_intensive(&thread_id, &first.goal_id)
+            .await
+            .unwrap());
+
+        store
+            .set_intensive(&thread_id, &first.goal_id, true)
+            .await
+            .unwrap();
+        let replacement = runtime
+            .db
+            .replace_thread_goal(
+                &thread_id,
+                "replacement goal",
+                ThreadGoalStatusRecord::Active,
+                None,
+            )
+            .await
+            .unwrap();
+        let replacement = thread_goal_from_record(replacement);
+        runtime
+            .apply(GoalRuntimeEvent::ExternalSet {
+                thread_id: &thread_id,
+                goal: replacement.clone(),
+                previous_goal: Some(first.clone()),
+            })
+            .await
+            .unwrap();
+
+        assert!(!store
+            .is_intensive(&thread_id, &first.goal_id)
+            .await
+            .unwrap());
+        assert!(!store
+            .is_intensive(&thread_id, &replacement.goal_id)
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

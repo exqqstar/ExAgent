@@ -162,10 +162,12 @@ impl ThreadSession {
                 goal_id: goal.goal_id.clone(),
             },
         )?;
-        let context_message = self.context_manager.record_persistent_internal_context(
-            "goal_continuation",
-            crate::runtime::goal::prompts::continuation_prompt(&goal),
-        );
+        let continuation_prompt = goal_runtime
+            .continuation_prompt_for_goal(&snapshot.thread_id, &goal)
+            .await?;
+        let context_message = self
+            .context_manager
+            .record_persistent_internal_context("goal_continuation", continuation_prompt);
         self.context_manager.sync_snapshot(&mut snapshot);
         self.rollout_store
             .append_items_blocking(&[RolloutItem::response_item_for_turn(
@@ -668,7 +670,9 @@ impl ThreadSession {
                     .active_goal_snapshot(&snapshot.thread_id)
                     .await?
                 {
-                    let content = crate::runtime::goal::prompts::active_goal_snapshot_prompt(&goal);
+                    let content = goal_runtime
+                        .active_goal_snapshot_prompt_for_goal(&snapshot.thread_id, &goal)
+                        .await?;
                     self.context_manager.upsert_ephemeral_internal_context(
                         "goal_snapshot",
                         ConversationMessage::injected_user_context("goal_snapshot", content),

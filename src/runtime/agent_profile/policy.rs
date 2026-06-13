@@ -44,6 +44,10 @@ impl AgentToolPolicy {
     pub fn allows(&self, tool_name: &str) -> bool {
         match tool_name {
             "submit_review" => self.agent_type == Some(AgentType::Reviewer),
+            "defer_question" => {
+                self.agent_type == Some(AgentType::Worker)
+                    && self.workspace == WorkspaceToolCapability::Full
+            }
             "read_file" | "search_files" | "web_search" => true,
             "write_file" | "run_command" | "apply_patch" | "exec_command" | "write_stdin" => {
                 self.workspace == WorkspaceToolCapability::Full

@@ -43,6 +43,8 @@ pub(in crate::app_server) fn latest_turn_state(events: &[RuntimeEvent]) -> Optio
             | RuntimeEventKind::SubagentClosed { .. }
             | RuntimeEventKind::InterAgentMessageSent { .. }
             | RuntimeEventKind::ReviewSubmitted { .. }
+            | RuntimeEventKind::OpenQuestionRecorded { .. }
+            | RuntimeEventKind::OpenQuestionResolved { .. }
             | RuntimeEventKind::TokenCount { .. } => Some(TurnStatus::InProgress),
             RuntimeEventKind::ThreadGoalUpdated { .. }
             | RuntimeEventKind::ThreadGoalCleared { .. }
@@ -166,6 +168,8 @@ fn build_turn_views(events: Vec<RuntimeEvent>) -> Vec<TurnView> {
             | RuntimeEventKind::SubagentClosed { .. }
             | RuntimeEventKind::InterAgentMessageSent { .. }
             | RuntimeEventKind::ReviewSubmitted { .. }
+            | RuntimeEventKind::OpenQuestionRecorded { .. }
+            | RuntimeEventKind::OpenQuestionResolved { .. }
             | RuntimeEventKind::TokenCount { .. } => {
                 if let Some(turn_id) = view_turn_id(&event, current_turn_id.as_ref()) {
                     let index = ensure_turn_view(&mut turns, &turn_id);
@@ -579,7 +583,9 @@ fn thread_item_from_event(event: &RuntimeEvent) -> Option<ThreadItem> {
         | RuntimeEventKind::ThreadGoalContinuationSuppressed { .. }
         | RuntimeEventKind::ThreadGoalTurnStarted { .. }
         | RuntimeEventKind::ThreadGoalToolCompleted { .. }
-        | RuntimeEventKind::ReviewSubmitted { .. } => None,
+        | RuntimeEventKind::ReviewSubmitted { .. }
+        | RuntimeEventKind::OpenQuestionRecorded { .. }
+        | RuntimeEventKind::OpenQuestionResolved { .. } => None,
     }
 }
 

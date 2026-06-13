@@ -1,6 +1,6 @@
 use sqlx::{Executor, SqlitePool};
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 pub async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
     pool.execute("PRAGMA foreign_keys = ON").await?;
@@ -127,6 +127,23 @@ CREATE TABLE IF NOT EXISTS forge_review_tickets (
         "#,
     )
     .await?;
+    pool.execute(
+        r#"
+CREATE TABLE IF NOT EXISTS forge_open_questions (
+  question_id TEXT PRIMARY KEY NOT NULL,
+  thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  goal_id TEXT NOT NULL,
+  question TEXT NOT NULL,
+  blocks_what TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('open', 'resolved')),
+  answer TEXT,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  question_order INTEGER NOT NULL
+)
+        "#,
+    )
+    .await?;
     add_column_if_missing(
         pool,
         "forge_review_tickets",
@@ -155,6 +172,14 @@ ADD COLUMN reject_category TEXT CHECK(reject_category IS NULL OR reject_category
     .await?;
     pool.execute(
         "CREATE INDEX IF NOT EXISTS idx_forge_review_tickets_goal_order ON forge_review_tickets(goal_id, ticket_order)",
+    )
+    .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_forge_open_questions_goal_status ON forge_open_questions(goal_id, status, question_order)",
+    )
+    .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_forge_open_questions_thread_status ON forge_open_questions(thread_id, status, question_order)",
     )
     .await?;
     pool.execute(&*format!("PRAGMA user_version = {SCHEMA_VERSION}"))
@@ -200,7 +225,12 @@ mod tests {
 
         migrate(&pool).await.unwrap();
 
-        for table in ["thread_goals", "thread_goal_turns", "forge_review_tickets"] {
+        for table in [
+            "thread_goals",
+            "thread_goal_turns",
+            "forge_review_tickets",
+            "forge_open_questions",
+        ] {
             let exists: Option<(i64,)> =
                 sqlx::query_as("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
                     .bind(table)

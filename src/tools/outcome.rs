@@ -76,6 +76,17 @@ pub enum ToolRuntimeEffect {
         findings: Option<String>,
         checkpoint_id: Option<String>,
     },
+    OpenQuestionRecorded {
+        question_id: String,
+        goal_id: String,
+        question: String,
+        blocks_what: String,
+    },
+    OpenQuestionResolved {
+        question_id: String,
+        goal_id: String,
+        answer: Option<String>,
+    },
     ExecSessionRunning {
         exec_session_id: ExecSessionId,
         command: String,

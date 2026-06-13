@@ -11,6 +11,7 @@ use crate::runtime::goal::GoalToolApi;
 use crate::runtime::subagent::AgentControl;
 use crate::runtime::tool_resolver::ToolResolver;
 use crate::tools::close_agent::CloseAgentTool;
+use crate::tools::defer_question::DeferQuestionTool;
 use crate::tools::followup_task::FollowupTaskTool;
 use crate::tools::goal::{CreateGoalTool, GetGoalTool, UpdateGoalTool};
 use crate::tools::list_agents::ListAgentsTool;
@@ -95,7 +96,10 @@ async fn assemble_tool_registry(input: &ToolSelectionInput<'_>) -> Result<ToolRe
 
     if input.config.forge_review_gate_enabled {
         if let Some(review_store) = input.forge_review_store.clone() {
-            registry.register_handler(SubmitReviewTool::new(review_store));
+            registry.register_handler(SubmitReviewTool::new(review_store.clone()));
+            registry.register_handler(DeferQuestionTool::new(
+                crate::runtime::forge::open_questions::OpenQuestionStore::new(review_store.db()),
+            ));
         }
     }
 
@@ -188,6 +192,7 @@ mod tests {
     }
 
     struct SubmitReviewSpecTool;
+    struct DeferQuestionSpecTool;
 
     #[async_trait]
     impl ToolHandler for SubmitReviewSpecTool {
@@ -208,9 +213,34 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl ToolHandler for DeferQuestionSpecTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec::function(
+                "defer_question",
+                "Record a deferred user question.",
+                serde_json::json!({"type": "object"}),
+            )
+        }
+
+        fn capabilities(&self) -> ToolCapabilities {
+            ToolCapabilities::read_only()
+        }
+
+        async fn handle(&self, _invocation: ToolInvocation, _ctx: &ToolContext) -> ToolOutcome {
+            unreachable!("tool selection tests do not execute defer_question")
+        }
+    }
+
     fn registry_with_submit_review() -> ToolRegistry {
         let mut registry = registry();
         registry.register(SubmitReviewSpecTool);
+        registry
+    }
+
+    fn registry_with_defer_question() -> ToolRegistry {
+        let mut registry = registry();
+        registry.register(DeferQuestionSpecTool);
         registry
     }
 
@@ -296,6 +326,38 @@ mod tests {
         assert!(!worker_visible
             .iter()
             .any(|spec| spec.name == "submit_review"));
+    }
+
+    #[test]
+    fn defer_question_is_visible_only_to_worker_profile() {
+        let worker = profile_for_type(Some(AgentType::Worker));
+        let worker_visible = select_visible_specs(
+            &registry_with_defer_question(),
+            &ToolVisibilityContext {
+                permission_profile: PermissionProfile::FullAccess,
+                provider_supports_tools: true,
+                agent_tool_policy: worker.tool_policy,
+            },
+        );
+        assert!(worker_visible
+            .iter()
+            .any(|spec| spec.name == "defer_question"));
+
+        for agent_type in [AgentType::Explorer, AgentType::Planner, AgentType::Reviewer] {
+            let profile = profile_for_type(Some(agent_type));
+            let visible = select_visible_specs(
+                &registry_with_defer_question(),
+                &ToolVisibilityContext {
+                    permission_profile: PermissionProfile::FullAccess,
+                    provider_supports_tools: true,
+                    agent_tool_policy: profile.tool_policy,
+                },
+            );
+            assert!(
+                !visible.iter().any(|spec| spec.name == "defer_question"),
+                "{agent_type:?} must not see defer_question"
+            );
+        }
     }
 
     #[tokio::test]
@@ -401,7 +463,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_selection_registers_submit_review_when_review_store_is_available() {
+    async fn build_selection_registers_forge_tools_when_review_store_is_available() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::index_db::IndexDb::open(dir.path().join("index.sqlite"))
             .await
@@ -414,23 +476,40 @@ mod tests {
             config.workspace_root.clone(),
         ));
 
+        let review_store = ReviewStore::new(db);
         let reviewer = build_tool_selection(ToolSelectionInput {
             base_registry: registry(),
             config: &config,
-            mcp_runtime,
+            mcp_runtime: mcp_runtime.clone(),
             subagent_control: None,
             goal_api: None,
-            forge_review_store: Some(ReviewStore::new(db)),
+            forge_review_store: Some(review_store.clone()),
             agent_tool_policy: profile_for_type(Some(AgentType::Reviewer)).tool_policy,
         })
         .await
         .expect("reviewer selection");
 
         assert!(visible_tool_names(&reviewer).contains(&"submit_review"));
+        assert!(!visible_tool_names(&reviewer).contains(&"defer_question"));
+
+        let worker = build_tool_selection(ToolSelectionInput {
+            base_registry: registry(),
+            config: &config,
+            mcp_runtime,
+            subagent_control: None,
+            goal_api: None,
+            forge_review_store: Some(review_store),
+            agent_tool_policy: profile_for_type(Some(AgentType::Worker)).tool_policy,
+        })
+        .await
+        .expect("worker selection");
+
+        assert!(!visible_tool_names(&worker).contains(&"submit_review"));
+        assert!(visible_tool_names(&worker).contains(&"defer_question"));
     }
 
     #[tokio::test]
-    async fn build_selection_hides_submit_review_when_forge_gate_is_disabled() {
+    async fn build_selection_hides_forge_tools_when_forge_gate_is_disabled() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::index_db::IndexDb::open(dir.path().join("index.sqlite"))
             .await
@@ -442,19 +521,34 @@ mod tests {
             config.workspace_root.clone(),
         ));
 
+        let review_store = ReviewStore::new(db);
         let reviewer = build_tool_selection(ToolSelectionInput {
             base_registry: registry(),
             config: &config,
-            mcp_runtime,
+            mcp_runtime: mcp_runtime.clone(),
             subagent_control: None,
             goal_api: None,
-            forge_review_store: Some(ReviewStore::new(db)),
+            forge_review_store: Some(review_store.clone()),
             agent_tool_policy: profile_for_type(Some(AgentType::Reviewer)).tool_policy,
         })
         .await
         .expect("reviewer selection");
 
         assert!(!visible_tool_names(&reviewer).contains(&"submit_review"));
+
+        let worker = build_tool_selection(ToolSelectionInput {
+            base_registry: registry(),
+            config: &config,
+            mcp_runtime,
+            subagent_control: None,
+            goal_api: None,
+            forge_review_store: Some(review_store),
+            agent_tool_policy: profile_for_type(Some(AgentType::Worker)).tool_policy,
+        })
+        .await
+        .expect("worker selection");
+
+        assert!(!visible_tool_names(&worker).contains(&"defer_question"));
     }
 
     #[tokio::test]

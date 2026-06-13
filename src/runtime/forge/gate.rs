@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
 
+use crate::runtime::forge::open_questions::{OpenQuestion, OpenQuestionStore};
 use crate::runtime::forge::review::ReviewStore;
 use crate::runtime::tool_hooks::{ToolHooks, ToolInvocationContext};
 use crate::tools::ToolRuntimeEffect;
@@ -11,11 +12,15 @@ use crate::workspace_checkpoint::workspace_content_hash;
 
 pub(crate) struct ForgeGateHooks {
     review_store: ReviewStore,
+    question_store: OpenQuestionStore,
 }
 
 impl ForgeGateHooks {
-    pub(crate) fn new(review_store: ReviewStore) -> Self {
-        Self { review_store }
+    pub(crate) fn new(review_store: ReviewStore, question_store: OpenQuestionStore) -> Self {
+        Self {
+            review_store,
+            question_store,
+        }
     }
 }
 
@@ -49,6 +54,15 @@ impl ToolHooks for ForgeGateHooks {
         let Some(goal) = self.review_store.db().get_thread_goal(thread_id).await? else {
             return Ok(Vec::new());
         };
+        let open_questions = self
+            .question_store
+            .unresolved_for_goal(&goal.goal_id)
+            .await?;
+        if !open_questions.is_empty() {
+            return Ok(vec![ToolRuntimeEffect::ShortCircuit {
+                result: open_questions_result(ctx, &goal.goal_id, &open_questions),
+            }]);
+        }
         let current_hash = workspace_content_hash(&ctx.workspace_root)?;
         if self
             .review_store
@@ -101,6 +115,37 @@ impl ToolHooks for ForgeGateHooks {
     }
 }
 
+fn open_questions_result(
+    ctx: &ToolInvocationContext,
+    goal_id: &str,
+    questions: &[OpenQuestion],
+) -> ToolResult {
+    let summary = questions
+        .iter()
+        .map(|question| format!("{} ({})", question.question, question.blocks_what))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let meta = json!({
+        "goal_id": goal_id,
+        "open_questions": questions
+            .iter()
+            .map(|question| json!({
+                "question_id": question.question_id,
+                "question": question.question,
+                "blocks_what": question.blocks_what,
+            }))
+            .collect::<Vec<_>>()
+    });
+    ToolResult {
+        tool_call_id: ctx.tool_call_id.clone(),
+        tool_name: ctx.tool_name.clone(),
+        status: ToolStatus::Error,
+        content: format!("Goal completion is blocked by unresolved open question(s): {summary}."),
+        meta: Some(meta),
+        parts: Vec::new(),
+    }
+}
+
 fn is_complete_goal_update(ctx: &ToolInvocationContext) -> bool {
     ctx.tool_name == "update_goal"
         && ctx.arguments.get("status").and_then(|value| value.as_str()) == Some("complete")
@@ -110,12 +155,19 @@ fn is_complete_goal_update(ctx: &ToolInvocationContext) -> bool {
 mod tests {
     use super::*;
     use crate::index_db::{IndexDb, ProjectUpsert, ThreadGoalStatusRecord};
+    use crate::runtime::forge::open_questions::OpenQuestionStore;
     use crate::runtime::forge::review::{ReviewStore, ReviewVerdict};
     use crate::runtime::tool_hooks::{ToolHooks, ToolInvocationContext};
     use crate::tools::{ToolCapabilities, ToolRuntimeEffect};
     use crate::types::ThreadId;
 
-    async fn fixture() -> (tempfile::TempDir, std::path::PathBuf, IndexDb, ReviewStore) {
+    async fn fixture() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        IndexDb,
+        ReviewStore,
+        OpenQuestionStore,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let workspace = dir.path().join("workspace");
         let db_dir = dir.path().join("db");
@@ -128,6 +180,7 @@ mod tests {
             .unwrap();
         let db = IndexDb::open(db_dir.join("index.sqlite")).await.unwrap();
         let review_store = ReviewStore::new(db.clone());
+        let question_store = OpenQuestionStore::new(db.clone());
         let thread_id = ThreadId::new("thread_gate");
         let project = db
             .upsert_project(ProjectUpsert {
@@ -161,7 +214,7 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
         )
         .await
         .unwrap();
-        (dir, workspace, db, review_store)
+        (dir, workspace, db, review_store, question_store)
     }
 
     fn complete_ctx(workspace_root: std::path::PathBuf) -> ToolInvocationContext {
@@ -178,8 +231,8 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
 
     #[tokio::test]
     async fn complete_without_fresh_approval_opens_ticket_and_short_circuits() {
-        let (_dir, workspace, db, review_store) = fixture().await;
-        let hooks = ForgeGateHooks::new(review_store.clone());
+        let (_dir, workspace, db, review_store, question_store) = fixture().await;
+        let hooks = ForgeGateHooks::new(review_store.clone(), question_store);
 
         let effects = hooks
             .before_handler_execution(&complete_ctx(workspace))
@@ -210,8 +263,8 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
 
     #[tokio::test]
     async fn complete_with_fresh_approval_is_allowed() {
-        let (_dir, workspace, db, review_store) = fixture().await;
-        let hooks = ForgeGateHooks::new(review_store.clone());
+        let (_dir, workspace, db, review_store, question_store) = fixture().await;
+        let hooks = ForgeGateHooks::new(review_store.clone(), question_store);
         let first = hooks
             .before_handler_execution(&complete_ctx(workspace.clone()))
             .await
@@ -253,8 +306,8 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
 
     #[tokio::test]
     async fn complete_after_workspace_change_requires_new_review() {
-        let (_dir, workspace, db, review_store) = fixture().await;
-        let hooks = ForgeGateHooks::new(review_store.clone());
+        let (_dir, workspace, db, review_store, question_store) = fixture().await;
+        let hooks = ForgeGateHooks::new(review_store.clone(), question_store);
         let first = hooks
             .before_handler_execution(&complete_ctx(workspace.clone()))
             .await
@@ -303,5 +356,71 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
             .unwrap()
             .unwrap();
         assert_ne!(latest.baseline_hash, approved_ticket.baseline_hash);
+    }
+
+    #[tokio::test]
+    async fn complete_with_fresh_approval_but_open_question_is_blocked_until_resolved() {
+        let (_dir, workspace, db, review_store, question_store) = fixture().await;
+        let hooks = ForgeGateHooks::new(review_store.clone(), question_store.clone());
+        let first = hooks
+            .before_handler_execution(&complete_ctx(workspace.clone()))
+            .await
+            .unwrap();
+        let ToolRuntimeEffect::ShortCircuit { result } = &first[0] else {
+            panic!("expected review short circuit");
+        };
+        let ticket_id = result.meta.as_ref().unwrap()["ticket_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let goal = db
+            .get_thread_goal(&ThreadId::new("thread_gate"))
+            .await
+            .unwrap()
+            .unwrap();
+        let ticket = review_store
+            .latest_ticket(&goal.goal_id)
+            .await
+            .unwrap()
+            .unwrap();
+        review_store
+            .resolve_ticket(
+                &ticket_id,
+                ReviewVerdict::Approve,
+                ticket.baseline_hash.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        let question = question_store
+            .record_question(
+                ThreadId::new("thread_gate"),
+                goal.goal_id.clone(),
+                "Which customer should approve the wording?",
+                "Release note copy",
+            )
+            .await
+            .unwrap();
+
+        let blocked = hooks
+            .before_handler_execution(&complete_ctx(workspace.clone()))
+            .await
+            .unwrap();
+
+        let ToolRuntimeEffect::ShortCircuit { result } = &blocked[0] else {
+            panic!("expected open question short circuit");
+        };
+        assert!(result.content.contains("open question"));
+        assert!(result.content.contains("Which customer"));
+
+        question_store
+            .resolve_question(&question.question_id, Some("Use Acme".to_string()))
+            .await
+            .unwrap();
+        let allowed = hooks
+            .before_handler_execution(&complete_ctx(workspace))
+            .await
+            .unwrap();
+        assert!(allowed.is_empty());
     }
 }

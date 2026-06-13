@@ -461,6 +461,17 @@ pub(crate) enum ToolEffect {
         findings: Option<String>,
         checkpoint_id: Option<String>,
     },
+    OpenQuestionRecorded {
+        question_id: String,
+        goal_id: String,
+        question: String,
+        blocks_what: String,
+    },
+    OpenQuestionResolved {
+        question_id: String,
+        goal_id: String,
+        answer: Option<String>,
+    },
     ShortCircuit,
 }
 
@@ -484,6 +495,26 @@ impl ToolEffect {
                 reject_category,
                 findings,
                 checkpoint_id,
+            },
+            ToolRuntimeEffect::OpenQuestionRecorded {
+                question_id,
+                goal_id,
+                question,
+                blocks_what,
+            } => Self::OpenQuestionRecorded {
+                question_id,
+                goal_id,
+                question,
+                blocks_what,
+            },
+            ToolRuntimeEffect::OpenQuestionResolved {
+                question_id,
+                goal_id,
+                answer,
+            } => Self::OpenQuestionResolved {
+                question_id,
+                goal_id,
+                answer,
             },
             ToolRuntimeEffect::ExecSessionRunning {
                 exec_session_id,
@@ -766,6 +797,40 @@ fn apply_tool_effect(
                     reject_category,
                     findings,
                     checkpoint_id,
+                },
+            )?;
+            Ok(())
+        }
+        ToolEffect::OpenQuestionRecorded {
+            question_id,
+            goal_id,
+            question,
+            blocks_what,
+        } => {
+            recorder.record(
+                snapshot,
+                Some(turn_id),
+                RuntimeEventKind::OpenQuestionRecorded {
+                    question_id,
+                    goal_id,
+                    question,
+                    blocks_what,
+                },
+            )?;
+            Ok(())
+        }
+        ToolEffect::OpenQuestionResolved {
+            question_id,
+            goal_id,
+            answer,
+        } => {
+            recorder.record(
+                snapshot,
+                Some(turn_id),
+                RuntimeEventKind::OpenQuestionResolved {
+                    question_id,
+                    goal_id,
+                    answer,
                 },
             )?;
             Ok(())

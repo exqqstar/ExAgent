@@ -12,7 +12,7 @@ async fn index_db_open_creates_schema() {
     let db = IndexDb::open(&db_path).await.unwrap();
     let version = db.schema_version().await.unwrap();
 
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     assert!(db_path.exists());
 }
 
@@ -24,7 +24,7 @@ async fn index_db_open_is_idempotent() {
     IndexDb::open(&db_path).await.unwrap();
     let db = IndexDb::open(&db_path).await.unwrap();
 
-    assert_eq!(db.schema_version().await.unwrap(), 4);
+    assert_eq!(db.schema_version().await.unwrap(), 5);
 }
 
 #[tokio::test]

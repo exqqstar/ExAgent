@@ -201,7 +201,12 @@ impl Agent {
         .with_tool_hooks(self.tool_hooks.clone());
         if forge_gate_enabled {
             if let Some(review_store) = self.forge_review_store.clone() {
-                runtime = runtime.with_tool_hooks(Arc::new(ForgeGateHooks::new(review_store)));
+                runtime = runtime.with_tool_hooks(Arc::new(ForgeGateHooks::new(
+                    review_store.clone(),
+                    crate::runtime::forge::open_questions::OpenQuestionStore::new(
+                        review_store.db(),
+                    ),
+                )));
             }
         }
         if let Some(inbox) = inbox {

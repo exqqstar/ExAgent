@@ -217,6 +217,18 @@ pub enum RuntimeEventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         checkpoint_id: Option<String>,
     },
+    OpenQuestionRecorded {
+        question_id: String,
+        goal_id: String,
+        question: String,
+        blocks_what: String,
+    },
+    OpenQuestionResolved {
+        question_id: String,
+        goal_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<String>,
+    },
     ThreadGoalReport {
         report: crate::app_server::protocol::ThreadGoalReport,
     },

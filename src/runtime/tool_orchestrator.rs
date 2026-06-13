@@ -67,6 +67,7 @@ impl ToolOrchestrator {
             invocation_id: invocation_id.clone(),
             tool_call_id: call.id.clone(),
             tool_name: call.name.clone(),
+            arguments: call.arguments.clone(),
             capabilities: capabilities.clone(),
         };
 
@@ -135,6 +136,12 @@ impl ToolOrchestrator {
             .await?;
             recorder.clear_tool_invocation(&hook_ctx.invocation_id)?;
             return Ok(ToolExecutionOutcome::from_tool_outcome(outcome));
+        }
+        if let Some(result) = short_circuit_result(&hook_effects) {
+            record_short_circuit_result(&hook_ctx, &result, recorder, snapshot, turn_id)?;
+            return Ok(ToolExecutionOutcome::from_tool_outcome(
+                ToolOutcome::from_result(result),
+            ));
         }
 
         let invocation = ToolInvocation {
@@ -304,6 +311,47 @@ fn approval_required_outcome(
     .with_effects(effects)
 }
 
+fn short_circuit_result(effects: &[ToolRuntimeEffect]) -> Option<ToolResult> {
+    effects.iter().find_map(|effect| match effect {
+        ToolRuntimeEffect::ShortCircuit { result } => Some(result.clone()),
+        _ => None,
+    })
+}
+
+fn record_short_circuit_result(
+    hook_ctx: &ToolInvocationContext,
+    result: &ToolResult,
+    recorder: &mut ThreadEventRecorder,
+    snapshot: &ThreadSnapshot,
+    turn_id: &TurnId,
+) -> Result<()> {
+    recorder.clear_tool_invocation(&hook_ctx.invocation_id)?;
+    if matches!(result.status, ToolStatus::Error) {
+        recorder.record(
+            snapshot,
+            Some(turn_id),
+            RuntimeEventKind::ToolInvocationFailed {
+                invocation_id: hook_ctx.invocation_id.clone(),
+                tool_call_id: hook_ctx.tool_call_id.clone(),
+                tool_name: hook_ctx.tool_name.clone(),
+                message: result.content.clone(),
+            },
+        )?;
+    } else if !matches!(result.status, ToolStatus::ReviewRequired) {
+        recorder.record(
+            snapshot,
+            Some(turn_id),
+            RuntimeEventKind::ToolInvocationCompleted {
+                invocation_id: hook_ctx.invocation_id.clone(),
+                tool_call_id: hook_ctx.tool_call_id.clone(),
+                tool_name: hook_ctx.tool_name.clone(),
+                status: result.status.clone(),
+            },
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ToolExecutionOutcome {
     pub(crate) result: ToolResult,
@@ -402,11 +450,13 @@ pub(crate) enum ToolEffect {
     SubagentClosed(SubagentClosed),
     InterAgentMessageSent(InterAgentMessageSent),
     ThreadGoalUpdated(crate::app_server::protocol::ThreadGoal),
+    ShortCircuit,
 }
 
 impl ToolEffect {
     fn from_runtime_effect(effect: ToolRuntimeEffect) -> Self {
         match effect {
+            ToolRuntimeEffect::ShortCircuit { .. } => Self::ShortCircuit,
             ToolRuntimeEffect::ExecSessionRunning {
                 exec_session_id,
                 command,
@@ -668,6 +718,7 @@ fn apply_tool_effect(
             )?;
             Ok(())
         }
+        ToolEffect::ShortCircuit => Ok(()),
     }
 }
 
@@ -801,7 +852,7 @@ fn apply_approval_update(
 mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::config::AgentConfig;
@@ -847,6 +898,14 @@ mod tests {
     }
 
     struct GateApprovalHooks;
+
+    #[derive(Default)]
+    struct ArgumentCaptureHooks {
+        before_invocation_status: Mutex<Option<String>>,
+        before_handler_status: Mutex<Option<String>>,
+    }
+
+    struct ShortCircuitHooks;
 
     struct RecordingTool {
         called: Arc<AtomicBool>,
@@ -926,6 +985,107 @@ mod tests {
             _ctx: &ToolInvocationContext,
         ) -> Result<Vec<ToolRuntimeEffect>> {
             panic!("before_handler_execution should not run after pre-invocation approval gate")
+        }
+
+        async fn after_handler_completion(
+            &self,
+            _ctx: &ToolInvocationContext,
+            _outcome: &ToolOutcome,
+        ) -> Result<Vec<ToolRuntimeEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn failed(
+            &self,
+            _ctx: &ToolInvocationContext,
+            _message: &str,
+        ) -> Result<Vec<ToolRuntimeEffect>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl ToolHooks for ArgumentCaptureHooks {
+        async fn before_invocation(
+            &self,
+            ctx: &ToolInvocationContext,
+        ) -> Result<Vec<ToolRuntimeEffect>> {
+            *self.before_invocation_status.lock().unwrap() = ctx
+                .arguments
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            Ok(Vec::new())
+        }
+
+        async fn approval_requested(
+            &self,
+            _ctx: &ToolInvocationContext,
+            _approval_id: &ApprovalId,
+        ) -> Result<Vec<ToolRuntimeEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn before_handler_execution(
+            &self,
+            ctx: &ToolInvocationContext,
+        ) -> Result<Vec<ToolRuntimeEffect>> {
+            *self.before_handler_status.lock().unwrap() = ctx
+                .arguments
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            Ok(Vec::new())
+        }
+
+        async fn after_handler_completion(
+            &self,
+            _ctx: &ToolInvocationContext,
+            _outcome: &ToolOutcome,
+        ) -> Result<Vec<ToolRuntimeEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn failed(
+            &self,
+            _ctx: &ToolInvocationContext,
+            _message: &str,
+        ) -> Result<Vec<ToolRuntimeEffect>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl ToolHooks for ShortCircuitHooks {
+        async fn before_invocation(
+            &self,
+            _ctx: &ToolInvocationContext,
+        ) -> Result<Vec<ToolRuntimeEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn approval_requested(
+            &self,
+            _ctx: &ToolInvocationContext,
+            _approval_id: &ApprovalId,
+        ) -> Result<Vec<ToolRuntimeEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn before_handler_execution(
+            &self,
+            ctx: &ToolInvocationContext,
+        ) -> Result<Vec<ToolRuntimeEffect>> {
+            Ok(vec![ToolRuntimeEffect::ShortCircuit {
+                result: ToolResult {
+                    tool_call_id: ctx.tool_call_id.clone(),
+                    tool_name: ctx.tool_name.clone(),
+                    status: ToolStatus::Error,
+                    content: "short-circuited by hook".to_string(),
+                    meta: None,
+                    parts: Vec::new(),
+                },
+            }])
         }
 
         async fn after_handler_completion(
@@ -1103,6 +1263,93 @@ mod tests {
 
         assert_eq!(outcome.result.status.as_str(), "success");
         assert_eq!(hooks.before_handler_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_hooks_receive_tool_arguments_before_handler_runs() {
+        let (dir, ctx) = tool_context(PolicyMode::Off);
+        let called = Arc::new(AtomicBool::new(false));
+        let mut registry = ToolRegistry::new();
+        registry.register(RecordingTool {
+            called: called.clone(),
+        });
+        let hooks = Arc::new(ArgumentCaptureHooks::default());
+        let orchestrator = ToolOrchestrator::with_hooks(ToolResolver::new(registry), hooks.clone());
+        let thread_id = ThreadId::new("thread_hook_arguments");
+        let snapshot = ThreadSnapshot::new_thread(
+            thread_id.clone(),
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+        let rollout_path = dir.path().join("hook-arguments-rollout.jsonl");
+        let mut recorder = recorder_for(thread_id, snapshot.clone(), rollout_path);
+
+        let outcome = orchestrator
+            .execute_with_lifecycle(
+                ToolCall {
+                    id: "call_hook_arguments".into(),
+                    name: "recording_tool".into(),
+                    arguments: serde_json::json!({ "status": "complete" }),
+                    thought_signature: None,
+                },
+                &ctx,
+                &mut recorder,
+                &snapshot,
+                &TurnId::new("turn_hook_arguments"),
+            )
+            .await
+            .expect("execute lifecycle");
+
+        assert_eq!(outcome.result.status, ToolStatus::Success);
+        assert!(called.load(Ordering::SeqCst));
+        assert_eq!(
+            hooks.before_invocation_status.lock().unwrap().as_deref(),
+            Some("complete")
+        );
+        assert_eq!(
+            hooks.before_handler_status.lock().unwrap().as_deref(),
+            Some("complete")
+        );
+    }
+
+    #[tokio::test]
+    async fn before_handler_short_circuit_skips_handler_and_returns_substitute_result() {
+        let (dir, ctx) = tool_context(PolicyMode::Off);
+        let called = Arc::new(AtomicBool::new(false));
+        let mut registry = ToolRegistry::new();
+        registry.register(RecordingTool {
+            called: called.clone(),
+        });
+        let orchestrator =
+            ToolOrchestrator::with_hooks(ToolResolver::new(registry), Arc::new(ShortCircuitHooks));
+        let thread_id = ThreadId::new("thread_hook_short_circuit");
+        let snapshot = ThreadSnapshot::new_thread(
+            thread_id.clone(),
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+        let rollout_path = dir.path().join("hook-short-circuit-rollout.jsonl");
+        let mut recorder = recorder_for(thread_id, snapshot.clone(), rollout_path);
+
+        let outcome = orchestrator
+            .execute_with_lifecycle(
+                ToolCall {
+                    id: "call_hook_short_circuit".into(),
+                    name: "recording_tool".into(),
+                    arguments: serde_json::json!({}),
+                    thought_signature: None,
+                },
+                &ctx,
+                &mut recorder,
+                &snapshot,
+                &TurnId::new("turn_hook_short_circuit"),
+            )
+            .await
+            .expect("execute lifecycle");
+
+        assert_eq!(outcome.result.status, ToolStatus::Error);
+        assert_eq!(outcome.result.content, "short-circuited by hook");
+        assert!(!called.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

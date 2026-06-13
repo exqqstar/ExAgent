@@ -64,6 +64,9 @@ impl ToolOutcome {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolRuntimeEffect {
+    ShortCircuit {
+        result: ToolResult,
+    },
     ExecSessionRunning {
         exec_session_id: ExecSessionId,
         command: String,

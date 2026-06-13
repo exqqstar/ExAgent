@@ -9,6 +9,8 @@ pub(crate) struct ToolInvocationContext {
     pub(crate) invocation_id: String,
     pub(crate) tool_call_id: String,
     pub(crate) tool_name: String,
+    #[allow(dead_code)]
+    pub(crate) arguments: serde_json::Value,
     pub(crate) capabilities: ToolCapabilities,
 }
 

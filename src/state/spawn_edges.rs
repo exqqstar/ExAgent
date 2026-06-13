@@ -23,6 +23,8 @@ pub struct ThreadSpawnEdge {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rolled_up_token_total: Option<i64>,
 }
 
 impl ThreadSpawnEdge {
@@ -40,6 +42,7 @@ impl ThreadSpawnEdge {
             status: SpawnEdgeStatus::Open,
             created_at: current_utc_timestamp(),
             closed_at: None,
+            rolled_up_token_total: None,
         }
     }
 }
@@ -109,6 +112,47 @@ impl ThreadSpawnEdgeStore {
             edge.status = SpawnEdgeStatus::Closed;
             edge.closed_at = Some(current_utc_timestamp());
             Ok(Some(edge.clone()))
+        })
+    }
+
+    pub fn mark_token_rollup_blocking(
+        &self,
+        child_thread_id: &ThreadId,
+        token_total: i64,
+    ) -> std::io::Result<Option<ThreadSpawnEdge>> {
+        self.update_edges_blocking(|edges| {
+            let Some(edge) = edges
+                .iter_mut()
+                .find(|edge| &edge.child_thread_id == child_thread_id)
+            else {
+                return Ok(None);
+            };
+            if edge.rolled_up_token_total.is_some() {
+                return Ok(None);
+            }
+            edge.rolled_up_token_total = Some(token_total.max(0));
+            Ok(Some(edge.clone()))
+        })
+    }
+
+    pub fn clear_token_rollup_blocking(
+        &self,
+        child_thread_id: &ThreadId,
+        token_total: i64,
+    ) -> std::io::Result<bool> {
+        let token_total = token_total.max(0);
+        self.update_edges_blocking(|edges| {
+            let Some(edge) = edges
+                .iter_mut()
+                .find(|edge| &edge.child_thread_id == child_thread_id)
+            else {
+                return Ok(false);
+            };
+            if edge.rolled_up_token_total != Some(token_total) {
+                return Ok(false);
+            }
+            edge.rolled_up_token_total = None;
+            Ok(true)
         })
     }
 
@@ -266,10 +310,68 @@ mod tests {
         assert_eq!(closed.status, SpawnEdgeStatus::Closed);
         assert_eq!(closed.created_at, created_at);
         assert!(closed.closed_at.is_some());
+        assert_eq!(closed.rolled_up_token_total, None);
         assert!(store
             .list_by_root_blocking(&ThreadId::new("thread_root"), Some(SpawnEdgeStatus::Open))
             .expect("list open root")
             .is_empty());
+    }
+
+    #[test]
+    fn store_marks_child_token_rollup_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ThreadSpawnEdgeStore::for_workspace(dir.path());
+        let edge = ThreadSpawnEdge::open(
+            ThreadId::new("thread_parent"),
+            ThreadId::new("thread_child"),
+            ThreadId::new("thread_root"),
+            "/root/research",
+        );
+        store.upsert_edge_blocking(edge).expect("upsert edge");
+
+        let first = store
+            .mark_token_rollup_blocking(&ThreadId::new("thread_child"), 42)
+            .expect("first rollup")
+            .expect("edge exists");
+        let second = store
+            .mark_token_rollup_blocking(&ThreadId::new("thread_child"), 99)
+            .expect("second rollup");
+
+        assert_eq!(first.rolled_up_token_total, Some(42));
+        assert!(second.is_none());
+        let edge = store
+            .list_by_parent_blocking(&ThreadId::new("thread_parent"), None)
+            .unwrap()
+            .remove(0);
+        assert_eq!(edge.rolled_up_token_total, Some(42));
+    }
+
+    #[test]
+    fn store_can_rollback_matching_child_token_rollup() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ThreadSpawnEdgeStore::for_workspace(dir.path());
+        let edge = ThreadSpawnEdge::open(
+            ThreadId::new("thread_parent"),
+            ThreadId::new("thread_child"),
+            ThreadId::new("thread_root"),
+            "/root/research",
+        );
+        store.upsert_edge_blocking(edge).expect("upsert edge");
+        store
+            .mark_token_rollup_blocking(&ThreadId::new("thread_child"), 42)
+            .expect("mark rollup");
+
+        assert!(!store
+            .clear_token_rollup_blocking(&ThreadId::new("thread_child"), 99)
+            .expect("mismatched rollback"));
+        assert!(store
+            .clear_token_rollup_blocking(&ThreadId::new("thread_child"), 42)
+            .expect("matching rollback"));
+        let edge = store
+            .list_by_parent_blocking(&ThreadId::new("thread_parent"), None)
+            .unwrap()
+            .remove(0);
+        assert_eq!(edge.rolled_up_token_total, None);
     }
 
     #[test]

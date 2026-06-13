@@ -795,6 +795,51 @@ describe("AppShell", () => {
     }
   });
 
+  it("shows an inbox badge when open questions are refreshed from runtime events", async () => {
+    vi.useFakeTimers();
+    try {
+      seedApprovalInbox([]);
+      vi.spyOn(exagentClient as any, "listApprovals").mockResolvedValue({
+        approvals: [
+          pendingApproval({
+            thread_id: "thread-event",
+            approval_id: "oq-event",
+            kind: "open_question",
+            summary: "Which cohort ships first?",
+            detail: "Blocks: Release targeting",
+          }),
+        ],
+      });
+
+      render(<App />);
+
+      await act(async () => {
+        useWorkbenchStore.getState().applyRuntimeEvent({
+          event_id: "evt-open-question-recorded",
+          thread_id: "session-desktop",
+          turn_id: "turn-event",
+          kind: {
+            type: "open_question_recorded",
+            question_id: "oq-event",
+            goal_id: "goal-event",
+            question: "Which cohort ships first?",
+            blocks_what: "Release targeting",
+          },
+        });
+        vi.advanceTimersByTime(300);
+        await Promise.resolve();
+      });
+
+      expect(
+        screen.getByRole("button", {
+          name: "Approval inbox, 1 pending approval",
+        }),
+      ).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("expands an inactive project without switching the active project", async () => {
     const user = userEvent.setup();
     vi.spyOn(exagentClient, "reindexProject").mockResolvedValue([

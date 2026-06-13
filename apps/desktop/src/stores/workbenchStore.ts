@@ -3359,6 +3359,12 @@ function eventDetail(event: BackendRuntimeEvent) {
       return event.kind.questions.map((question) => question.question).join(" ");
     case "user_input_resolved":
       return event.kind.dismissed ? "dismissed" : "answered";
+    case "review_submitted":
+      return event.kind.findings ?? event.kind.verdict;
+    case "open_question_recorded":
+      return event.kind.question;
+    case "open_question_resolved":
+      return event.kind.answer ?? "resolved";
     case "compaction_written":
       return event.kind.summary.summary;
     case "runtime_error":
@@ -3484,6 +3490,8 @@ function shouldRefreshApprovalsAfterEvent(event: BackendRuntimeEvent) {
     case "user_input_requested":
     case "user_input_resolved":
     case "tool_invocation_waiting_user_input":
+    case "open_question_recorded":
+    case "open_question_resolved":
       return true;
     default:
       return false;

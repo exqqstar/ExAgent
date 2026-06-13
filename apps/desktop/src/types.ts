@@ -556,6 +556,29 @@ export type BackendRuntimeEventKind =
   | { type: "thread_goal_continuation_suppressed"; goal_id: string; reason: string }
   | { type: "thread_goal_turn_started"; goal_id: string }
   | { type: "thread_goal_tool_completed"; goal_id: string; changed_files?: string[] }
+  | {
+      type: "review_submitted";
+      ticket_id: string;
+      goal_id: string;
+      verdict: "approve" | "reject";
+      reviewed_hash?: string | null;
+      reject_category?: "retriable_gap" | "needs_user" | "external_blocker" | null;
+      findings?: string | null;
+      checkpoint_id?: string | null;
+    }
+  | {
+      type: "open_question_recorded";
+      question_id: string;
+      goal_id: string;
+      question: string;
+      blocks_what: string;
+    }
+  | {
+      type: "open_question_resolved";
+      question_id: string;
+      goal_id: string;
+      answer?: string | null;
+    }
   | { type: "thread_goal_report"; report: ThreadGoalReport }
   | { type: "token_count"; info?: TokenUsageInfo | null }
   | { type: "runtime_error"; message: string };

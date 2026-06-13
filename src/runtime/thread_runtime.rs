@@ -82,6 +82,11 @@ pub(crate) enum ThreadOp {
         status: ApprovalStatus,
         note: Option<String>,
     },
+    SubmitUserInput {
+        turn_id: Option<TurnId>,
+        request_id: ApprovalId,
+        dismissed: bool,
+    },
     GoalRuntimeEffect {
         effect: GoalRuntimeEffect,
     },
@@ -101,6 +106,11 @@ pub enum ThreadOpResult {
         turn_id: TurnId,
         approval_id: ApprovalId,
         status: ApprovalStatus,
+    },
+    UserInputSubmitted {
+        turn_id: TurnId,
+        request_id: ApprovalId,
+        dismissed: bool,
     },
     Ack,
 }
@@ -512,6 +522,20 @@ impl ThreadRuntime {
         .await
     }
 
+    pub(crate) async fn submit_user_input_response(
+        &self,
+        requested_turn_id: Option<TurnId>,
+        request_id: ApprovalId,
+        dismissed: bool,
+    ) -> Result<ThreadOpResult> {
+        self.submit_control_and_wait(ThreadOp::SubmitUserInput {
+            turn_id: requested_turn_id,
+            request_id,
+            dismissed,
+        })
+        .await
+    }
+
     pub async fn wait_until_terminated(&self) {
         let mut status_rx = self.status_rx.clone();
         loop {
@@ -736,6 +760,17 @@ impl ThreadRuntimeLoop {
                     let result = self
                         .session
                         .handle_approval_decision(turn_id, approval_id, status, note)
+                        .await;
+                    complete(submission.completion_tx, result);
+                }
+                ThreadOp::SubmitUserInput {
+                    turn_id,
+                    request_id,
+                    dismissed,
+                } => {
+                    let result = self
+                        .session
+                        .handle_user_input_response(turn_id, request_id, dismissed)
                         .await;
                     complete(submission.completion_tx, result);
                 }

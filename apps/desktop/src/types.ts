@@ -81,20 +81,35 @@ export interface TranscriptMessage {
   turnId?: string;
   turnStatus?: string;
   approvalId?: string;
+  requestId?: string;
   invocationId?: string;
   toolCallId?: string;
   toolName?: string;
   toolStatus?: ToolInvocationTranscriptStatus;
   mutating?: boolean;
   goalReport?: ThreadGoalReport;
+  questions?: QuestionPrompt[];
 }
 
 export type ToolInvocationTranscriptStatus =
   | "running"
   | "waiting_approval"
+  | "waiting_user_input"
   | "completed"
   | "failed"
   | "cancelled";
+
+export interface QuestionOption {
+  label: string;
+  description?: string | null;
+}
+
+export interface QuestionPrompt {
+  question: string;
+  header?: string | null;
+  options?: QuestionOption[];
+  multi_select?: boolean;
+}
 
 export interface RuntimeEvent {
   id: string;
@@ -363,6 +378,7 @@ export type ThreadItem =
       tool_call_id?: string | null;
       tool_name?: string | null;
       approval_id?: string | null;
+      request_id?: string | null;
       status: string;
       mutating?: boolean | null;
       reason?: string | null;
@@ -379,6 +395,15 @@ export type ThreadItem =
       checkpoint_id?: string | null;
     }
   | { type: "approval_decision"; event_id?: string | null; approval_id?: string | null; status: string; note: string | null }
+  | {
+      type: "user_input_requested";
+      event_id?: string | null;
+      request_id: string;
+      tool_name: string;
+      questions: QuestionPrompt[];
+      status: string;
+    }
+  | { type: "user_input_resolved"; event_id?: string | null; request_id: string; dismissed: boolean }
   | { type: "runtime_error"; event_id?: string | null; message: string }
   | {
       type: "subagent_spawn";
@@ -462,6 +487,7 @@ export type BackendRuntimeEventKind =
     }
   | { type: "tool_invocation_started"; invocation_id: string; tool_call_id: string; tool_name: string; mutating: boolean }
   | { type: "tool_invocation_waiting_approval"; invocation_id: string; approval_id: string; reason: string }
+  | { type: "tool_invocation_waiting_user_input"; invocation_id: string; request_id: string; reason: string }
   | { type: "tool_invocation_output_delta"; invocation_id: string; stream: "stdout" | "stderr"; chunk: string; sequence: number }
   | { type: "tool_invocation_completed"; invocation_id: string; tool_call_id: string; tool_name: string; status: string }
   | { type: "tool_invocation_failed"; invocation_id: string; tool_call_id: string; tool_name: string; message: string }
@@ -475,6 +501,8 @@ export type BackendRuntimeEventKind =
       checkpoint_id?: string | null;
     }
   | { type: "approval_decision"; approval_id: string; status: string; note: string | null }
+  | { type: "user_input_requested"; request_id: string; tool_name: string; questions: QuestionPrompt[] }
+  | { type: "user_input_resolved"; request_id: string; dismissed: boolean }
   | { type: "compaction_written"; summary: { summary: string } }
   | {
       type: "subagent_spawned";

@@ -4,6 +4,7 @@ use serde_json::Value;
 use crate::types::{ToolCall, ToolResult};
 
 pub mod apply_patch;
+pub mod ask_user;
 pub mod close_agent;
 pub mod exec_command;
 pub mod followup_task;

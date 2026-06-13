@@ -29,12 +29,15 @@ pub(in crate::app_server) fn latest_turn_state(events: &[RuntimeEvent]) -> Optio
             RuntimeEventKind::ToolResult { .. }
             | RuntimeEventKind::ToolInvocationStarted { .. }
             | RuntimeEventKind::ToolInvocationWaitingApproval { .. }
+            | RuntimeEventKind::ToolInvocationWaitingUserInput { .. }
             | RuntimeEventKind::ToolInvocationOutputDelta { .. }
             | RuntimeEventKind::ToolInvocationCompleted { .. }
             | RuntimeEventKind::ToolInvocationFailed { .. }
             | RuntimeEventKind::ToolInvocationCancelled { .. }
             | RuntimeEventKind::ExecOutput { .. }
             | RuntimeEventKind::ApprovalDecision { .. }
+            | RuntimeEventKind::UserInputRequested { .. }
+            | RuntimeEventKind::UserInputResolved { .. }
             | RuntimeEventKind::CompactionWritten { .. }
             | RuntimeEventKind::SubagentSpawned { .. }
             | RuntimeEventKind::SubagentClosed { .. }
@@ -142,7 +145,8 @@ fn build_turn_views(events: Vec<RuntimeEvent>) -> Vec<TurnView> {
                     }
                 }
             }
-            RuntimeEventKind::ApprovalRequested { .. } => {
+            RuntimeEventKind::ApprovalRequested { .. }
+            | RuntimeEventKind::UserInputRequested { .. } => {
                 if let Some(turn_id) = view_turn_id(&event, current_turn_id.as_ref()) {
                     let index = ensure_turn_view(&mut turns, &turn_id);
                     if let Some(item) = thread_item_from_event(&event) {
@@ -185,8 +189,24 @@ fn build_turn_views(events: Vec<RuntimeEvent>) -> Vec<TurnView> {
                     }
                 }
             }
+            RuntimeEventKind::UserInputResolved {
+                request_id,
+                dismissed: _,
+            } => {
+                if let Some(turn_id) = view_turn_id(&event, current_turn_id.as_ref()) {
+                    let index = ensure_turn_view(&mut turns, &turn_id);
+                    apply_user_input_resolved_to_tool_invocation(
+                        &mut turns[index].items,
+                        request_id,
+                    );
+                    if let Some(item) = thread_item_from_event(&event) {
+                        turns[index].items.push(item);
+                    }
+                }
+            }
             RuntimeEventKind::ToolInvocationStarted { .. }
             | RuntimeEventKind::ToolInvocationWaitingApproval { .. }
+            | RuntimeEventKind::ToolInvocationWaitingUserInput { .. }
             | RuntimeEventKind::ToolInvocationOutputDelta { .. }
             | RuntimeEventKind::ToolInvocationCompleted { .. }
             | RuntimeEventKind::ToolInvocationFailed { .. }
@@ -458,6 +478,25 @@ fn thread_item_from_event(event: &RuntimeEvent) -> Option<ThreadItem> {
             status: approval_status_name(status).to_string(),
             note: note.clone(),
         }),
+        RuntimeEventKind::UserInputRequested {
+            request_id,
+            tool_name,
+            questions,
+        } => Some(ThreadItem::UserInputRequested {
+            event_id: Some(event.event_id.clone()),
+            request_id: request_id.clone(),
+            tool_name: tool_name.clone(),
+            questions: questions.clone(),
+            status: "pending".to_string(),
+        }),
+        RuntimeEventKind::UserInputResolved {
+            request_id,
+            dismissed,
+        } => Some(ThreadItem::UserInputResolved {
+            event_id: Some(event.event_id.clone()),
+            request_id: request_id.clone(),
+            dismissed: *dismissed,
+        }),
         RuntimeEventKind::RuntimeError { message } => Some(ThreadItem::RuntimeError {
             event_id: Some(event.event_id.clone()),
             message: message.clone(),
@@ -526,6 +565,7 @@ fn thread_item_from_event(event: &RuntimeEvent) -> Option<ThreadItem> {
         | RuntimeEventKind::ReasoningDelta { .. }
         | RuntimeEventKind::ToolInvocationStarted { .. }
         | RuntimeEventKind::ToolInvocationWaitingApproval { .. }
+        | RuntimeEventKind::ToolInvocationWaitingUserInput { .. }
         | RuntimeEventKind::ToolInvocationOutputDelta { .. }
         | RuntimeEventKind::ToolInvocationCompleted { .. }
         | RuntimeEventKind::ToolInvocationFailed { .. }
@@ -553,6 +593,7 @@ fn apply_tool_invocation_event(items: &mut Vec<ThreadItem>, kind: &RuntimeEventK
                 tool_call_id: item_tool_call_id,
                 tool_name: item_tool_name,
                 approval_id,
+                request_id,
                 status,
                 mutating: item_mutating,
                 reason,
@@ -563,6 +604,7 @@ fn apply_tool_invocation_event(items: &mut Vec<ThreadItem>, kind: &RuntimeEventK
                 *item_tool_call_id = Some(tool_call_id.clone());
                 *item_tool_name = Some(tool_name.clone());
                 *approval_id = None;
+                *request_id = None;
                 *status = "started".to_string();
                 *item_mutating = Some(*mutating);
                 *reason = None;
@@ -577,6 +619,7 @@ fn apply_tool_invocation_event(items: &mut Vec<ThreadItem>, kind: &RuntimeEventK
             let item = ensure_tool_invocation_item(items, invocation_id);
             if let ThreadItem::ToolInvocation {
                 approval_id: item_approval_id,
+                request_id,
                 status,
                 reason: item_reason,
                 message,
@@ -584,7 +627,30 @@ fn apply_tool_invocation_event(items: &mut Vec<ThreadItem>, kind: &RuntimeEventK
             } = item
             {
                 *item_approval_id = Some(approval_id.clone());
+                *request_id = None;
                 *status = "waiting_approval".to_string();
+                *item_reason = Some(reason.clone());
+                *message = None;
+            }
+        }
+        RuntimeEventKind::ToolInvocationWaitingUserInput {
+            invocation_id,
+            request_id: event_request_id,
+            reason,
+        } => {
+            let item = ensure_tool_invocation_item(items, invocation_id);
+            if let ThreadItem::ToolInvocation {
+                approval_id,
+                request_id,
+                status,
+                reason: item_reason,
+                message,
+                ..
+            } = item
+            {
+                *approval_id = None;
+                *request_id = Some(event_request_id.clone());
+                *status = "waiting_user_input".to_string();
                 *item_reason = Some(reason.clone());
                 *message = None;
             }
@@ -615,6 +681,7 @@ fn apply_tool_invocation_event(items: &mut Vec<ThreadItem>, kind: &RuntimeEventK
                 status,
                 reason,
                 message,
+                request_id,
                 ..
             } = item
             {
@@ -623,6 +690,7 @@ fn apply_tool_invocation_event(items: &mut Vec<ThreadItem>, kind: &RuntimeEventK
                 *status = "completed".to_string();
                 *reason = None;
                 *message = None;
+                *request_id = None;
             }
         }
         RuntimeEventKind::ToolInvocationFailed {
@@ -638,6 +706,7 @@ fn apply_tool_invocation_event(items: &mut Vec<ThreadItem>, kind: &RuntimeEventK
                 status,
                 reason,
                 message: item_message,
+                request_id,
                 ..
             } = item
             {
@@ -646,6 +715,7 @@ fn apply_tool_invocation_event(items: &mut Vec<ThreadItem>, kind: &RuntimeEventK
                 *status = "failed".to_string();
                 *reason = None;
                 *item_message = Some(message.clone());
+                *request_id = None;
             }
         }
         RuntimeEventKind::ToolInvocationCancelled {
@@ -661,6 +731,7 @@ fn apply_tool_invocation_event(items: &mut Vec<ThreadItem>, kind: &RuntimeEventK
                 status,
                 reason: item_reason,
                 message,
+                request_id,
                 ..
             } = item
             {
@@ -669,6 +740,7 @@ fn apply_tool_invocation_event(items: &mut Vec<ThreadItem>, kind: &RuntimeEventK
                 *status = "cancelled".to_string();
                 *item_reason = Some(reason.clone());
                 *message = None;
+                *request_id = None;
             }
         }
         _ => {}
@@ -696,6 +768,7 @@ fn ensure_tool_invocation_item<'a>(
         tool_call_id: None,
         tool_name: None,
         approval_id: None,
+        request_id: None,
         status: "started".to_string(),
         mutating: None,
         reason: None,
@@ -726,6 +799,28 @@ fn apply_approval_decision_to_tool_invocation(
         }
 
         *status = approval_status_name(decision_status).to_string();
+        *reason = None;
+        *message = None;
+    }
+}
+
+fn apply_user_input_resolved_to_tool_invocation(items: &mut [ThreadItem], request_id: &ApprovalId) {
+    for item in items {
+        let ThreadItem::ToolInvocation {
+            request_id: item_request_id,
+            status,
+            reason,
+            message,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        if item_request_id.as_ref() != Some(request_id) {
+            continue;
+        }
+
+        *status = "completed".to_string();
         *reason = None;
         *message = None;
     }

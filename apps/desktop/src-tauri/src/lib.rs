@@ -55,6 +55,7 @@ pub fn run() {
             commands::turn_start,
             commands::turn_interrupt,
             commands::approval_decision,
+            commands::submit_user_input,
             commands::approvals_list,
             commands::checkpoint_restore,
             commands::events_replay,

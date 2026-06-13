@@ -1245,6 +1245,33 @@ export async function submitApprovalDecision(
   });
 }
 
+export async function submitUserInput(
+  projectId: string,
+  threadId: string,
+  turnId: string | undefined,
+  requestId: string,
+  answers: string[][],
+  dismissed: boolean
+) {
+  if (!isTauriRuntime()) {
+    return {
+      thread_id: threadId,
+      turn_id: turnId ?? "turn_mock",
+      request_id: requestId,
+      dismissed
+    };
+  }
+
+  return invokeCommand("submit_user_input", {
+    projectId,
+    threadId,
+    turnId: turnId ?? null,
+    requestId,
+    answers,
+    dismissed
+  });
+}
+
 export async function replayEvents(
   projectId: string,
   threadId: string,
@@ -1685,6 +1712,7 @@ export const exagentClient = {
   startThread,
   startTurn,
   submitApprovalDecision,
+  submitUserInput,
   subscribeImageDragDrop,
   subscribeRuntimeEvents,
   threadRecordToSession,

@@ -4,9 +4,10 @@ use exagent::app_server::protocol::{
     ApprovalDecisionParams, ApprovalDecisionStatus, ApprovalsListParams, ApprovalsListResponse,
     BoundaryCapability, BoundaryOp, BoundaryOpResponse, CheckpointRestoreParams,
     CheckpointRestoreStatus, EventsReplayParams, IgnoredOverrideField, InitializeParams,
-    PendingApprovalKind, RunParams, RuntimeEventKindFilter, ThreadCompactParams, ThreadForkParams,
-    ThreadItem, ThreadReadParams, ThreadResumeParams, ThreadStartParams, ThreadStatus, ThreadView,
-    TurnContextOverrides, TurnInterruptParams, TurnStartParams, TurnStatus,
+    PendingApprovalKind, RunParams, RuntimeEventKindFilter, SubmitUserInputParams,
+    ThreadCompactParams, ThreadForkParams, ThreadItem, ThreadReadParams, ThreadResumeParams,
+    ThreadStartParams, ThreadStatus, ThreadView, TurnContextOverrides, TurnInterruptParams,
+    TurnStartParams, TurnStatus,
 };
 use exagent::app_server::{AppServerError, AppServerService};
 use exagent::config::{AgentConfig, PermissionProfile, ThinkingMode};
@@ -19,6 +20,7 @@ use exagent::registry::{ToolContext, ToolRegistry};
 use exagent::resolved::{ModelRef, ResolvedCredential, ResolvedModelConfig};
 use exagent::resolver::EnvModelResolver;
 use exagent::session::{ApprovalId, ThreadSnapshot, ThreadSource};
+use exagent::tools::ask_user::AskUserTool;
 use exagent::tools::run_command::RunCommandTool;
 use exagent::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
 use exagent::types::{
@@ -240,6 +242,12 @@ fn run_command_registry() -> ToolRegistry {
     registry
 }
 
+fn ask_user_registry() -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+    registry.register(AskUserTool);
+    registry
+}
+
 fn read_thread_snapshot(workspace_root: &std::path::Path, thread: &ThreadView) -> ThreadSnapshot {
     let workspace_root =
         std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
@@ -405,6 +413,7 @@ async fn initialize_boundary_advertises_v2_protocol_surface() {
             BoundaryCapability::TurnStart,
             BoundaryCapability::TurnInterrupt,
             BoundaryCapability::ApprovalDecision,
+            BoundaryCapability::SubmitUserInput,
             BoundaryCapability::EventsReplay,
         ]
     );
@@ -497,6 +506,18 @@ fn boundary_capabilities_match_boundary_op_type_names() {
                 approval_id: ApprovalId::new("approval_123"),
                 decision: ApprovalDecisionStatus::Denied,
                 note: None,
+                workspace_root: None,
+            }))
+            .unwrap(),
+        ),
+        (
+            BoundaryCapability::SubmitUserInput,
+            serde_json::to_value(BoundaryOp::SubmitUserInput(SubmitUserInputParams {
+                thread_id: ThreadId::new("session_123"),
+                turn_id: None,
+                request_id: ApprovalId::new("request_123"),
+                answers: vec![],
+                dismissed: true,
                 workspace_root: None,
             }))
             .unwrap(),
@@ -1458,6 +1479,345 @@ async fn events_subscribe_receives_tool_invocation_waiting_approval() {
         })
         .unwrap();
     assert_eq!(replay.events.len(), 1);
+}
+
+#[tokio::test]
+async fn ask_user_request_projects_and_submission_records_answers() {
+    let dir = tempdir().unwrap();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![AssistantTurn {
+            text: Some("need user input".into()),
+            tool_calls: vec![ToolCall {
+                id: "call_ask_user_boundary".into(),
+                name: "ask_user".into(),
+                arguments: serde_json::json!({
+                    "questions": [
+                        {
+                            "question": "Which color?",
+                            "header": "Color",
+                            "options": [{"label": "red"}, {"label": "blue"}],
+                            "multi_select": false
+                        },
+                        {
+                            "question": "Any notes?",
+                            "options": [],
+                            "multi_select": false
+                        }
+                    ]
+                }),
+                thought_signature: None,
+            }],
+            reasoning: vec![],
+        }])),
+        ask_user_registry,
+    );
+
+    let thread = service
+        .thread_start(ThreadStartParams {
+            workspace_root: None,
+            cwd: None,
+            permission_profile: None,
+        })
+        .unwrap();
+    let mut events = service
+        .events_subscribe(exagent::app_server::protocol::EventsSubscribeParams {
+            thread_id: thread.thread.id.clone(),
+            workspace_root: None,
+            after_event_id: None,
+        })
+        .unwrap();
+    let turn = service
+        .turn_start(TurnStartParams {
+            thread_id: thread.thread.id.clone(),
+            prompt: "ask me if needed".into(),
+            input: vec![],
+            workspace_root: None,
+            turn_mode: Default::default(),
+            turn_context: None,
+        })
+        .await
+        .unwrap();
+
+    let request_id = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let event = events.recv().await.expect("live event channel open");
+            if let RuntimeEventKind::UserInputRequested {
+                request_id,
+                tool_name,
+                questions,
+            } = event.kind
+            {
+                assert_eq!(tool_name, "ask_user");
+                assert_eq!(questions[0].question, "Which color?");
+                return request_id;
+            }
+        }
+    })
+    .await
+    .expect("user input request event must be delivered");
+
+    let replay = service
+        .events_replay(EventsReplayParams {
+            thread_id: thread.thread.id.clone(),
+            workspace_root: None,
+            after_event_id: None,
+            limit: None,
+            include_snapshot: false,
+            event_kinds: vec![RuntimeEventKindFilter::ToolInvocationWaitingUserInput],
+        })
+        .unwrap();
+    assert_eq!(replay.events.len(), 1);
+
+    let read = service
+        .thread_read(ThreadReadParams {
+            thread_id: thread.thread.id.clone(),
+            workspace_root: None,
+        })
+        .unwrap();
+    assert_eq!(read.thread.status, ThreadStatus::WaitingApproval);
+    assert!(read
+        .thread
+        .turns
+        .iter()
+        .flat_map(|turn| turn.items.iter())
+        .any(|item| matches!(
+            item,
+            ThreadItem::UserInputRequested {
+                request_id: item_request_id,
+                questions,
+                status,
+                ..
+            } if item_request_id == &request_id
+                && questions[0].question == "Which color?"
+                && status == "pending"
+        )));
+
+    let submitted = service
+        .submit_user_input(SubmitUserInputParams {
+            thread_id: thread.thread.id.clone(),
+            turn_id: Some(turn.turn.id),
+            request_id: request_id.clone(),
+            answers: vec![vec!["blue".to_string()], vec![]],
+            dismissed: false,
+            workspace_root: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(submitted.request_id, request_id);
+    assert!(!submitted.dismissed);
+
+    let replay = service
+        .events_replay(events_replay_params(thread.thread.id.clone()))
+        .unwrap();
+    assert!(replay.events.iter().any(|event| matches!(
+        &event.kind,
+        RuntimeEventKind::UserInputResolved {
+            request_id: resolved,
+            dismissed: false,
+        } if resolved == &submitted.request_id
+    )));
+    assert!(replay.events.iter().any(|event| matches!(
+        &event.kind,
+        RuntimeEventKind::ToolResult { result }
+            if result.tool_name == "ask_user"
+                && result.content.contains("\"Which color?\" = \"blue\"")
+                && result.content.contains("\"Any notes?\" = \"Unanswered\"")
+    )));
+
+    let read = service
+        .thread_read(ThreadReadParams {
+            thread_id: thread.thread.id.clone(),
+            workspace_root: None,
+        })
+        .unwrap();
+    let original_invocation_status = read
+        .thread
+        .turns
+        .iter()
+        .flat_map(|turn| turn.items.iter())
+        .find_map(|item| match item {
+            ThreadItem::ToolInvocation {
+                invocation_id,
+                status,
+                ..
+            } if invocation_id == "inv_call_ask_user_boundary" => Some(status),
+            _ => None,
+        })
+        .expect("thread read projects original ask_user invocation");
+    assert_eq!(original_invocation_status, "completed");
+}
+
+#[tokio::test]
+async fn ask_user_dismissal_records_successful_tool_result() {
+    let dir = tempdir().unwrap();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![AssistantTurn {
+            text: Some("need user input".into()),
+            tool_calls: vec![ToolCall {
+                id: "call_ask_user_dismiss".into(),
+                name: "ask_user".into(),
+                arguments: serde_json::json!({
+                    "questions": [{"question": "Proceed?"}]
+                }),
+                thought_signature: None,
+            }],
+            reasoning: vec![],
+        }])),
+        ask_user_registry,
+    );
+
+    let thread = service
+        .thread_start(ThreadStartParams {
+            workspace_root: None,
+            cwd: None,
+            permission_profile: None,
+        })
+        .unwrap();
+    let turn = service
+        .turn_start(TurnStartParams {
+            thread_id: thread.thread.id.clone(),
+            prompt: "ask if needed".into(),
+            input: vec![],
+            workspace_root: None,
+            turn_mode: Default::default(),
+            turn_context: None,
+        })
+        .await
+        .unwrap();
+    let request_id = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let replay = service
+                .events_replay(events_replay_params(thread.thread.id.clone()))
+                .unwrap();
+            if let Some(request_id) = replay.events.iter().find_map(|event| match &event.kind {
+                RuntimeEventKind::UserInputRequested { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            }) {
+                return request_id;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("user input request must be recorded");
+
+    service
+        .submit_user_input(SubmitUserInputParams {
+            thread_id: thread.thread.id.clone(),
+            turn_id: Some(turn.turn.id),
+            request_id: request_id.clone(),
+            answers: vec![],
+            dismissed: true,
+            workspace_root: None,
+        })
+        .await
+        .unwrap();
+
+    let replay = service
+        .events_replay(events_replay_params(thread.thread.id.clone()))
+        .unwrap();
+    assert!(replay.events.iter().any(|event| matches!(
+        &event.kind,
+        RuntimeEventKind::ToolResult { result }
+            if result.tool_name == "ask_user"
+                && result.content == "User dismissed the questions without answering. Proceed using your best judgment."
+    )));
+}
+
+#[tokio::test]
+async fn ask_user_submission_restores_pending_request_from_storage() {
+    let dir = tempdir().unwrap();
+    let config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        ..AgentConfig::default()
+    };
+    let service = AppServerService::with_llm(
+        config.clone(),
+        Box::new(MockLlm::new(vec![AssistantTurn {
+            text: Some("need user input".into()),
+            tool_calls: vec![ToolCall {
+                id: "call_ask_user_cold".into(),
+                name: "ask_user".into(),
+                arguments: serde_json::json!({
+                    "questions": [{"question": "Cold answer?"}]
+                }),
+                thought_signature: None,
+            }],
+            reasoning: vec![],
+        }])),
+        ask_user_registry,
+    );
+    let thread = service
+        .thread_start(ThreadStartParams {
+            workspace_root: None,
+            cwd: None,
+            permission_profile: None,
+        })
+        .unwrap();
+    let turn = service
+        .turn_start(TurnStartParams {
+            thread_id: thread.thread.id.clone(),
+            prompt: "ask if needed".into(),
+            input: vec![],
+            workspace_root: None,
+            turn_mode: Default::default(),
+            turn_context: None,
+        })
+        .await
+        .unwrap();
+    let request_id = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let replay = service
+                .events_replay(events_replay_params(thread.thread.id.clone()))
+                .unwrap();
+            if let Some(request_id) = replay.events.iter().find_map(|event| match &event.kind {
+                RuntimeEventKind::UserInputRequested { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            }) {
+                return request_id;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("user input request must be recorded");
+    drop(service);
+
+    let restored_service =
+        AppServerService::with_llm(config, Box::new(MockLlm::new(vec![])), ask_user_registry);
+    let submitted = restored_service
+        .submit_user_input(SubmitUserInputParams {
+            thread_id: thread.thread.id.clone(),
+            turn_id: Some(turn.turn.id),
+            request_id: request_id.clone(),
+            answers: vec![vec!["restored".to_string()]],
+            dismissed: false,
+            workspace_root: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(submitted.request_id, request_id);
+    let replay = restored_service
+        .events_replay(events_replay_params(thread.thread.id.clone()))
+        .unwrap();
+    assert!(replay.events.iter().any(|event| matches!(
+        &event.kind,
+        RuntimeEventKind::ToolResult { result }
+            if result.tool_name == "ask_user"
+                && result.content.contains("\"Cold answer?\" = \"restored\"")
+    )));
 }
 
 #[tokio::test]

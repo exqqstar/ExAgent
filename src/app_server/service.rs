@@ -8,11 +8,11 @@ use crate::app_server::protocol::{
     AgentRunResponse, AgentTreeParams, AgentTreeResponse, ApprovalDecisionParams,
     ApprovalDecisionResponse, ApprovalsListParams, ApprovalsListResponse, BoundaryOp,
     BoundaryOpResponse, CheckpointRestoreParams, CheckpointRestoreResponse, EventsReplayParams,
-    EventsReplayResponse, EventsSubscribeParams, RunParams, ThreadCompactParams,
-    ThreadCompactResponse, ThreadForkParams, ThreadForkResponse, ThreadReadParams,
-    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
-    ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse,
+    EventsReplayResponse, EventsSubscribeParams, RunParams, SubmitUserInputParams,
+    SubmitUserInputResponse, ThreadCompactParams, ThreadCompactResponse, ThreadForkParams,
+    ThreadForkResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse,
 };
 use crate::app_server::ThreadManager;
 use crate::config::AgentConfig;
@@ -45,6 +45,10 @@ pub trait AppServerBoundary: Send + Sync {
         &self,
         params: ApprovalDecisionParams,
     ) -> Result<ApprovalDecisionResponse>;
+    async fn submit_user_input(
+        &self,
+        params: SubmitUserInputParams,
+    ) -> Result<SubmitUserInputResponse>;
     async fn submit_boundary_op(&self, op: BoundaryOp) -> Result<BoundaryOpResponse>;
     async fn events_replay(&self, params: EventsReplayParams) -> Result<EventsReplayResponse>;
     async fn events_subscribe(
@@ -206,6 +210,13 @@ impl AppServerService {
         self.thread_manager.approval_decision(params).await
     }
 
+    pub async fn submit_user_input(
+        &self,
+        params: SubmitUserInputParams,
+    ) -> Result<SubmitUserInputResponse> {
+        self.thread_manager.submit_user_input(params).await
+    }
+
     pub async fn submit_boundary_op(&self, op: BoundaryOp) -> Result<BoundaryOpResponse> {
         self.thread_manager.submit_boundary_op(op).await
     }
@@ -283,6 +294,13 @@ impl AppServerBoundary for AppServerService {
         params: ApprovalDecisionParams,
     ) -> Result<ApprovalDecisionResponse> {
         self.approval_decision(params).await
+    }
+
+    async fn submit_user_input(
+        &self,
+        params: SubmitUserInputParams,
+    ) -> Result<SubmitUserInputResponse> {
+        self.submit_user_input(params).await
     }
 
     async fn submit_boundary_op(&self, op: BoundaryOp) -> Result<BoundaryOpResponse> {

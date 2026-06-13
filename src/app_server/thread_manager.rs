@@ -9,11 +9,11 @@ use crate::app_server::protocol::{
     ApprovalDecisionResponse, ApprovalsListParams, ApprovalsListResponse, BoundaryCapability,
     BoundaryOp, BoundaryOpResponse, CheckpointRestoreParams, CheckpointRestoreResponse,
     EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, InitializeParams,
-    InitializeResponse, RunParams, ThreadCompactParams, ThreadCompactResponse, ThreadForkParams,
-    ThreadForkResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, TurnContextOverrides,
-    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
-    BOUNDARY_PROTOCOL_VERSION,
+    InitializeResponse, RunParams, SubmitUserInputParams, SubmitUserInputResponse,
+    ThreadCompactParams, ThreadCompactResponse, ThreadForkParams, ThreadForkResponse,
+    ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
+    ThreadStartParams, ThreadStartResponse, TurnContextOverrides, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse, BOUNDARY_PROTOCOL_VERSION,
 };
 use crate::app_server::request_processors::{
     agent_processor, approvals_processor, checkpoint_processor, compaction_processor,
@@ -215,6 +215,7 @@ impl ThreadManager {
                 BoundaryCapability::TurnStart,
                 BoundaryCapability::TurnInterrupt,
                 BoundaryCapability::ApprovalDecision,
+                BoundaryCapability::SubmitUserInput,
                 BoundaryCapability::EventsReplay,
             ],
             supported_streams: vec![BoundaryCapability::EventsSubscribe],
@@ -283,6 +284,13 @@ impl ThreadManager {
         params: ApprovalDecisionParams,
     ) -> Result<ApprovalDecisionResponse> {
         turn_processor::approval_decision(self.services.as_ref(), params).await
+    }
+
+    pub async fn submit_user_input(
+        &self,
+        params: SubmitUserInputParams,
+    ) -> Result<SubmitUserInputResponse> {
+        turn_processor::submit_user_input(self.services.as_ref(), params).await
     }
 
     async fn turn_start_direct(&self, params: TurnStartParams) -> Result<TurnStartResponse> {
@@ -358,6 +366,10 @@ impl ThreadManager {
                 .approval_decision(params)
                 .await
                 .map(BoundaryOpResponse::ApprovalDecisionSubmitted),
+            BoundaryOp::SubmitUserInput(params) => self
+                .submit_user_input(params)
+                .await
+                .map(BoundaryOpResponse::UserInputSubmitted),
             BoundaryOp::EventsReplay(params) => self
                 .events_replay(params)
                 .map(BoundaryOpResponse::EventsReplayed),

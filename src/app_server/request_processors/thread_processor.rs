@@ -239,7 +239,7 @@ pub(in crate::app_server) fn thread_read_from_state_view(
     let latest_turn = latest_turn_state(&events);
     let status = if active_turn.is_some() {
         ThreadStatus::Running
-    } else if overlay.has_pending_approval() {
+    } else if overlay.has_pending_approval() || overlay.has_pending_user_input() {
         ThreadStatus::WaitingApproval
     } else if latest_turn
         .as_ref()

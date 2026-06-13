@@ -5,8 +5,8 @@ use anyhow::{anyhow, Result};
 use crate::app_server::override_policy::OverridePolicy;
 use crate::app_server::protocol::{
     AgentRunResponse, ApprovalDecisionParams, ApprovalDecisionResponse, ApprovalDecisionStatus,
-    TurnContextOverrides, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse, TurnState, TurnStatus, TurnView,
+    SubmitUserInputParams, SubmitUserInputResponse, TurnContextOverrides, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnState, TurnStatus, TurnView,
 };
 use crate::app_server::services::AppServerServices;
 use crate::app_server::thread_store::{
@@ -14,7 +14,7 @@ use crate::app_server::thread_store::{
 };
 use crate::app_server::AppServerError;
 use crate::events::RuntimeEventKind;
-use crate::policy::PendingCommandApproval;
+use crate::policy::{PendingCommandApproval, PendingUserInputRequest};
 use crate::runtime::thread_runtime::{ThreadOpResult, ThreadRuntimeError, ThreadTurnContext};
 use crate::runtime::thread_session::RuntimeOverlay;
 use crate::runtime::turn_mode::TurnMode;
@@ -295,6 +295,111 @@ pub(in crate::app_server) async fn approval_decision(
     Err(AppServerError::ThreadNotFound(params.thread_id).into())
 }
 
+pub(in crate::app_server) async fn submit_user_input(
+    services: &AppServerServices,
+    params: SubmitUserInputParams,
+) -> Result<SubmitUserInputResponse> {
+    let requested_workspace_root = params.workspace_root.clone();
+    let requested_workspace_root = requested_workspace_root.is_some();
+    let config =
+        OverridePolicy::merge_events_replay(&services.base_config, params.workspace_root.clone())?;
+    if let Some(loaded) = services.runtime_loader.resolve_loaded_runtime(
+        &params.thread_id,
+        requested_workspace_root,
+        &config.workspace_root,
+    )? {
+        let runtime = loaded.runtime;
+        let workspace_root = loaded.workspace_root;
+        let _workspace_op_guard = services
+            .runtime_loader
+            .begin_workspace_runtime_op(&workspace_root)?;
+        restore_pending_user_input_from_storage(
+            services,
+            &workspace_root,
+            &params.thread_id,
+            &params.request_id,
+        )
+        .await?;
+        if !params.dismissed {
+            services
+                .policy
+                .submit_user_input_answers(&params.request_id, params.answers)
+                .await
+                .map_err(AppServerError::InvalidRequest)?;
+        }
+        let result = runtime
+            .submit_user_input_response(params.turn_id, params.request_id, params.dismissed)
+            .await
+            .map_err(map_thread_runtime_error)?;
+        return match result {
+            ThreadOpResult::UserInputSubmitted {
+                turn_id,
+                request_id,
+                dismissed,
+            } => Ok(SubmitUserInputResponse {
+                thread_id: params.thread_id,
+                turn_id,
+                request_id,
+                dismissed,
+            }),
+            response => Err(unexpected_runtime_result("submit_user_input", &response).into()),
+        };
+    }
+
+    if let Some(stored) = read_thread_state_from_storage(&config.workspace_root, &params.thread_id)?
+    {
+        let overlay = RuntimeOverlay::from_events(&stored.events);
+        if overlay.has_pending_user_input_id(&params.request_id) {
+            let _workspace_op_guard = services
+                .runtime_loader
+                .begin_workspace_runtime_op(&config.workspace_root)?;
+            let thread_id = params.thread_id.clone();
+            if let Some(request) = pending_user_input_from_stored_state(&stored, &params.request_id)
+            {
+                services.policy.restore_user_input_request(request).await;
+            }
+            if !params.dismissed {
+                services
+                    .policy
+                    .submit_user_input_answers(&params.request_id, params.answers)
+                    .await
+                    .map_err(AppServerError::InvalidRequest)?;
+            }
+            let runtime = services.runtime_loader.ensure_runtime_loaded(
+                &params.thread_id,
+                config,
+                requested_workspace_root,
+                services,
+            )?;
+            let result = runtime
+                .submit_user_input_response(params.turn_id, params.request_id, params.dismissed)
+                .await
+                .map_err(map_thread_runtime_error)?;
+            return match result {
+                ThreadOpResult::UserInputSubmitted {
+                    turn_id,
+                    request_id,
+                    dismissed,
+                } => Ok(SubmitUserInputResponse {
+                    thread_id,
+                    turn_id,
+                    request_id,
+                    dismissed,
+                }),
+                response => Err(unexpected_runtime_result("submit_user_input", &response).into()),
+            };
+        }
+
+        return Err(AppServerError::TurnRejected {
+            thread_id: params.thread_id,
+            reason: "thread has no pending user input request".to_string(),
+        }
+        .into());
+    }
+
+    Err(AppServerError::ThreadNotFound(params.thread_id).into())
+}
+
 pub(in crate::app_server) async fn restore_pending_command_approval_from_storage(
     services: &AppServerServices,
     workspace_root: &Path,
@@ -310,6 +415,25 @@ pub(in crate::app_server) async fn restore_pending_command_approval_from_storage
     }
     if let Some(approval) = pending_command_approval_from_stored_state(&stored, approval_id) {
         services.policy.restore_command_approval(approval).await;
+    }
+    Ok(())
+}
+
+pub(in crate::app_server) async fn restore_pending_user_input_from_storage(
+    services: &AppServerServices,
+    workspace_root: &Path,
+    thread_id: &ThreadId,
+    request_id: &ApprovalId,
+) -> Result<()> {
+    let Some(stored) = read_thread_state_from_storage(workspace_root, thread_id)? else {
+        return Ok(());
+    };
+    let overlay = RuntimeOverlay::from_events(&stored.events);
+    if !overlay.has_pending_user_input_id(request_id) {
+        return Ok(());
+    }
+    if let Some(request) = pending_user_input_from_stored_state(&stored, request_id) {
+        services.policy.restore_user_input_request(request).await;
     }
     Ok(())
 }
@@ -408,6 +532,33 @@ fn pending_command_approval_from_stored_state(
     })
 }
 
+fn pending_user_input_from_stored_state(
+    stored: &StoredThreadState,
+    request_id: &ApprovalId,
+) -> Option<PendingUserInputRequest> {
+    let (tool_name, questions) =
+        stored
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                RuntimeEventKind::UserInputRequested {
+                    request_id: event_request_id,
+                    tool_name,
+                    questions,
+                } if event_request_id == request_id => Some((tool_name.clone(), questions.clone())),
+                _ => None,
+            })?;
+
+    Some(PendingUserInputRequest {
+        request_id: request_id.clone(),
+        thread_id: stored.snapshot.thread_id.clone(),
+        tool_name,
+        questions,
+        answers: None,
+    })
+}
+
 fn unexpected_runtime_result(operation: &str, result: &ThreadOpResult) -> AppServerError {
     AppServerError::InvalidRequest(format!(
         "{operation} returned unexpected {} runtime result",
@@ -420,6 +571,7 @@ fn runtime_result_name(result: &ThreadOpResult) -> &'static str {
         ThreadOpResult::UserInput { .. } => "user_input",
         ThreadOpResult::Interrupted { .. } => "interrupted",
         ThreadOpResult::ApprovalDecision { .. } => "approval_decision",
+        ThreadOpResult::UserInputSubmitted { .. } => "user_input_submitted",
         ThreadOpResult::Ack => "ack",
     }
 }

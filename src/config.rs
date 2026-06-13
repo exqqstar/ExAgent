@@ -114,6 +114,7 @@ pub struct AgentConfig {
     pub skills_user_roots: Vec<PathBuf>,
     pub mcp_servers: Vec<McpServerConfig>,
     pub web_search: Option<WebSearchConfig>,
+    pub forge_review_gate_enabled: bool,
 }
 
 impl AgentConfig {
@@ -165,6 +166,8 @@ impl Default for AgentConfig {
                 .collect(),
             mcp_servers: Vec::new(),
             web_search: web_search_config_from_env(),
+            forge_review_gate_enabled: parse_optional_bool_env("EXAGENT_FORGE_REVIEW_GATE_ENABLED")
+                .unwrap_or(false),
         }
     }
 }

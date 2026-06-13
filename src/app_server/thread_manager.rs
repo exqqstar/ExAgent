@@ -9,11 +9,12 @@ use crate::app_server::protocol::{
     ApprovalDecisionResponse, ApprovalsListParams, ApprovalsListResponse, BoundaryCapability,
     BoundaryOp, BoundaryOpResponse, CheckpointRestoreParams, CheckpointRestoreResponse,
     EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, InitializeParams,
-    InitializeResponse, RunParams, SubmitUserInputParams, SubmitUserInputResponse,
-    ThreadCompactParams, ThreadCompactResponse, ThreadForkParams, ThreadForkResponse,
-    ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
-    ThreadStartParams, ThreadStartResponse, TurnContextOverrides, TurnInterruptParams,
-    TurnInterruptResponse, TurnStartParams, TurnStartResponse, BOUNDARY_PROTOCOL_VERSION,
+    InitializeResponse, OpenQuestionResolveParams, OpenQuestionResolveResponse, RunParams,
+    SubmitUserInputParams, SubmitUserInputResponse, ThreadCompactParams, ThreadCompactResponse,
+    ThreadForkParams, ThreadForkResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, TurnContextOverrides,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    BOUNDARY_PROTOCOL_VERSION,
 };
 use crate::app_server::request_processors::{
     agent_processor, approvals_processor, checkpoint_processor, compaction_processor,
@@ -212,6 +213,7 @@ impl ThreadManager {
                 BoundaryCapability::AgentTree,
                 BoundaryCapability::ApprovalsList,
                 BoundaryCapability::CheckpointRestore,
+                BoundaryCapability::OpenQuestionResolve,
                 BoundaryCapability::TurnStart,
                 BoundaryCapability::TurnInterrupt,
                 BoundaryCapability::ApprovalDecision,
@@ -262,6 +264,13 @@ impl ThreadManager {
         params: CheckpointRestoreParams,
     ) -> Result<CheckpointRestoreResponse> {
         checkpoint_processor::checkpoint_restore(self.services.as_ref(), params).await
+    }
+
+    pub async fn open_question_resolve(
+        &self,
+        params: OpenQuestionResolveParams,
+    ) -> Result<OpenQuestionResolveResponse> {
+        approvals_processor::open_question_resolve(self.services.as_ref(), params).await
     }
 
     pub async fn turn_start(&self, params: TurnStartParams) -> Result<TurnStartResponse> {
@@ -354,6 +363,10 @@ impl ThreadManager {
                 .checkpoint_restore(params)
                 .await
                 .map(BoundaryOpResponse::CheckpointRestored),
+            BoundaryOp::OpenQuestionResolve(params) => self
+                .open_question_resolve(params)
+                .await
+                .map(BoundaryOpResponse::OpenQuestionResolved),
             BoundaryOp::TurnStart(params) => self
                 .turn_start_direct(params)
                 .await

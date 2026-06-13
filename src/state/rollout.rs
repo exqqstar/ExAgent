@@ -191,6 +191,9 @@ fn should_persist_event(event: &RuntimeEvent) -> bool {
             | RuntimeEventKind::TokenCount { .. }
             | RuntimeEventKind::ThreadGoalTurnStarted { .. }
             | RuntimeEventKind::ThreadGoalToolCompleted { .. }
+            | RuntimeEventKind::ReviewSubmitted { .. }
+            | RuntimeEventKind::OpenQuestionRecorded { .. }
+            | RuntimeEventKind::OpenQuestionResolved { .. }
             | RuntimeEventKind::ThreadGoalReport { .. }
     )
 }
@@ -521,6 +524,8 @@ mod tests {
                         time_used_seconds: 30,
                         changed_files: vec!["src/runtime/goal/runtime.rs".to_string()],
                         pending_approvals_count: 1,
+                        open_questions: vec![],
+                        review_summary: None,
                         summary: "The goal completed.".to_string(),
                     },
                 },

@@ -3,6 +3,7 @@ pub mod agent_profile;
 pub(crate) mod compaction;
 pub(crate) mod context;
 pub mod exec_session;
+pub(crate) mod forge;
 pub(crate) mod goal;
 pub mod policy;
 pub(crate) mod process_cleanup;

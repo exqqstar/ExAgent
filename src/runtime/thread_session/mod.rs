@@ -17,6 +17,7 @@ use crate::config::AgentConfig;
 use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::policy::PolicyManager;
 use crate::runtime::context::ContextManager;
+use crate::runtime::forge::review::ReviewStore;
 use crate::runtime::goal::{runtime::GoalRuntime, GoalToolApi};
 use crate::runtime::subagent::{
     parent_agent_path, terminal_completion_content, AgentControl, AgentTurnTerminalStatus,
@@ -50,6 +51,7 @@ pub struct ThreadSessionOptions {
     live_event_buffer_cap: usize,
     subagent_control: Option<Arc<AgentControl>>,
     goal_runtime: Option<Arc<GoalRuntime>>,
+    forge_review_store: Option<ReviewStore>,
 }
 
 impl ThreadSessionOptions {
@@ -66,6 +68,7 @@ impl ThreadSessionOptions {
             live_event_buffer_cap: DEFAULT_LIVE_EVENT_BUFFER_CAP,
             subagent_control: None,
             goal_runtime: None,
+            forge_review_store: None,
         }
     }
 
@@ -98,6 +101,11 @@ impl ThreadSessionOptions {
         self.goal_runtime = goal_runtime;
         self
     }
+
+    pub(crate) fn with_forge_review_store(mut self, store: Option<ReviewStore>) -> Self {
+        self.forge_review_store = store;
+        self
+    }
 }
 
 pub struct ThreadSession {
@@ -115,6 +123,7 @@ pub struct ThreadSession {
     subagent_control: Option<Arc<AgentControl>>,
     next_turn_index_seed: u64,
     goal_runtime: Option<Arc<GoalRuntime>>,
+    forge_review_store: Option<ReviewStore>,
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +184,7 @@ impl ThreadSession {
             live_event_buffer_cap,
             subagent_control,
             goal_runtime,
+            forge_review_store,
         } = options;
         let rollout_paths = rollout_paths(&config.workspace_root, &thread_id);
         let rollout_store = RolloutStore::new(rollout_paths.rollout_path);
@@ -206,7 +216,8 @@ impl ThreadSession {
         let session_subagent_control = subagent_control.clone();
         let agent = agent_factory(runtime_config.clone())?
             .with_subagent_control(subagent_control)
-            .with_goal_api(goal_api);
+            .with_goal_api(goal_api)
+            .with_forge_review_store(forge_review_store.clone());
         let inbox = Arc::new(ThreadInbox::new(thread_id.clone()));
         let live_state = Arc::new(RwLock::new(ThreadSessionLiveState {
             snapshot: snapshot.clone(),
@@ -238,6 +249,7 @@ impl ThreadSession {
             subagent_control: session_subagent_control,
             next_turn_index_seed,
             goal_runtime,
+            forge_review_store,
         })
     }
 

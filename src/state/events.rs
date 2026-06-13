@@ -33,6 +33,21 @@ pub struct RuntimeEvent {
     pub kind: RuntimeEventKind,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewVerdictEvent {
+    Approve,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewRejectCategoryEvent {
+    RetriableGap,
+    NeedsUser,
+    ExternalBlocker,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEventKind {
@@ -188,6 +203,31 @@ pub enum RuntimeEventKind {
         goal_id: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         changed_files: Vec<String>,
+    },
+    ReviewSubmitted {
+        ticket_id: String,
+        goal_id: String,
+        verdict: ReviewVerdictEvent,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reviewed_hash: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reject_category: Option<ReviewRejectCategoryEvent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        findings: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint_id: Option<String>,
+    },
+    OpenQuestionRecorded {
+        question_id: String,
+        goal_id: String,
+        question: String,
+        blocks_what: String,
+    },
+    OpenQuestionResolved {
+        question_id: String,
+        goal_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<String>,
     },
     ThreadGoalReport {
         report: crate::app_server::protocol::ThreadGoalReport,

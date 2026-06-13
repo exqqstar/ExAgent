@@ -401,6 +401,8 @@ function GoalReportCard({ message }: { message: TranscriptMessage }) {
     return null;
   }
   const approvalsLabel = `${report.pending_approvals_count} ${report.pending_approvals_count === 1 ? "approval" : "approvals"} waiting in Inbox`;
+  const openQuestions = report.open_questions ?? [];
+  const reviewSummary = report.review_summary ?? null;
 
   return (
     <article className="message-card w-full max-w-[780px] rounded-lg border border-border px-4 py-3" aria-label="Goal report">
@@ -434,6 +436,42 @@ function GoalReportCard({ message }: { message: TranscriptMessage }) {
               </li>
             ))}
           </ul>
+        </div>
+      ) : null}
+      {openQuestions.length > 0 ? (
+        <div className="mt-3">
+          <div className="flex items-center gap-2 text-muted">
+            <CircleAlert className="h-4 w-4" />
+            <span className="type-label-sm">Open questions</span>
+          </div>
+          <ul className="mt-2 space-y-1">
+            {openQuestions.map((question) => (
+              <li
+                key={question.question_id}
+                className="rounded border border-border bg-surface-2 px-2 py-1.5 text-muted"
+              >
+                <p className="type-label-sm text-ink">{question.question}</p>
+                <p className="type-body-sm mt-0.5">{question.blocks_what}</p>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {reviewSummary ? (
+        <div className="mt-3 rounded-md border border-border bg-surface-2 px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Info className="h-4 w-4 text-muted" />
+            <span className="type-label-sm text-muted">Latest review</span>
+            <Badge variant={reviewSummary.status === "approved" ? "success" : reviewSummary.status === "rejected" ? "danger" : "neutral"}>
+              {reviewSummary.status}
+            </Badge>
+            {reviewSummary.reject_category ? (
+              <Badge variant="warning">{reviewSummary.reject_category}</Badge>
+            ) : null}
+          </div>
+          {reviewSummary.findings ? (
+            <p className="type-body-sm mt-2 whitespace-pre-wrap text-muted">{reviewSummary.findings}</p>
+          ) : null}
         </div>
       ) : null}
       {report.pending_approvals_count > 0 ? (

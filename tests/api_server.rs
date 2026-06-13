@@ -7,11 +7,12 @@ use exagent::app_server::protocol::{
     AgentRunResponse, AgentTreeAgentStatus, AgentTreeNode, AgentTreeParams, AgentTreeResponse,
     ApprovalDecisionParams, ApprovalDecisionResponse, BoundaryCapability, BoundaryOp,
     BoundaryOpResponse, EventsReplayParams, EventsReplayResponse, EventsSubscribeParams,
-    IgnoredOverrideField, InitializeResponse, RunParams, SubmitUserInputParams,
-    SubmitUserInputResponse, ThreadCompactParams, ThreadCompactResponse, ThreadReadParams,
-    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
-    ThreadStartResponse, ThreadStatus, ThreadView, TurnInterruptParams, TurnInterruptResponse,
-    TurnStartParams, TurnStartResponse, TurnStatus, TurnView, BOUNDARY_PROTOCOL_VERSION,
+    IgnoredOverrideField, InitializeResponse, OpenQuestionResolveParams,
+    OpenQuestionResolveResponse, RunParams, SubmitUserInputParams, SubmitUserInputResponse,
+    ThreadCompactParams, ThreadCompactResponse, ThreadReadParams, ThreadReadResponse,
+    ThreadResumeParams, ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, ThreadStatus,
+    ThreadView, TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    TurnStatus, TurnView, BOUNDARY_PROTOCOL_VERSION,
 };
 use exagent::app_server::{AppServerBoundary, AppServerError};
 use exagent::cli::{parse_cli_command, CliCommand};
@@ -173,6 +174,20 @@ impl AppServerBoundary for StubBoundary {
         .into())
     }
 
+    async fn open_question_resolve(
+        &self,
+        _params: OpenQuestionResolveParams,
+    ) -> anyhow::Result<OpenQuestionResolveResponse> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push("open_question_resolve".into());
+        Err(AppServerError::InvalidRequest(
+            "open question resolve is not used in these API tests".into(),
+        )
+        .into())
+    }
+
     async fn submit_boundary_op(&self, op: BoundaryOp) -> anyhow::Result<BoundaryOpResponse> {
         self.calls.lock().unwrap().push("submit_boundary_op".into());
         match op {
@@ -295,6 +310,13 @@ impl AppServerBoundary for ErrorBoundary {
         &self,
         _params: SubmitUserInputParams,
     ) -> anyhow::Result<SubmitUserInputResponse> {
+        Err(self.error())
+    }
+
+    async fn open_question_resolve(
+        &self,
+        _params: OpenQuestionResolveParams,
+    ) -> anyhow::Result<OpenQuestionResolveResponse> {
         Err(self.error())
     }
 

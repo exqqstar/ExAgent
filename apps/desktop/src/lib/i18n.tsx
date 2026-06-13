@@ -23,6 +23,10 @@ export type TranslationKey =
   | "approvals.inbox.rejectFor"
   | "approvals.inbox.rejectRollback"
   | "approvals.inbox.rejectRollbackFor"
+  | "approvals.inbox.resolveQuestion"
+  | "approvals.inbox.resolveQuestionFor"
+  | "approvals.inbox.answerFor"
+  | "approvals.inbox.answerPlaceholder"
   | "approvals.inbox.rollbackUnavailable"
   | "approvals.inbox.checkpoint"
   | "approvals.inbox.confirmTitle"
@@ -38,6 +42,7 @@ export type TranslationKey =
   | "approvals.inbox.groupThread"
   | "approvals.inbox.status.approved"
   | "approvals.inbox.status.denied"
+  | "approvals.inbox.status.openQuestionResolved"
   | "approvals.inbox.status.batchApproved"
   | "approvals.inbox.status.batchPartialFailed"
   | "approvals.inbox.status.rollbackUnavailable"
@@ -200,6 +205,10 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "approvals.inbox.rejectFor": "Reject {summary}",
     "approvals.inbox.rejectRollback": "Reject and roll back",
     "approvals.inbox.rejectRollbackFor": "Reject and roll back {summary}",
+    "approvals.inbox.resolveQuestion": "Resolve",
+    "approvals.inbox.resolveQuestionFor": "Resolve {summary}",
+    "approvals.inbox.answerFor": "Answer {summary}",
+    "approvals.inbox.answerPlaceholder": "Answer or note the decision",
     "approvals.inbox.rollbackUnavailable": "Rollback unavailable",
     "approvals.inbox.checkpoint": "Checkpoint",
     "approvals.inbox.confirmTitle": "Reject and roll back",
@@ -215,6 +224,7 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "approvals.inbox.groupThread": "Thread",
     "approvals.inbox.status.approved": "Approved {approvalId}.",
     "approvals.inbox.status.denied": "Rejected {approvalId}.",
+    "approvals.inbox.status.openQuestionResolved": "Resolved {approvalId}.",
     "approvals.inbox.status.batchApproved": "Approved {count} selected {approvalNoun}.",
     "approvals.inbox.status.batchPartialFailed": "Approved {completed} of {total} selected approvals. Stopped at {approvalId}: {error}",
     "approvals.inbox.status.rollbackUnavailable": "Rollback unavailable: {approvalId} has no checkpoint.",
@@ -368,6 +378,10 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "approvals.inbox.rejectFor": "拒绝 {summary}",
     "approvals.inbox.rejectRollback": "拒绝并回滚",
     "approvals.inbox.rejectRollbackFor": "拒绝并回滚 {summary}",
+    "approvals.inbox.resolveQuestion": "解决",
+    "approvals.inbox.resolveQuestionFor": "解决 {summary}",
+    "approvals.inbox.answerFor": "回答 {summary}",
+    "approvals.inbox.answerPlaceholder": "填写答案或决策备注",
     "approvals.inbox.rollbackUnavailable": "无法回滚",
     "approvals.inbox.checkpoint": "检查点",
     "approvals.inbox.confirmTitle": "拒绝并回滚",
@@ -383,6 +397,7 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "approvals.inbox.groupThread": "线程",
     "approvals.inbox.status.approved": "已批准 {approvalId}。",
     "approvals.inbox.status.denied": "已拒绝 {approvalId}。",
+    "approvals.inbox.status.openQuestionResolved": "已解决 {approvalId}。",
     "approvals.inbox.status.batchApproved": "已批准 {count} 个所选审批。",
     "approvals.inbox.status.batchPartialFailed": "已批准 {completed}/{total} 个所选审批。停在 {approvalId}：{error}",
     "approvals.inbox.status.rollbackUnavailable": "无法回滚：{approvalId} 没有检查点。",

@@ -410,6 +410,7 @@ async fn initialize_boundary_advertises_v2_protocol_surface() {
             BoundaryCapability::AgentTree,
             BoundaryCapability::ApprovalsList,
             BoundaryCapability::CheckpointRestore,
+            BoundaryCapability::OpenQuestionResolve,
             BoundaryCapability::TurnStart,
             BoundaryCapability::TurnInterrupt,
             BoundaryCapability::ApprovalDecision,

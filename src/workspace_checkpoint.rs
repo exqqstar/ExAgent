@@ -59,6 +59,26 @@ pub fn create_checkpoint(workspace_root: impl AsRef<Path>) -> Result<Option<Stri
     Ok(Some(checkpoint_id))
 }
 
+pub fn workspace_content_hash(workspace_root: impl AsRef<Path>) -> Result<Option<String>> {
+    let workspace_root = workspace_root
+        .as_ref()
+        .canonicalize()
+        .with_context(|| "canonicalize workspace root for content hash")?;
+    if !is_inside_git_work_tree(&workspace_root)? {
+        return Ok(None);
+    }
+
+    let temp_index = TempIndex::new();
+    if git_stdout_optional(&workspace_root, ["rev-parse", "--verify", "HEAD"])?.is_some() {
+        git_stdout_with_temp_index(&workspace_root, &temp_index.path, ["read-tree", "HEAD"])?;
+    } else {
+        git_stdout_with_temp_index(&workspace_root, &temp_index.path, ["read-tree", "--empty"])?;
+    }
+    git_stdout_with_temp_index(&workspace_root, &temp_index.path, ["add", "-A", "--", "."])?;
+    let tree = git_stdout_with_temp_index(&workspace_root, &temp_index.path, ["write-tree"])?;
+    Ok(Some(format!("tree:{}", tree.trim())))
+}
+
 pub fn prune_checkpoints(
     workspace_root: impl AsRef<Path>,
     retain_count: usize,

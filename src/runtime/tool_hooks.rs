@@ -3,12 +3,17 @@ use async_trait::async_trait;
 
 use crate::session::ApprovalId;
 use crate::tools::{ToolCapabilities, ToolOutcome, ToolRuntimeEffect};
+use crate::types::ThreadId;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ToolInvocationContext {
     pub(crate) invocation_id: String,
     pub(crate) tool_call_id: String,
     pub(crate) tool_name: String,
+    #[allow(dead_code)]
+    pub(crate) arguments: serde_json::Value,
+    pub(crate) thread_id: Option<ThreadId>,
+    pub(crate) workspace_root: std::path::PathBuf,
     pub(crate) capabilities: ToolCapabilities,
 }
 

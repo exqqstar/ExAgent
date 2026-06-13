@@ -42,6 +42,9 @@ pub(in crate::app_server) fn latest_turn_state(events: &[RuntimeEvent]) -> Optio
             | RuntimeEventKind::SubagentSpawned { .. }
             | RuntimeEventKind::SubagentClosed { .. }
             | RuntimeEventKind::InterAgentMessageSent { .. }
+            | RuntimeEventKind::ReviewSubmitted { .. }
+            | RuntimeEventKind::OpenQuestionRecorded { .. }
+            | RuntimeEventKind::OpenQuestionResolved { .. }
             | RuntimeEventKind::TokenCount { .. } => Some(TurnStatus::InProgress),
             RuntimeEventKind::ThreadGoalUpdated { .. }
             | RuntimeEventKind::ThreadGoalCleared { .. }
@@ -164,6 +167,9 @@ fn build_turn_views(events: Vec<RuntimeEvent>) -> Vec<TurnView> {
             | RuntimeEventKind::SubagentSpawned { .. }
             | RuntimeEventKind::SubagentClosed { .. }
             | RuntimeEventKind::InterAgentMessageSent { .. }
+            | RuntimeEventKind::ReviewSubmitted { .. }
+            | RuntimeEventKind::OpenQuestionRecorded { .. }
+            | RuntimeEventKind::OpenQuestionResolved { .. }
             | RuntimeEventKind::TokenCount { .. } => {
                 if let Some(turn_id) = view_turn_id(&event, current_turn_id.as_ref()) {
                     let index = ensure_turn_view(&mut turns, &turn_id);
@@ -576,7 +582,10 @@ fn thread_item_from_event(event: &RuntimeEvent) -> Option<ThreadItem> {
         | RuntimeEventKind::ThreadGoalContinuationStarted { .. }
         | RuntimeEventKind::ThreadGoalContinuationSuppressed { .. }
         | RuntimeEventKind::ThreadGoalTurnStarted { .. }
-        | RuntimeEventKind::ThreadGoalToolCompleted { .. } => None,
+        | RuntimeEventKind::ThreadGoalToolCompleted { .. }
+        | RuntimeEventKind::ReviewSubmitted { .. }
+        | RuntimeEventKind::OpenQuestionRecorded { .. }
+        | RuntimeEventKind::OpenQuestionResolved { .. } => None,
     }
 }
 
@@ -960,6 +969,8 @@ mod tests {
                 "apps/desktop/src/components/TranscriptList.tsx".to_string(),
             ],
             pending_approvals_count: 2,
+            open_questions: vec![],
+            review_summary: None,
             summary: "The goal completed after runtime and desktop updates.".to_string(),
         };
         let events = vec![
@@ -1004,6 +1015,8 @@ mod tests {
             time_used_seconds: 90,
             changed_files: vec!["src/runtime/goal/runtime.rs".to_string()],
             pending_approvals_count: 0,
+            open_questions: vec![],
+            review_summary: None,
             summary: "The goal completed after an external status update.".to_string(),
         };
         let events = vec![RuntimeEvent {

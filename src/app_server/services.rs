@@ -27,6 +27,7 @@ use crate::runtime::subagent::{
 use crate::runtime::thread_runtime::{AgentFactory, WorkspaceRuntimeOpGate};
 use crate::session::{ThreadSnapshot, ThreadSource};
 use crate::state::fork_history::{build_fork_history, ForkTurns};
+use crate::state::index_db::GoalAccountingMode;
 use crate::state::rollout::{rollout_paths, thread_meta_from_snapshot, RolloutItem, RolloutStore};
 use crate::state::spawn_edges::{SpawnEdgeStatus, ThreadSpawnEdge, ThreadSpawnEdgeStore};
 use crate::types::ThreadId;
@@ -78,6 +79,7 @@ impl AppServerServices {
             agent_factory,
             policy.clone(),
             model_resolver.clone(),
+            None,
         );
         Self {
             base_config,
@@ -122,6 +124,7 @@ impl AppServerServices {
             agent_factory,
             policy.clone(),
             model_resolver.clone(),
+            None,
         );
         Self {
             base_config,
@@ -167,6 +170,7 @@ impl AppServerServices {
             agent_factory,
             policy.clone(),
             model_resolver.clone(),
+            None,
         );
         Self {
             base_config,
@@ -198,6 +202,14 @@ impl AppServerServices {
         goal_store: crate::index_db::IndexDb,
     ) -> Self {
         self.goal_store = Some(goal_store);
+        let agent_factory = self.runtime_agent_factory();
+        self.subagent_lifecycle = new_subagent_lifecycle(
+            self.runtime_loader.clone(),
+            agent_factory,
+            self.policy.clone(),
+            self.model_resolver.clone(),
+            self.goal_store.clone(),
+        );
         self
     }
 }
@@ -207,6 +219,7 @@ fn new_subagent_lifecycle(
     agent_factory: AgentFactory,
     policy: Arc<PolicyManager>,
     model_resolver: Arc<dyn ModelResolver>,
+    goal_store: Option<crate::index_db::IndexDb>,
 ) -> Arc<dyn SubagentLifecycle> {
     let lifecycle: Arc<AppServerSubagentLifecycle> =
         Arc::<AppServerSubagentLifecycle>::new_cyclic(move |self_ref| {
@@ -216,6 +229,7 @@ fn new_subagent_lifecycle(
                 agent_factory: agent_factory.clone(),
                 policy: policy.clone(),
                 model_resolver: model_resolver.clone(),
+                goal_store: goal_store.clone(),
                 self_lifecycle,
             }
         });
@@ -272,6 +286,12 @@ impl RuntimeSpawner for AppServerServices {
         self.goal_store.clone()
     }
 
+    fn forge_review_store(&self) -> Option<crate::runtime::forge::review::ReviewStore> {
+        self.goal_store
+            .clone()
+            .map(crate::runtime::forge::review::ReviewStore::new)
+    }
+
     fn subagent_control_for_cold_load(
         &self,
         workspace_root: &Path,
@@ -290,6 +310,7 @@ struct AppServerSubagentLifecycle {
     agent_factory: AgentFactory,
     policy: Arc<PolicyManager>,
     model_resolver: Arc<dyn ModelResolver>,
+    goal_store: Option<crate::index_db::IndexDb>,
     self_lifecycle: Weak<dyn SubagentLifecycle>,
 }
 
@@ -304,6 +325,16 @@ impl RuntimeSpawner for AppServerSubagentLifecycle {
 
     fn workspace_runtime_op_gate(&self) -> Option<Arc<dyn WorkspaceRuntimeOpGate>> {
         Some(Arc::new(self.runtime_loader.clone()))
+    }
+
+    fn goal_store(&self) -> Option<crate::index_db::IndexDb> {
+        self.goal_store.clone()
+    }
+
+    fn forge_review_store(&self) -> Option<crate::runtime::forge::review::ReviewStore> {
+        self.goal_store
+            .clone()
+            .map(crate::runtime::forge::review::ReviewStore::new)
     }
 
     fn subagent_control_for_cold_load(
@@ -391,6 +422,18 @@ impl SubagentLifecycle for AppServerSubagentLifecycle {
     async fn close_agents(&self, request: CloseAgentsRequest) -> Result<CloseAgentResponse> {
         let edge_store = ThreadSpawnEdgeStore::for_workspace(&request.config.workspace_root);
         for target in &request.targets {
+            let token_total = child_token_total_before_close(
+                &self.runtime_loader,
+                &request.config.workspace_root,
+                &target.thread_id,
+            )?;
+            account_child_token_rollup(
+                self.goal_store.as_ref(),
+                &edge_store,
+                &target.thread_id,
+                token_total,
+            )
+            .await?;
             self.runtime_loader
                 .shutdown_and_remove(&target.thread_id)
                 .await?;
@@ -464,6 +507,58 @@ impl SubagentLifecycle for AppServerSubagentLifecycle {
     }
 }
 
+fn child_token_total_before_close(
+    runtime_loader: &RuntimeLoader,
+    workspace_root: &Path,
+    child_thread_id: &ThreadId,
+) -> Result<i64> {
+    if let Some(runtime) = runtime_loader.runtime_for(child_thread_id) {
+        return Ok(runtime
+            .live_view()
+            .snapshot
+            .token_info
+            .map(|info| info.total_token_usage.total_tokens)
+            .unwrap_or_default());
+    }
+    Ok(
+        read_thread_state_from_storage(workspace_root, child_thread_id)?
+            .and_then(|stored| stored.snapshot.token_info)
+            .map(|info| info.total_token_usage.total_tokens)
+            .unwrap_or_default(),
+    )
+}
+
+async fn account_child_token_rollup(
+    goal_store: Option<&crate::index_db::IndexDb>,
+    edge_store: &ThreadSpawnEdgeStore,
+    child_thread_id: &ThreadId,
+    token_total: i64,
+) -> Result<()> {
+    let Some(goal_store) = goal_store else {
+        return Ok(());
+    };
+    if token_total <= 0 {
+        return Ok(());
+    }
+    let Some(edge) = edge_store.mark_token_rollup_blocking(child_thread_id, token_total)? else {
+        return Ok(());
+    };
+    if let Err(err) = goal_store
+        .account_thread_goal_usage(
+            &edge.parent_thread_id,
+            0,
+            token_total,
+            GoalAccountingMode::ActiveOnly,
+            None,
+        )
+        .await
+    {
+        let _ = edge_store.clear_token_rollup_blocking(child_thread_id, token_total);
+        return Err(err.into());
+    }
+    Ok(())
+}
+
 impl AppServerSubagentLifecycle {
     async fn config_for_stored_thread(
         &self,
@@ -523,4 +618,104 @@ fn runtime_agent_factory_from_parts(
             policy.clone(),
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index_db::{IndexDb, ProjectUpsert, ThreadGoalStatusRecord};
+
+    async fn db_with_thread(
+        thread_id: &ThreadId,
+    ) -> (tempfile::TempDir, IndexDb, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let db = IndexDb::open(dir.path().join("index.sqlite"))
+            .await
+            .unwrap();
+        let project = db
+            .upsert_project(ProjectUpsert {
+                name: "Rollup".into(),
+                path: workspace.clone(),
+            })
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+INSERT INTO threads (
+  id, project_id, rollout_path, fallback_title, preview, title_source,
+  pinned, status, created_at, updated_at
+)
+VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
+            "#,
+        )
+        .bind(thread_id.as_str())
+        .bind(project.id)
+        .bind(workspace.join("rollout.jsonl").display().to_string())
+        .bind("thread title")
+        .bind("thread preview")
+        .execute(db.pool())
+        .await
+        .unwrap();
+        (dir, db, workspace)
+    }
+
+    #[tokio::test]
+    async fn child_token_rollup_counts_once_and_can_budget_limit_parent_goal() {
+        let parent_thread_id = ThreadId::new("thread_rollup_parent");
+        let (_dir, db, workspace) = db_with_thread(&parent_thread_id).await;
+        let goal = db
+            .insert_thread_goal(&parent_thread_id, "count child tokens", Some(100))
+            .await
+            .unwrap()
+            .unwrap();
+        let edge_store = ThreadSpawnEdgeStore::for_workspace(&workspace);
+        let first_child = ThreadId::new("thread_rollup_child_1");
+        edge_store
+            .upsert_edge_blocking(ThreadSpawnEdge::open(
+                parent_thread_id.clone(),
+                first_child.clone(),
+                parent_thread_id.clone(),
+                "/root/reviewer",
+            ))
+            .unwrap();
+
+        account_child_token_rollup(Some(&db), &edge_store, &first_child, 60)
+            .await
+            .unwrap();
+        account_child_token_rollup(Some(&db), &edge_store, &first_child, 60)
+            .await
+            .unwrap();
+
+        let after_first = db
+            .get_thread_goal(&parent_thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_first.goal_id, goal.goal_id);
+        assert_eq!(after_first.tokens_used, 60);
+        assert_eq!(after_first.status, ThreadGoalStatusRecord::Active);
+
+        let second_child = ThreadId::new("thread_rollup_child_2");
+        edge_store
+            .upsert_edge_blocking(ThreadSpawnEdge::open(
+                parent_thread_id.clone(),
+                second_child.clone(),
+                parent_thread_id.clone(),
+                "/root/reviewer-2",
+            ))
+            .unwrap();
+        account_child_token_rollup(Some(&db), &edge_store, &second_child, 50)
+            .await
+            .unwrap();
+
+        let after_second = db
+            .get_thread_goal(&parent_thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_second.tokens_used, 110);
+        assert_eq!(after_second.status, ThreadGoalStatusRecord::BudgetLimited);
+    }
 }

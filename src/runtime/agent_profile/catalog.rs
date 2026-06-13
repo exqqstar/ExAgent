@@ -48,7 +48,7 @@ and the recommended next step."
                     .to_string(),
             default_fork_turns: ForkTurns::None,
             default_thinking_mode: Some(ThinkingMode::Low),
-            tool_policy: read_only_policy(),
+            tool_policy: read_only_policy(AgentType::Explorer),
         },
         AgentType::Planner => AgentProfile {
             id: AgentType::Planner,
@@ -73,7 +73,7 @@ by a worker without requiring new design decisions."
                     .to_string(),
             default_fork_turns: ForkTurns::None,
             default_thinking_mode: Some(ThinkingMode::Medium),
-            tool_policy: read_only_policy(),
+            tool_policy: read_only_policy(AgentType::Planner),
         },
         AgentType::Reviewer => AgentProfile {
             id: AgentType::Reviewer,
@@ -94,9 +94,9 @@ unless they hide a real behavior or maintenance risk."
 file reference, reason, and suggested fix direction. End with gate: pass,\n\
 pass_with_concerns, or fail."
                     .to_string(),
-            default_fork_turns: ForkTurns::All,
+            default_fork_turns: ForkTurns::None,
             default_thinking_mode: Some(ThinkingMode::High),
-            tool_policy: read_only_policy(),
+            tool_policy: read_only_policy(AgentType::Reviewer),
         },
         AgentType::Worker => AgentProfile {
             id: AgentType::Worker,
@@ -160,6 +160,6 @@ fn tool_policy_summary(policy: &AgentToolPolicy) -> String {
     )
 }
 
-fn read_only_policy() -> AgentToolPolicy {
-    AgentToolPolicy::read_only_basic_collaboration()
+fn read_only_policy(agent_type: AgentType) -> AgentToolPolicy {
+    AgentToolPolicy::read_only_basic_collaboration().for_agent_type(agent_type)
 }

@@ -12,6 +12,8 @@ use crate::mcp::manager::McpRuntimeManager;
 use crate::policy::PolicyManager;
 use crate::registry::ToolRegistry;
 use crate::runtime::agent_profile::AgentToolPolicy;
+use crate::runtime::forge::gate::ForgeGateHooks;
+use crate::runtime::forge::review::ReviewStore;
 use crate::runtime::goal::GoalToolApi;
 use crate::runtime::subagent::AgentControl;
 use crate::runtime::thread_session::ThreadInbox;
@@ -31,6 +33,7 @@ pub struct Agent {
     tool_hooks: Arc<dyn ToolHooks>,
     subagent_control: Option<Arc<AgentControl>>,
     goal_api: Option<Arc<GoalToolApi>>,
+    forge_review_store: Option<ReviewStore>,
 }
 
 impl Agent {
@@ -108,6 +111,7 @@ impl Agent {
             tool_hooks: Arc::new(NoopToolHooks),
             subagent_control: None,
             goal_api: None,
+            forge_review_store: None,
         }
     }
 
@@ -121,6 +125,11 @@ impl Agent {
 
     pub(crate) fn with_goal_api(mut self, goal_api: Option<Arc<GoalToolApi>>) -> Self {
         self.goal_api = goal_api;
+        self
+    }
+
+    pub(crate) fn with_forge_review_store(mut self, store: Option<ReviewStore>) -> Self {
+        self.forge_review_store = store;
         self
     }
 
@@ -164,6 +173,7 @@ impl Agent {
         let mut turn_config = self.config.clone();
         turn_config.workspace_root = workspace_root;
         turn_config.cwd = cwd.clone();
+        let forge_gate_enabled = turn_config.forge_review_gate_enabled;
         // This turn_config is local to Agent::tool_runtime after applying
         // workspace_root/cwd. It is separate from the LLM turn_config built in
         // run_session_turn for model/thinking/profile defaults.
@@ -173,6 +183,7 @@ impl Agent {
             mcp_runtime: self.mcp_runtime.clone(),
             subagent_control: self.subagent_control.clone(),
             goal_api: self.goal_api.clone(),
+            forge_review_store: self.forge_review_store.clone(),
             agent_tool_policy: agent_tool_policy.clone(),
         })
         .await?;
@@ -188,6 +199,16 @@ impl Agent {
             turn_id,
         )
         .with_tool_hooks(self.tool_hooks.clone());
+        if forge_gate_enabled {
+            if let Some(review_store) = self.forge_review_store.clone() {
+                runtime = runtime.with_tool_hooks(Arc::new(ForgeGateHooks::new(
+                    review_store.clone(),
+                    crate::runtime::forge::open_questions::OpenQuestionStore::new(
+                        review_store.db(),
+                    ),
+                )));
+            }
+        }
         if let Some(inbox) = inbox {
             runtime = runtime.with_inbox(inbox);
         }
@@ -330,6 +351,7 @@ mod tests {
             tool_hooks: Arc::new(NoopToolHooks),
             subagent_control: None,
             goal_api: None,
+            forge_review_store: None,
         }
     }
 

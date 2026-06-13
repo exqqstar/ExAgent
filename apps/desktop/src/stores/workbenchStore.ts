@@ -124,6 +124,7 @@ type WorkbenchState = WorkbenchSnapshot & {
   clearApprovalSelection: () => void;
   approveInboxApproval: (item: PendingApprovalItem) => Promise<void>;
   rejectInboxApproval: (item: PendingApprovalItem) => Promise<void>;
+  resolveOpenQuestion: (item: PendingApprovalItem, answer: string) => Promise<void>;
   approveSelectedApprovals: () => Promise<void>;
   rejectAndRollbackApproval: (item: PendingApprovalItem) => Promise<void>;
   submitApproval: (message: TranscriptMessage, decision: "approved" | "denied") => Promise<void>;
@@ -1008,11 +1009,21 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   },
 
   async approveInboxApproval(item: PendingApprovalItem) {
+    if (item.kind === "open_question") {
+      return;
+    }
     await submitInboxApprovalDecision(get, set, item, "approved", "desktop approved");
   },
 
   async rejectInboxApproval(item: PendingApprovalItem) {
+    if (item.kind === "open_question") {
+      return;
+    }
     await submitInboxApprovalDecision(get, set, item, "denied", "desktop denied");
+  },
+
+  async resolveOpenQuestion(item: PendingApprovalItem, answer: string) {
+    await submitInboxOpenQuestionResolution(get, set, item, answer);
   },
 
   async approveSelectedApprovals() {
@@ -1021,7 +1032,9 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       return;
     }
     const selectedIds = new Set(get().selectedApprovalIds);
-    const selected = get().pendingApprovals.filter((item) => selectedIds.has(item.approval_id));
+    const selected = get().pendingApprovals.filter(
+      (item) => selectedIds.has(item.approval_id) && item.kind === "command"
+    );
     if (selected.length === 0) {
       return;
     }
@@ -3346,6 +3359,12 @@ function eventDetail(event: BackendRuntimeEvent) {
       return event.kind.questions.map((question) => question.question).join(" ");
     case "user_input_resolved":
       return event.kind.dismissed ? "dismissed" : "answered";
+    case "review_submitted":
+      return event.kind.findings ?? event.kind.verdict;
+    case "open_question_recorded":
+      return event.kind.question;
+    case "open_question_resolved":
+      return event.kind.answer ?? "resolved";
     case "compaction_written":
       return event.kind.summary.summary;
     case "runtime_error":
@@ -3471,6 +3490,8 @@ function shouldRefreshApprovalsAfterEvent(event: BackendRuntimeEvent) {
     case "user_input_requested":
     case "user_input_resolved":
     case "tool_invocation_waiting_user_input":
+    case "open_question_recorded":
+    case "open_question_resolved":
       return true;
     default:
       return false;
@@ -3534,6 +3555,45 @@ async function submitInboxApprovalDecision(
       approvalsStatus: "ready",
       approvalsError: null,
       approvalActionStatus: { type: "approval_decision", approval_id: item.approval_id, decision }
+    });
+    await refreshApprovalsForContext(get, set, context);
+  } catch (error) {
+    if (!isActiveApprovalsRefreshContext(get, context)) {
+      return;
+    }
+    const message = errorMessage(error);
+    set({ approvalsStatus: "error", approvalsError: message, approvalActionStatus: null });
+  }
+}
+
+async function submitInboxOpenQuestionResolution(
+  get: () => WorkbenchState,
+  set: (partial: Partial<WorkbenchState>) => void,
+  item: PendingApprovalItem,
+  answer: string
+) {
+  const context = currentApprovalsRefreshContext(get);
+  if (!context) {
+    return;
+  }
+
+  set({ approvalsStatus: "submitting", approvalsError: null, approvalActionStatus: null });
+  try {
+    await exagentClient.resolveOpenQuestion(
+      context.projectId,
+      item.thread_id,
+      item.approval_id,
+      answer.trim() ? answer.trim() : null
+    );
+    if (!isActiveApprovalsRefreshContext(get, context)) {
+      return;
+    }
+    set({
+      pendingApprovals: get().pendingApprovals.filter((pending) => pending.approval_id !== item.approval_id),
+      selectedApprovalIds: removeApprovalId(get().selectedApprovalIds, item.approval_id),
+      approvalsStatus: "ready",
+      approvalsError: null,
+      approvalActionStatus: { type: "open_question_resolved", approval_id: item.approval_id }
     });
     await refreshApprovalsForContext(get, set, context);
   } catch (error) {

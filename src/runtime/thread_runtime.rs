@@ -10,6 +10,7 @@ use crate::config::{AgentConfig, ThinkingMode};
 use crate::events::RuntimeEvent;
 use crate::policy::PolicyManager;
 use crate::resolved::ResolvedModelConfig;
+use crate::runtime::forge::review::ReviewStore;
 use crate::runtime::goal::runtime::{GoalRuntime, GoalRuntimeEffect, GoalRuntimeEvent};
 use crate::runtime::subagent::{AgentControl, AgentTurnTerminalStatus, InterAgentCommunication};
 use crate::runtime::thread_session::{
@@ -131,6 +132,7 @@ pub struct ThreadRuntimeOptions {
     policy: Arc<PolicyManager>,
     subagent_control: Option<Arc<AgentControl>>,
     goal_runtime: Option<Arc<GoalRuntime>>,
+    forge_review_store: Option<ReviewStore>,
     workspace_runtime_op_gate: Option<Arc<dyn WorkspaceRuntimeOpGate>>,
 }
 
@@ -143,6 +145,7 @@ impl ThreadRuntimeOptions {
             policy: Arc::new(PolicyManager::default()),
             subagent_control: None,
             goal_runtime: None,
+            forge_review_store: None,
             workspace_runtime_op_gate: None,
         }
     }
@@ -159,6 +162,11 @@ impl ThreadRuntimeOptions {
 
     pub(crate) fn with_goal_runtime(mut self, goal_runtime: Arc<GoalRuntime>) -> Self {
         self.goal_runtime = Some(goal_runtime);
+        self
+    }
+
+    pub(crate) fn with_forge_review_store(mut self, store: ReviewStore) -> Self {
+        self.forge_review_store = Some(store);
         self
     }
 
@@ -196,7 +204,8 @@ impl ThreadRuntime {
                 .with_status_tx(status_tx)
                 .with_policy(options.policy)
                 .with_subagent_control(options.subagent_control)
-                .with_goal_runtime(options.goal_runtime),
+                .with_goal_runtime(options.goal_runtime)
+                .with_forge_review_store(options.forge_review_store),
         )?;
         let next_turn_index = session.next_turn_index_seed();
         let live_state = session.live_state_handle();

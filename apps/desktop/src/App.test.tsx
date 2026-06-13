@@ -505,6 +505,47 @@ describe("AppShell", () => {
     });
   });
 
+  it("resolves open questions from the approval inbox without approval decision", async () => {
+    const user = userEvent.setup();
+    seedApprovalInbox([
+      pendingApproval({
+        thread_id: "thread-question",
+        approval_id: "oq_1",
+        kind: "open_question",
+        summary: "Which cohort ships first?",
+        detail: "Blocks: release targeting",
+        goal_id: "goal-alpha",
+        checkpoint_id: null,
+      }),
+    ]);
+    const resolveOpenQuestion = vi
+      .spyOn(exagentClient, "resolveOpenQuestion")
+      .mockResolvedValue({} as any);
+    const submitApprovalDecision = vi
+      .spyOn(exagentClient, "submitApprovalDecision")
+      .mockResolvedValue({} as any);
+    vi.spyOn(exagentClient as any, "listApprovals").mockResolvedValue({
+      approvals: [],
+    });
+
+    render(<App />);
+    await user.click(
+      screen.getByRole("button", {
+        name: "Approval inbox, 1 pending approval",
+      }),
+    );
+    await user.type(screen.getByRole("textbox", { name: "Answer Which cohort ships first?" }), "Beta users");
+    await user.click(screen.getByRole("button", { name: "Resolve Which cohort ships first?" }));
+
+    expect(resolveOpenQuestion).toHaveBeenCalledWith(
+      "project-exagent",
+      "thread-question",
+      "oq_1",
+      "Beta users",
+    );
+    expect(submitApprovalDecision).not.toHaveBeenCalled();
+  });
+
   it("approves selected inbox items sequentially and reports partial failure", async () => {
     const firstDecision = createDeferred<unknown>();
     const user = userEvent.setup();
@@ -738,6 +779,51 @@ describe("AppShell", () => {
             tool_name: "run_command",
             reason: "Needs permission",
             checkpoint_id: "checkpoint-event",
+          },
+        });
+        vi.advanceTimersByTime(300);
+        await Promise.resolve();
+      });
+
+      expect(
+        screen.getByRole("button", {
+          name: "Approval inbox, 1 pending approval",
+        }),
+      ).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows an inbox badge when open questions are refreshed from runtime events", async () => {
+    vi.useFakeTimers();
+    try {
+      seedApprovalInbox([]);
+      vi.spyOn(exagentClient as any, "listApprovals").mockResolvedValue({
+        approvals: [
+          pendingApproval({
+            thread_id: "thread-event",
+            approval_id: "oq-event",
+            kind: "open_question",
+            summary: "Which cohort ships first?",
+            detail: "Blocks: Release targeting",
+          }),
+        ],
+      });
+
+      render(<App />);
+
+      await act(async () => {
+        useWorkbenchStore.getState().applyRuntimeEvent({
+          event_id: "evt-open-question-recorded",
+          thread_id: "session-desktop",
+          turn_id: "turn-event",
+          kind: {
+            type: "open_question_recorded",
+            question_id: "oq-event",
+            goal_id: "goal-event",
+            question: "Which cohort ships first?",
+            blocks_what: "Release targeting",
           },
         });
         vi.advanceTimersByTime(300);

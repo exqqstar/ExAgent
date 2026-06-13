@@ -10,6 +10,7 @@ fn agent_config_defaults_are_safe_for_phase1() {
     assert!(cfg.skills_enabled);
     assert_eq!(cfg.skills_metadata_max_chars, 8 * 1024);
     assert!(cfg.skills_user_roots.is_empty());
+    assert!(!cfg.forge_review_gate_enabled);
 }
 
 #[test]

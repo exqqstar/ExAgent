@@ -7,13 +7,14 @@ use tokio::sync::broadcast;
 use crate::app_server::protocol::{
     ApprovalDecisionParams, ApprovalDecisionResponse, ApprovalsListParams, ApprovalsListResponse,
     BoundaryOp, BoundaryOpResponse, CheckpointRestoreParams, CheckpointRestoreResponse,
-    EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, SubmitUserInputParams,
-    SubmitUserInputResponse, ThreadCompactParams, ThreadCompactResponse, ThreadForkParams,
-    ThreadForkResponse, ThreadGoal, ThreadGoalClearParams, ThreadGoalClearResponse,
-    ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse,
-    ThreadGoalStatus, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, TurnInterruptParams,
-    TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, OpenQuestionResolveParams,
+    OpenQuestionResolveResponse, SubmitUserInputParams, SubmitUserInputResponse,
+    ThreadCompactParams, ThreadCompactResponse, ThreadForkParams, ThreadForkResponse, ThreadGoal,
+    ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse,
+    ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
+    ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
+    TurnStartResponse,
 };
 use crate::app_server::AppServerService;
 use crate::events::RuntimeEvent;
@@ -270,6 +271,25 @@ impl DesktopFacade {
         {
             BoundaryOpResponse::CheckpointRestored(response) => Ok(response),
             _ => Err(anyhow!("checkpoint restore returned unexpected response")),
+        }
+    }
+
+    pub async fn open_question_resolve(
+        &self,
+        project_id: &str,
+        mut params: OpenQuestionResolveParams,
+    ) -> Result<OpenQuestionResolveResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        params.workspace_root = Some(project.path.display().to_string());
+        match self
+            .service
+            .submit_boundary_op(BoundaryOp::OpenQuestionResolve(params))
+            .await?
+        {
+            BoundaryOpResponse::OpenQuestionResolved(response) => Ok(response),
+            _ => Err(anyhow!(
+                "open question resolve returned unexpected response"
+            )),
         }
     }
 

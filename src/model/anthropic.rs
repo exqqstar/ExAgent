@@ -432,6 +432,11 @@ fn anthropic_tool_result_content(message: &ConversationMessage) -> Vec<Anthropic
             }
         }
     }));
+    if content.is_empty() {
+        content.push(AnthropicRequestContent::Text {
+            text: "No content returned.".to_string(),
+        });
+    }
     content
 }
 
@@ -603,6 +608,31 @@ mod tests {
                             "url": "https://example.com/tool.png"
                         }
                     }
+                ]
+            }])
+        );
+    }
+
+    #[test]
+    fn request_serializes_empty_tool_result_as_text_block() {
+        let message = ConversationMessage::tool("toolu_empty", "");
+
+        let request = build_anthropic_request(
+            "claude-sonnet-4-5".to_string(),
+            &[message],
+            &[],
+            &LlmRequestOptions::default(),
+        )
+        .unwrap();
+        let value = serde_json::to_value(request).unwrap();
+
+        assert_eq!(
+            value["messages"][0]["content"],
+            json!([{
+                "type": "tool_result",
+                "tool_use_id": "toolu_empty",
+                "content": [
+                    { "type": "text", "text": "No content returned." }
                 ]
             }])
         );

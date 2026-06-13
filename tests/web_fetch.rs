@@ -168,6 +168,32 @@ async fn web_fetch_reports_redirect_final_url() {
 }
 
 #[tokio::test]
+async fn web_fetch_rejects_cross_origin_redirects() {
+    let (_dir, ctx) = tool_context(PolicyMode::Off);
+    let final_url = spawn_server(Router::new().route(
+        "/metadata",
+        get(|| async { ([(CONTENT_TYPE, "text/plain")], "internal metadata") }),
+    ))
+    .await;
+    let redirect_target = final_url.clone();
+    let redirect_url = spawn_server(Router::new().route(
+        "/redirect",
+        get(move || {
+            let redirect_target = redirect_target.clone();
+            async move { Redirect::temporary(&redirect_target) }
+        }),
+    ))
+    .await;
+
+    let result =
+        execute_web_fetch(&ctx, json!({ "url": format!("{redirect_url}/redirect") })).await;
+
+    assert_eq!(result.status, ToolStatus::Error);
+    assert!(result.content.contains("cross-origin redirect"));
+    assert!(result.content.contains(&final_url));
+}
+
+#[tokio::test]
 async fn web_fetch_caps_large_response_bodies_while_streaming() {
     let (_dir, ctx) = tool_context(PolicyMode::Off);
     let body = Arc::new("a".repeat(2 * 1024 * 1024 + 512));

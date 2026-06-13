@@ -24,10 +24,12 @@ const OUTPUT_TRUNCATED_MARKER: &str = "[output truncated]";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchFilesArgs {
+    /// Regex query to match against UTF-8 text lines; invalid regexes fall back to literal text.
     pub query: String,
     pub path: Option<String>,
     /// Glob filter on the displayed file path, e.g. "*.rs" or "src/**/*.ts".
     pub glob: Option<String>,
+    /// Run a case-insensitive search.
     pub case_insensitive: Option<bool>,
     pub max_results: Option<usize>,
 }
@@ -39,7 +41,7 @@ impl ToolHandler for SearchFilesTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec::function(
             "search_files",
-            "Search UTF-8 text files in the workspace or configured skill roots and return matching lines",
+            "Search UTF-8 text files in the workspace or configured skill roots using regex, gitignore-aware traversal, optional glob filtering, and case-insensitive matching",
             serde_json::to_value(schemars::schema_for!(SearchFilesArgs)).unwrap(),
         )
     }
@@ -107,7 +109,7 @@ impl Tool for SearchFilesTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search UTF-8 text files in the workspace or configured skill roots"
+        "Search UTF-8 text files in the workspace or configured skill roots using regex, gitignore-aware traversal, optional glob filtering, and case-insensitive matching"
     }
 
     fn input_schema(&self) -> Value {
@@ -442,5 +444,30 @@ fn truncate_line(line: &str) -> TruncatedLine {
             content,
             truncated: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::ToolSpecKind;
+
+    #[test]
+    fn tool_spec_advertises_regex_gitignore_and_case_insensitive_search() {
+        let spec = SearchFilesTool.spec();
+
+        assert!(spec.description.contains("regex"));
+        assert!(spec.description.contains("gitignore"));
+        assert!(spec.description.contains("case-insensitive"));
+
+        let ToolSpecKind::Function { input_schema } = spec.kind;
+        assert!(input_schema["properties"]["query"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("regex")));
+        assert!(
+            input_schema["properties"]["case_insensitive"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("case-insensitive"))
+        );
     }
 }

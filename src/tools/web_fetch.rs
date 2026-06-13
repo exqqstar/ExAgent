@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::error::Error;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
@@ -251,17 +252,14 @@ async fn fetch_url(
     ctx: &ToolContext,
 ) -> Result<WebFetchOutcome, String> {
     let started_at = Instant::now();
+    let initial_url = reqwest::Url::parse(url).map_err(|err| err.to_string())?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
-        .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+        .redirect(same_origin_redirect_policy(initial_url.clone()))
         .user_agent(USER_AGENT)
         .build()
         .map_err(|err| err.to_string())?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|err| err.to_string())?;
+    let response = client.get(url).send().await.map_err(format_reqwest_error)?;
     let final_url = response.url().to_string();
     let status = response.status();
     let content_type = response
@@ -300,6 +298,45 @@ async fn fetch_url(
         meta,
         effects: Vec::new(),
     })
+}
+
+fn same_origin_redirect_policy(initial_url: reqwest::Url) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() > MAX_REDIRECTS {
+            return attempt.error(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("too many redirects: exceeded {MAX_REDIRECTS}"),
+            ));
+        }
+        if !same_origin(&initial_url, attempt.url()) {
+            let redirect_url = attempt.url().to_string();
+            return attempt.error(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("cross-origin redirect blocked: {redirect_url}"),
+            ));
+        }
+        attempt.follow()
+    })
+}
+
+fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn format_reqwest_error(err: reqwest::Error) -> String {
+    let mut message = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        let cause_message = cause.to_string();
+        if !message.contains(&cause_message) {
+            message.push_str(": ");
+            message.push_str(&cause_message);
+        }
+        source = cause.source();
+    }
+    message
 }
 
 async fn read_capped_body(response: reqwest::Response) -> Result<(Vec<u8>, bool), String> {

@@ -1,6 +1,6 @@
 use sqlx::{Executor, SqlitePool};
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
     pool.execute("PRAGMA foreign_keys = ON").await?;
@@ -107,6 +107,22 @@ CREATE TABLE IF NOT EXISTS thread_goal_turns (
     )
     .await?;
     pool.execute(
+        r#"
+CREATE TABLE IF NOT EXISTS forge_review_tickets (
+  ticket_id TEXT PRIMARY KEY NOT NULL,
+  goal_id TEXT NOT NULL,
+  baseline_hash TEXT,
+  status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected')),
+  reviewed_hash TEXT,
+  findings TEXT,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  ticket_order INTEGER NOT NULL
+)
+        "#,
+    )
+    .await?;
+    pool.execute(
         "CREATE INDEX IF NOT EXISTS idx_threads_project_visible ON threads(project_id, archived_at, pinned, updated_at)",
     )
     .await?;
@@ -116,6 +132,10 @@ CREATE TABLE IF NOT EXISTS thread_goal_turns (
     .await?;
     pool.execute(
         "CREATE INDEX IF NOT EXISTS idx_thread_goal_turns_thread ON thread_goal_turns(thread_id, started_at_ms)",
+    )
+    .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_forge_review_tickets_goal_order ON forge_review_tickets(goal_id, ticket_order)",
     )
     .await?;
     pool.execute(&*format!("PRAGMA user_version = {SCHEMA_VERSION}"))
@@ -161,7 +181,7 @@ mod tests {
 
         migrate(&pool).await.unwrap();
 
-        for table in ["thread_goals", "thread_goal_turns"] {
+        for table in ["thread_goals", "thread_goal_turns", "forge_review_tickets"] {
             let exists: Option<(i64,)> =
                 sqlx::query_as("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
                     .bind(table)

@@ -9,7 +9,7 @@ use crate::tools::{
     ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolRuntimeEffect, ToolSpec,
 };
 use crate::types::{ToolResult, ToolStatus};
-use crate::workspace_checkpoint::create_checkpoint;
+use crate::workspace_checkpoint::{create_checkpoint, workspace_content_hash};
 
 #[derive(Clone)]
 pub(crate) struct SubmitReviewTool {
@@ -108,11 +108,14 @@ impl ToolHandler for SubmitReviewTool {
             }
         }
 
-        let reviewed_hash = match create_checkpoint(&ctx.config.workspace_root) {
+        let reviewed_hash = match workspace_content_hash(&ctx.config.workspace_root) {
+            Ok(hash) => hash,
+            Err(err) => return error(call.id, call.name, err.to_string()),
+        };
+        let checkpoint_id = match create_checkpoint(&ctx.config.workspace_root) {
             Ok(checkpoint_id) => checkpoint_id,
             Err(err) => return error(call.id, call.name, err.to_string()),
         };
-        let checkpoint_id = reviewed_hash.clone();
         let reject_category_event = category.map(ReviewRejectCategory::as_event_category);
         match self
             .store

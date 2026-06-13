@@ -50,6 +50,10 @@ impl ReviewStore {
         Self { db }
     }
 
+    pub(crate) fn db(&self) -> IndexDb {
+        self.db.clone()
+    }
+
     pub(crate) async fn mint_ticket(
         &self,
         goal_id: impl Into<String>,

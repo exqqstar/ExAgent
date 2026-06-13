@@ -1,7 +1,9 @@
 use std::path::Path;
 use std::process::Command;
 
-use exagent::workspace_checkpoint::{create_checkpoint, prune_checkpoints, restore_checkpoint};
+use exagent::workspace_checkpoint::{
+    create_checkpoint, prune_checkpoints, restore_checkpoint, workspace_content_hash,
+};
 use tempfile::tempdir;
 
 #[test]
@@ -82,6 +84,24 @@ fn checkpoint_captures_untracked_files() {
         ),
         "capture me\n"
     );
+}
+
+#[test]
+fn workspace_content_hash_is_stable_for_unchanged_tree() {
+    let repo = tempdir().unwrap();
+    init_repo(repo.path());
+    write(repo.path().join("tracked.txt"), "base\n");
+    git(repo.path(), ["add", "tracked.txt"]);
+    git(repo.path(), ["commit", "-m", "initial"]);
+    write(repo.path().join("untracked.txt"), "capture me\n");
+
+    let first = workspace_content_hash(repo.path()).unwrap().unwrap();
+    let second = workspace_content_hash(repo.path()).unwrap().unwrap();
+    assert_eq!(first, second);
+
+    write(repo.path().join("untracked.txt"), "changed\n");
+    let changed = workspace_content_hash(repo.path()).unwrap().unwrap();
+    assert_ne!(first, changed);
 }
 
 #[test]

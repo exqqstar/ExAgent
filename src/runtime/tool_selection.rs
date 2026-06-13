@@ -93,8 +93,10 @@ async fn assemble_tool_registry(input: &ToolSelectionInput<'_>) -> Result<ToolRe
         registry.register_handler(UpdateGoalTool::new(goal_api));
     }
 
-    if let Some(review_store) = input.forge_review_store.clone() {
-        registry.register_handler(SubmitReviewTool::new(review_store));
+    if input.config.forge_review_gate_enabled {
+        if let Some(review_store) = input.forge_review_store.clone() {
+            registry.register_handler(SubmitReviewTool::new(review_store));
+        }
     }
 
     if let Some(web_search) = &input.config.web_search {
@@ -406,6 +408,7 @@ mod tests {
             .unwrap();
         let mut config = AgentConfig::default();
         config.model.capabilities.supports_tools = true;
+        config.forge_review_gate_enabled = true;
         let mcp_runtime = Arc::new(McpRuntimeManager::new(
             config.mcp_servers.clone(),
             config.workspace_root.clone(),
@@ -424,6 +427,34 @@ mod tests {
         .expect("reviewer selection");
 
         assert!(visible_tool_names(&reviewer).contains(&"submit_review"));
+    }
+
+    #[tokio::test]
+    async fn build_selection_hides_submit_review_when_forge_gate_is_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::index_db::IndexDb::open(dir.path().join("index.sqlite"))
+            .await
+            .unwrap();
+        let mut config = AgentConfig::default();
+        config.model.capabilities.supports_tools = true;
+        let mcp_runtime = Arc::new(McpRuntimeManager::new(
+            config.mcp_servers.clone(),
+            config.workspace_root.clone(),
+        ));
+
+        let reviewer = build_tool_selection(ToolSelectionInput {
+            base_registry: registry(),
+            config: &config,
+            mcp_runtime,
+            subagent_control: None,
+            goal_api: None,
+            forge_review_store: Some(ReviewStore::new(db)),
+            agent_tool_policy: profile_for_type(Some(AgentType::Reviewer)).tool_policy,
+        })
+        .await
+        .expect("reviewer selection");
+
+        assert!(!visible_tool_names(&reviewer).contains(&"submit_review"));
     }
 
     #[tokio::test]

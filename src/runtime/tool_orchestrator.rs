@@ -68,6 +68,8 @@ impl ToolOrchestrator {
             tool_call_id: call.id.clone(),
             tool_name: call.name.clone(),
             arguments: call.arguments.clone(),
+            thread_id: ctx.thread_id.clone(),
+            workspace_root: ctx.config.workspace_root.clone(),
             capabilities: capabilities.clone(),
         };
 

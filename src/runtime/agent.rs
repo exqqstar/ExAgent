@@ -12,6 +12,7 @@ use crate::mcp::manager::McpRuntimeManager;
 use crate::policy::PolicyManager;
 use crate::registry::ToolRegistry;
 use crate::runtime::agent_profile::AgentToolPolicy;
+use crate::runtime::forge::gate::ForgeGateHooks;
 use crate::runtime::forge::review::ReviewStore;
 use crate::runtime::goal::GoalToolApi;
 use crate::runtime::subagent::AgentControl;
@@ -172,6 +173,7 @@ impl Agent {
         let mut turn_config = self.config.clone();
         turn_config.workspace_root = workspace_root;
         turn_config.cwd = cwd.clone();
+        let forge_gate_enabled = turn_config.forge_review_gate_enabled;
         // This turn_config is local to Agent::tool_runtime after applying
         // workspace_root/cwd. It is separate from the LLM turn_config built in
         // run_session_turn for model/thinking/profile defaults.
@@ -197,6 +199,11 @@ impl Agent {
             turn_id,
         )
         .with_tool_hooks(self.tool_hooks.clone());
+        if forge_gate_enabled {
+            if let Some(review_store) = self.forge_review_store.clone() {
+                runtime = runtime.with_tool_hooks(Arc::new(ForgeGateHooks::new(review_store)));
+            }
+        }
         if let Some(inbox) = inbox {
             runtime = runtime.with_inbox(inbox);
         }

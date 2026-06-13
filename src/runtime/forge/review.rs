@@ -17,6 +17,7 @@ pub(crate) struct ReviewTicket {
     pub(crate) status: ReviewStatus,
     pub(crate) reviewed_hash: Option<String>,
     pub(crate) findings: Option<String>,
+    pub(crate) reject_category: Option<ReviewRejectCategory>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +31,13 @@ pub(crate) enum ReviewStatus {
 pub(crate) enum ReviewVerdict {
     Approve,
     Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewRejectCategory {
+    RetriableGap,
+    NeedsUser,
+    ExternalBlocker,
 }
 
 #[derive(Clone)]
@@ -60,10 +68,11 @@ INSERT INTO forge_review_tickets (
   status,
   reviewed_hash,
   findings,
+  reject_category,
   created_at_ms,
   updated_at_ms,
   ticket_order
-) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?)
+) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)
             "#,
         )
         .bind(&ticket_id)
@@ -82,6 +91,7 @@ INSERT INTO forge_review_tickets (
             status: ReviewStatus::Pending,
             reviewed_hash: None,
             findings: None,
+            reject_category: None,
         })
     }
 
@@ -92,17 +102,31 @@ INSERT INTO forge_review_tickets (
         reviewed_hash: Option<String>,
         findings: Option<String>,
     ) -> anyhow::Result<ReviewTicket> {
+        self.resolve_ticket_with_category(ticket_id, verdict, reviewed_hash, findings, None)
+            .await
+    }
+
+    pub(crate) async fn resolve_ticket_with_category(
+        &self,
+        ticket_id: &str,
+        verdict: ReviewVerdict,
+        reviewed_hash: Option<String>,
+        findings: Option<String>,
+        reject_category: Option<ReviewRejectCategory>,
+    ) -> anyhow::Result<ReviewTicket> {
         let now = now_unix_millis();
         let status = match verdict {
             ReviewVerdict::Approve => ReviewStatus::Approved,
             ReviewVerdict::Reject => ReviewStatus::Rejected,
         };
+        let reject_category = reject_category.map(ReviewRejectCategory::as_str);
         let result = sqlx::query(
             r#"
 UPDATE forge_review_tickets
 SET status = ?,
     reviewed_hash = ?,
     findings = ?,
+    reject_category = ?,
     updated_at_ms = ?
 WHERE ticket_id = ?
             "#,
@@ -110,6 +134,7 @@ WHERE ticket_id = ?
         .bind(status.as_str())
         .bind(&reviewed_hash)
         .bind(&findings)
+        .bind(reject_category)
         .bind(now)
         .bind(ticket_id)
         .execute(self.db.pool())
@@ -149,7 +174,8 @@ SELECT
   baseline_hash,
   status,
   reviewed_hash,
-  findings
+  findings,
+  reject_category
 FROM forge_review_tickets
 WHERE goal_id = ?
 ORDER BY ticket_order DESC
@@ -182,7 +208,7 @@ ORDER BY ticket_order DESC
         Ok(count)
     }
 
-    async fn get_ticket(&self, ticket_id: &str) -> anyhow::Result<Option<ReviewTicket>> {
+    pub(crate) async fn get_ticket(&self, ticket_id: &str) -> anyhow::Result<Option<ReviewTicket>> {
         let row = sqlx::query(
             r#"
 SELECT
@@ -191,7 +217,8 @@ SELECT
   baseline_hash,
   status,
   reviewed_hash,
-  findings
+  findings,
+  reject_category
 FROM forge_review_tickets
 WHERE ticket_id = ?
             "#,
@@ -202,7 +229,10 @@ WHERE ticket_id = ?
         row.as_ref().map(review_ticket_from_row).transpose()
     }
 
-    async fn latest_ticket(&self, goal_id: &str) -> anyhow::Result<Option<ReviewTicket>> {
+    pub(crate) async fn latest_ticket(
+        &self,
+        goal_id: &str,
+    ) -> anyhow::Result<Option<ReviewTicket>> {
         let row = sqlx::query(
             r#"
 SELECT
@@ -211,7 +241,8 @@ SELECT
   baseline_hash,
   status,
   reviewed_hash,
-  findings
+  findings,
+  reject_category
 FROM forge_review_tickets
 WHERE goal_id = ?
 ORDER BY ticket_order DESC
@@ -222,6 +253,16 @@ LIMIT 1
         .fetch_optional(self.db.pool())
         .await?;
         row.as_ref().map(review_ticket_from_row).transpose()
+    }
+}
+
+impl ReviewTicket {
+    pub(crate) fn verdict(&self) -> Option<ReviewVerdict> {
+        match self.status {
+            ReviewStatus::Pending => None,
+            ReviewStatus::Approved => Some(ReviewVerdict::Approve),
+            ReviewStatus::Rejected => Some(ReviewVerdict::Reject),
+        }
     }
 }
 
@@ -244,7 +285,47 @@ impl ReviewStatus {
     }
 }
 
+impl ReviewVerdict {
+    pub(crate) fn as_event_verdict(self) -> crate::events::ReviewVerdictEvent {
+        match self {
+            Self::Approve => crate::events::ReviewVerdictEvent::Approve,
+            Self::Reject => crate::events::ReviewVerdictEvent::Reject,
+        }
+    }
+}
+
+impl ReviewRejectCategory {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::RetriableGap => "retriable_gap",
+            Self::NeedsUser => "needs_user",
+            Self::ExternalBlocker => "external_blocker",
+        }
+    }
+
+    pub(crate) fn as_event_category(self) -> crate::events::ReviewRejectCategoryEvent {
+        match self {
+            Self::RetriableGap => crate::events::ReviewRejectCategoryEvent::RetriableGap,
+            Self::NeedsUser => crate::events::ReviewRejectCategoryEvent::NeedsUser,
+            Self::ExternalBlocker => crate::events::ReviewRejectCategoryEvent::ExternalBlocker,
+        }
+    }
+
+    fn from_str(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "retriable_gap" => Ok(Self::RetriableGap),
+            "needs_user" => Ok(Self::NeedsUser),
+            "external_blocker" => Ok(Self::ExternalBlocker),
+            _ => bail!("unknown review reject category: {value}"),
+        }
+    }
+}
+
 fn review_ticket_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<ReviewTicket> {
+    let reject_category = row
+        .try_get::<Option<String>, _>("reject_category")?
+        .map(|value| ReviewRejectCategory::from_str(&value))
+        .transpose()?;
     Ok(ReviewTicket {
         ticket_id: row.try_get("ticket_id")?,
         goal_id: row.try_get("goal_id")?,
@@ -252,6 +333,7 @@ fn review_ticket_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Revie
         status: ReviewStatus::from_str(row.try_get::<String, _>("status")?.as_str())?,
         reviewed_hash: row.try_get("reviewed_hash")?,
         findings: row.try_get("findings")?,
+        reject_category,
     })
 }
 

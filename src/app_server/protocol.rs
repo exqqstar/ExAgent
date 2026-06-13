@@ -715,6 +715,7 @@ pub enum RuntimeEventKindFilter {
     TokenCount,
     ThreadGoalTurnStarted,
     ThreadGoalToolCompleted,
+    ReviewSubmitted,
     ThreadGoalReport,
     RuntimeError,
 }

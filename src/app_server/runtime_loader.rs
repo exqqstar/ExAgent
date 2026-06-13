@@ -26,6 +26,9 @@ pub(in crate::app_server) trait RuntimeSpawner {
     fn goal_store(&self) -> Option<crate::index_db::IndexDb> {
         None
     }
+    fn forge_review_store(&self) -> Option<crate::runtime::forge::review::ReviewStore> {
+        None
+    }
     fn subagent_control_for_cold_load(
         &self,
         workspace_root: &Path,
@@ -185,6 +188,9 @@ impl RuntimeLoader {
         }
         if let Some(goal_store) = spawner.goal_store() {
             options = options.with_goal_runtime(Arc::new(GoalRuntime::new(goal_store)));
+        }
+        if let Some(review_store) = spawner.forge_review_store() {
+            options = options.with_forge_review_store(review_store);
         }
         let spawn_result = ThreadRuntime::spawn(options);
         let runtime = match spawn_result {

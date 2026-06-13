@@ -204,6 +204,9 @@ fn runtime_event_kind_matches(filter: &RuntimeEventKindFilter, kind: &RuntimeEve
             RuntimeEventKindFilter::ThreadGoalToolCompleted,
             RuntimeEventKind::ThreadGoalToolCompleted { .. },
         ) | (
+            RuntimeEventKindFilter::ReviewSubmitted,
+            RuntimeEventKind::ReviewSubmitted { .. },
+        ) | (
             RuntimeEventKindFilter::ThreadGoalReport,
             RuntimeEventKind::ThreadGoalReport { .. },
         ) | (

@@ -100,6 +100,25 @@ mod tests {
     }
 
     #[test]
+    fn reviewer_profile_owns_submit_review_and_clean_context_default() {
+        let reviewer = profile_for_type(Some(AgentType::Reviewer));
+
+        assert!(reviewer.tool_policy.allows("submit_review"));
+        assert_eq!(
+            reviewer.default_fork_turns,
+            crate::state::fork_history::ForkTurns::None
+        );
+
+        for agent_type in [AgentType::Explorer, AgentType::Planner, AgentType::Worker] {
+            let profile = profile_for_type(Some(agent_type));
+            assert!(
+                !profile.tool_policy.allows("submit_review"),
+                "{agent_type:?} must not be able to submit a review"
+            );
+        }
+    }
+
+    #[test]
     fn agent_type_as_str_returns_schema_name() {
         assert_eq!(AgentType::Explorer.as_str(), "explorer");
         assert_eq!(AgentType::Planner.as_str(), "planner");
@@ -118,7 +137,7 @@ mod tests {
         assert!(description.contains("worker (Worker):"));
         assert!(description.contains("When to spawn:"));
         assert!(description.contains("Visible tools: workspace=ReadOnly, collaboration=Basic"));
-        assert!(description.contains("Defaults: fork_turns=all, thinking_mode=high"));
+        assert!(description.contains("Defaults: fork_turns=none, thinking_mode=high"));
         assert!(
             !description.to_lowercase().contains("locked"),
             "schema guidance must not advertise unenforced locking"

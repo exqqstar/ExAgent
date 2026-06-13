@@ -12,6 +12,7 @@ use crate::mcp::manager::McpRuntimeManager;
 use crate::policy::PolicyManager;
 use crate::registry::ToolRegistry;
 use crate::runtime::agent_profile::AgentToolPolicy;
+use crate::runtime::forge::review::ReviewStore;
 use crate::runtime::goal::GoalToolApi;
 use crate::runtime::subagent::AgentControl;
 use crate::runtime::thread_session::ThreadInbox;
@@ -31,6 +32,7 @@ pub struct Agent {
     tool_hooks: Arc<dyn ToolHooks>,
     subagent_control: Option<Arc<AgentControl>>,
     goal_api: Option<Arc<GoalToolApi>>,
+    forge_review_store: Option<ReviewStore>,
 }
 
 impl Agent {
@@ -108,6 +110,7 @@ impl Agent {
             tool_hooks: Arc::new(NoopToolHooks),
             subagent_control: None,
             goal_api: None,
+            forge_review_store: None,
         }
     }
 
@@ -121,6 +124,11 @@ impl Agent {
 
     pub(crate) fn with_goal_api(mut self, goal_api: Option<Arc<GoalToolApi>>) -> Self {
         self.goal_api = goal_api;
+        self
+    }
+
+    pub(crate) fn with_forge_review_store(mut self, store: Option<ReviewStore>) -> Self {
+        self.forge_review_store = store;
         self
     }
 
@@ -173,6 +181,7 @@ impl Agent {
             mcp_runtime: self.mcp_runtime.clone(),
             subagent_control: self.subagent_control.clone(),
             goal_api: self.goal_api.clone(),
+            forge_review_store: self.forge_review_store.clone(),
             agent_tool_policy: agent_tool_policy.clone(),
         })
         .await?;
@@ -330,6 +339,7 @@ mod tests {
             tool_hooks: Arc::new(NoopToolHooks),
             subagent_control: None,
             goal_api: None,
+            forge_review_store: None,
         }
     }
 

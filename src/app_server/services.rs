@@ -78,6 +78,7 @@ impl AppServerServices {
             agent_factory,
             policy.clone(),
             model_resolver.clone(),
+            None,
         );
         Self {
             base_config,
@@ -122,6 +123,7 @@ impl AppServerServices {
             agent_factory,
             policy.clone(),
             model_resolver.clone(),
+            None,
         );
         Self {
             base_config,
@@ -167,6 +169,7 @@ impl AppServerServices {
             agent_factory,
             policy.clone(),
             model_resolver.clone(),
+            None,
         );
         Self {
             base_config,
@@ -198,6 +201,14 @@ impl AppServerServices {
         goal_store: crate::index_db::IndexDb,
     ) -> Self {
         self.goal_store = Some(goal_store);
+        let agent_factory = self.runtime_agent_factory();
+        self.subagent_lifecycle = new_subagent_lifecycle(
+            self.runtime_loader.clone(),
+            agent_factory,
+            self.policy.clone(),
+            self.model_resolver.clone(),
+            self.goal_store.clone(),
+        );
         self
     }
 }
@@ -207,6 +218,7 @@ fn new_subagent_lifecycle(
     agent_factory: AgentFactory,
     policy: Arc<PolicyManager>,
     model_resolver: Arc<dyn ModelResolver>,
+    goal_store: Option<crate::index_db::IndexDb>,
 ) -> Arc<dyn SubagentLifecycle> {
     let lifecycle: Arc<AppServerSubagentLifecycle> =
         Arc::<AppServerSubagentLifecycle>::new_cyclic(move |self_ref| {
@@ -216,6 +228,7 @@ fn new_subagent_lifecycle(
                 agent_factory: agent_factory.clone(),
                 policy: policy.clone(),
                 model_resolver: model_resolver.clone(),
+                goal_store: goal_store.clone(),
                 self_lifecycle,
             }
         });
@@ -272,6 +285,12 @@ impl RuntimeSpawner for AppServerServices {
         self.goal_store.clone()
     }
 
+    fn forge_review_store(&self) -> Option<crate::runtime::forge::review::ReviewStore> {
+        self.goal_store
+            .clone()
+            .map(crate::runtime::forge::review::ReviewStore::new)
+    }
+
     fn subagent_control_for_cold_load(
         &self,
         workspace_root: &Path,
@@ -290,6 +309,7 @@ struct AppServerSubagentLifecycle {
     agent_factory: AgentFactory,
     policy: Arc<PolicyManager>,
     model_resolver: Arc<dyn ModelResolver>,
+    goal_store: Option<crate::index_db::IndexDb>,
     self_lifecycle: Weak<dyn SubagentLifecycle>,
 }
 
@@ -304,6 +324,16 @@ impl RuntimeSpawner for AppServerSubagentLifecycle {
 
     fn workspace_runtime_op_gate(&self) -> Option<Arc<dyn WorkspaceRuntimeOpGate>> {
         Some(Arc::new(self.runtime_loader.clone()))
+    }
+
+    fn goal_store(&self) -> Option<crate::index_db::IndexDb> {
+        self.goal_store.clone()
+    }
+
+    fn forge_review_store(&self) -> Option<crate::runtime::forge::review::ReviewStore> {
+        self.goal_store
+            .clone()
+            .map(crate::runtime::forge::review::ReviewStore::new)
     }
 
     fn subagent_control_for_cold_load(

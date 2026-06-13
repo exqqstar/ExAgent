@@ -6,6 +6,7 @@ use crate::config::{AgentConfig, PermissionProfile};
 use crate::mcp::manager::McpRuntimeManager;
 use crate::registry::ToolRegistry;
 use crate::runtime::agent_profile::AgentToolPolicy;
+use crate::runtime::forge::review::ReviewStore;
 use crate::runtime::goal::GoalToolApi;
 use crate::runtime::subagent::AgentControl;
 use crate::runtime::tool_resolver::ToolResolver;
@@ -15,6 +16,7 @@ use crate::tools::goal::{CreateGoalTool, GetGoalTool, UpdateGoalTool};
 use crate::tools::list_agents::ListAgentsTool;
 use crate::tools::send_message::SendMessageTool;
 use crate::tools::spawn_agent::SpawnAgentTool;
+use crate::tools::submit_review::SubmitReviewTool;
 use crate::tools::wait_agent::WaitAgentTool;
 use crate::tools::web_search::{BraveSearchProvider, WebSearchTool};
 use crate::tools::ToolSpec;
@@ -47,6 +49,7 @@ pub(crate) struct ToolSelectionInput<'a> {
     pub(crate) mcp_runtime: Arc<McpRuntimeManager>,
     pub(crate) subagent_control: Option<Arc<AgentControl>>,
     pub(crate) goal_api: Option<Arc<GoalToolApi>>,
+    pub(crate) forge_review_store: Option<ReviewStore>,
     pub(crate) agent_tool_policy: AgentToolPolicy,
 }
 
@@ -90,6 +93,10 @@ async fn assemble_tool_registry(input: &ToolSelectionInput<'_>) -> Result<ToolRe
         registry.register_handler(UpdateGoalTool::new(goal_api));
     }
 
+    if let Some(review_store) = input.forge_review_store.clone() {
+        registry.register_handler(SubmitReviewTool::new(review_store));
+    }
+
     if let Some(web_search) = &input.config.web_search {
         if web_search.provider == "brave" {
             registry.register_handler(WebSearchTool::new(Arc::new(BraveSearchProvider::new(
@@ -130,6 +137,8 @@ pub(crate) fn authorize_tool(tool_name: &str, agent_tool_policy: &AgentToolPolic
 mod tests {
     use super::*;
     use crate::config::WebSearchConfig;
+    use crate::registry::ToolContext;
+    use crate::runtime::agent_profile::{profile_for_type, AgentType};
     use crate::runtime::subagent::{
         CloseAgentResponse, CloseAgentsRequest, DeliverInterAgentMessageRequest,
         SendMessageResponse, SpawnAgentResponse, SpawnCleanChildRequest, SubagentLifecycle,
@@ -138,6 +147,7 @@ mod tests {
     use crate::tools::run_command::RunCommandTool;
     use crate::tools::search_files::SearchFilesTool;
     use crate::tools::write_file::WriteFileTool;
+    use crate::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome};
     use crate::types::ThreadId;
     use crate::types::ToolCall;
     use async_trait::async_trait;
@@ -172,6 +182,33 @@ mod tests {
         registry.register(SearchFilesTool);
         registry.register(WriteFileTool);
         registry.register(RunCommandTool);
+        registry
+    }
+
+    struct SubmitReviewSpecTool;
+
+    #[async_trait]
+    impl ToolHandler for SubmitReviewSpecTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec::function(
+                "submit_review",
+                "Submit a reviewer verdict.",
+                serde_json::json!({"type": "object"}),
+            )
+        }
+
+        fn capabilities(&self) -> ToolCapabilities {
+            ToolCapabilities::read_only()
+        }
+
+        async fn handle(&self, _invocation: ToolInvocation, _ctx: &ToolContext) -> ToolOutcome {
+            unreachable!("tool selection tests do not execute submit_review")
+        }
+    }
+
+    fn registry_with_submit_review() -> ToolRegistry {
+        let mut registry = registry();
+        registry.register(SubmitReviewSpecTool);
         registry
     }
 
@@ -230,6 +267,35 @@ mod tests {
         assert!(!authorize_tool("spawn_agent", &policy));
     }
 
+    #[test]
+    fn submit_review_is_visible_only_to_reviewer_profile() {
+        let reviewer = profile_for_type(Some(AgentType::Reviewer));
+        let reviewer_visible = select_visible_specs(
+            &registry_with_submit_review(),
+            &ToolVisibilityContext {
+                permission_profile: PermissionProfile::FullAccess,
+                provider_supports_tools: true,
+                agent_tool_policy: reviewer.tool_policy,
+            },
+        );
+        assert!(reviewer_visible
+            .iter()
+            .any(|spec| spec.name == "submit_review"));
+
+        let worker = profile_for_type(Some(AgentType::Worker));
+        let worker_visible = select_visible_specs(
+            &registry_with_submit_review(),
+            &ToolVisibilityContext {
+                permission_profile: PermissionProfile::FullAccess,
+                provider_supports_tools: true,
+                agent_tool_policy: worker.tool_policy,
+            },
+        );
+        assert!(!worker_visible
+            .iter()
+            .any(|spec| spec.name == "submit_review"));
+    }
+
     #[tokio::test]
     async fn build_selection_keeps_registry_executable_when_visible_specs_are_empty() {
         let mut config = AgentConfig::default();
@@ -246,6 +312,7 @@ mod tests {
             mcp_runtime,
             subagent_control: None,
             goal_api: None,
+            forge_review_store: None,
             agent_tool_policy: AgentToolPolicy::all(),
         })
         .await
@@ -276,6 +343,7 @@ mod tests {
             mcp_runtime: mcp_runtime.clone(),
             subagent_control: Some(subagent_control()),
             goal_api: None,
+            forge_review_store: None,
             agent_tool_policy: AgentToolPolicy::all(),
         })
         .await
@@ -306,6 +374,7 @@ mod tests {
             mcp_runtime,
             subagent_control: Some(subagent_control()),
             goal_api: None,
+            forge_review_store: None,
             agent_tool_policy: AgentToolPolicy::read_only_basic_collaboration(),
         })
         .await
@@ -330,6 +399,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_selection_registers_submit_review_when_review_store_is_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::index_db::IndexDb::open(dir.path().join("index.sqlite"))
+            .await
+            .unwrap();
+        let mut config = AgentConfig::default();
+        config.model.capabilities.supports_tools = true;
+        let mcp_runtime = Arc::new(McpRuntimeManager::new(
+            config.mcp_servers.clone(),
+            config.workspace_root.clone(),
+        ));
+
+        let reviewer = build_tool_selection(ToolSelectionInput {
+            base_registry: registry(),
+            config: &config,
+            mcp_runtime,
+            subagent_control: None,
+            goal_api: None,
+            forge_review_store: Some(ReviewStore::new(db)),
+            agent_tool_policy: profile_for_type(Some(AgentType::Reviewer)).tool_policy,
+        })
+        .await
+        .expect("reviewer selection");
+
+        assert!(visible_tool_names(&reviewer).contains(&"submit_review"));
+    }
+
+    #[tokio::test]
     async fn build_selection_registers_web_search_only_when_configured() {
         let mut config = AgentConfig::default();
         config.model.capabilities.supports_tools = true;
@@ -345,6 +442,7 @@ mod tests {
             mcp_runtime: mcp_runtime.clone(),
             subagent_control: None,
             goal_api: None,
+            forge_review_store: None,
             agent_tool_policy: AgentToolPolicy::all(),
         })
         .await
@@ -361,6 +459,7 @@ mod tests {
             mcp_runtime: mcp_runtime.clone(),
             subagent_control: None,
             goal_api: None,
+            forge_review_store: None,
             agent_tool_policy: AgentToolPolicy::read_only_basic_collaboration(),
         })
         .await
@@ -377,6 +476,7 @@ mod tests {
             mcp_runtime,
             subagent_control: None,
             goal_api: None,
+            forge_review_store: None,
             agent_tool_policy: AgentToolPolicy::all(),
         })
         .await

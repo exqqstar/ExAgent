@@ -450,6 +450,15 @@ pub(crate) enum ToolEffect {
     SubagentClosed(SubagentClosed),
     InterAgentMessageSent(InterAgentMessageSent),
     ThreadGoalUpdated(crate::app_server::protocol::ThreadGoal),
+    ReviewSubmitted {
+        ticket_id: String,
+        goal_id: String,
+        verdict: crate::events::ReviewVerdictEvent,
+        reviewed_hash: Option<String>,
+        reject_category: Option<crate::events::ReviewRejectCategoryEvent>,
+        findings: Option<String>,
+        checkpoint_id: Option<String>,
+    },
     ShortCircuit,
 }
 
@@ -457,6 +466,23 @@ impl ToolEffect {
     fn from_runtime_effect(effect: ToolRuntimeEffect) -> Self {
         match effect {
             ToolRuntimeEffect::ShortCircuit { .. } => Self::ShortCircuit,
+            ToolRuntimeEffect::ReviewSubmitted {
+                ticket_id,
+                goal_id,
+                verdict,
+                reviewed_hash,
+                reject_category,
+                findings,
+                checkpoint_id,
+            } => Self::ReviewSubmitted {
+                ticket_id,
+                goal_id,
+                verdict,
+                reviewed_hash,
+                reject_category,
+                findings,
+                checkpoint_id,
+            },
             ToolRuntimeEffect::ExecSessionRunning {
                 exec_session_id,
                 command,
@@ -718,6 +744,30 @@ fn apply_tool_effect(
             )?;
             Ok(())
         }
+        ToolEffect::ReviewSubmitted {
+            ticket_id,
+            goal_id,
+            verdict,
+            reviewed_hash,
+            reject_category,
+            findings,
+            checkpoint_id,
+        } => {
+            recorder.record(
+                snapshot,
+                Some(turn_id),
+                RuntimeEventKind::ReviewSubmitted {
+                    ticket_id,
+                    goal_id,
+                    verdict,
+                    reviewed_hash,
+                    reject_category,
+                    findings,
+                    checkpoint_id,
+                },
+            )?;
+            Ok(())
+        }
         ToolEffect::ShortCircuit => Ok(()),
     }
 }
@@ -860,7 +910,7 @@ mod tests {
     use crate::exec_session::ExecSessionManager;
     use crate::policy::{PolicyManager, PolicyMode};
     use crate::registry::ToolRegistry;
-    use crate::runtime::agent_profile::AgentToolPolicy;
+    use crate::runtime::agent_profile::{profile_for_type, AgentToolPolicy, AgentType};
     use crate::runtime::thread_runtime::ThreadRuntimeStatus;
     use crate::runtime::thread_session::ThreadSessionLiveState;
     use crate::tools::read_file::ReadFileTool;
@@ -908,6 +958,10 @@ mod tests {
     struct ShortCircuitHooks;
 
     struct RecordingTool {
+        called: Arc<AtomicBool>,
+    }
+
+    struct SubmitReviewRecordingTool {
         called: Arc<AtomicBool>,
     }
 
@@ -1129,6 +1183,30 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl crate::tools::ToolHandler for SubmitReviewRecordingTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec::function(
+                "submit_review",
+                "Record whether submit_review ran",
+                serde_json::json!({"type": "object", "additionalProperties": false}),
+            )
+        }
+
+        fn capabilities(&self) -> ToolCapabilities {
+            ToolCapabilities::read_only()
+        }
+
+        async fn handle(&self, invocation: ToolInvocation, _ctx: &ToolContext) -> ToolOutcome {
+            self.called.store(true, Ordering::SeqCst);
+            ToolOutcome::success(
+                invocation.call.id,
+                invocation.call.name,
+                crate::tools::ToolModelOutput::text("review submitted"),
+            )
+        }
+    }
+
     fn recorder_for(
         thread_id: ThreadId,
         snapshot: ThreadSnapshot,
@@ -1226,6 +1304,64 @@ mod tests {
             .content
             .contains("denied by agent profile"));
         assert!(!called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn orchestrator_denies_worker_submit_review_even_if_call_is_fabricated() {
+        let (_dir, mut ctx) = tool_context(PolicyMode::Off);
+        ctx.agent_tool_policy = profile_for_type(Some(AgentType::Worker)).tool_policy;
+        let called = Arc::new(AtomicBool::new(false));
+        let mut registry = ToolRegistry::new();
+        registry.register(SubmitReviewRecordingTool {
+            called: called.clone(),
+        });
+        let orchestrator = ToolOrchestrator::new(ToolResolver::new(registry));
+
+        let outcome = orchestrator
+            .invoke(
+                ToolCall {
+                    id: "call_submit_review_worker".into(),
+                    name: "submit_review".into(),
+                    arguments: serde_json::json!({}),
+                    thought_signature: None,
+                },
+                &ctx,
+            )
+            .await;
+
+        assert_eq!(outcome.model_result.status, ToolStatus::Error);
+        assert!(outcome
+            .model_result
+            .content
+            .contains("denied by agent profile"));
+        assert!(!called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn orchestrator_allows_reviewer_submit_review_direct_execution() {
+        let (_dir, mut ctx) = tool_context(PolicyMode::Off);
+        ctx.agent_tool_policy = profile_for_type(Some(AgentType::Reviewer)).tool_policy;
+        let called = Arc::new(AtomicBool::new(false));
+        let mut registry = ToolRegistry::new();
+        registry.register(SubmitReviewRecordingTool {
+            called: called.clone(),
+        });
+        let orchestrator = ToolOrchestrator::new(ToolResolver::new(registry));
+
+        let outcome = orchestrator
+            .invoke(
+                ToolCall {
+                    id: "call_submit_review_reviewer".into(),
+                    name: "submit_review".into(),
+                    arguments: serde_json::json!({}),
+                    thought_signature: None,
+                },
+                &ctx,
+            )
+            .await;
+
+        assert_eq!(outcome.model_result.status, ToolStatus::Success);
+        assert!(called.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

@@ -531,7 +531,8 @@ impl ThreadSession {
         });
         self.agent = (self.agent_factory)(config)?
             .with_subagent_control(self.subagent_control.clone())
-            .with_goal_api(goal_api);
+            .with_goal_api(goal_api)
+            .with_forge_review_store(self.forge_review_store.clone());
         Ok(())
     }
 

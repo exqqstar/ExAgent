@@ -21,6 +21,7 @@ pub mod search_files;
 pub mod send_message;
 pub mod spawn_agent;
 pub mod spec;
+pub(crate) mod submit_review;
 pub mod view_image;
 pub mod wait_agent;
 pub mod web_fetch;

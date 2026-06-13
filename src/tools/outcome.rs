@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::config::PermissionProfile;
-use crate::events::ApprovalCommandPayload;
+use crate::events::{ApprovalCommandPayload, ReviewRejectCategoryEvent, ReviewVerdictEvent};
 use crate::policy::QuestionPrompt;
 use crate::session::{ApprovalId, ExecSessionId};
 use crate::types::{ThreadId, ToolResult, ToolStatus};
@@ -66,6 +66,15 @@ impl ToolOutcome {
 pub enum ToolRuntimeEffect {
     ShortCircuit {
         result: ToolResult,
+    },
+    ReviewSubmitted {
+        ticket_id: String,
+        goal_id: String,
+        verdict: ReviewVerdictEvent,
+        reviewed_hash: Option<String>,
+        reject_category: Option<ReviewRejectCategoryEvent>,
+        findings: Option<String>,
+        checkpoint_id: Option<String>,
     },
     ExecSessionRunning {
         exec_session_id: ExecSessionId,

@@ -1,6 +1,6 @@
 use sqlx::{Executor, SqlitePool};
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 pub async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
     pool.execute("PRAGMA foreign_keys = ON").await?;
@@ -115,10 +115,29 @@ CREATE TABLE IF NOT EXISTS forge_review_tickets (
   status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected')),
   reviewed_hash TEXT,
   findings TEXT,
+  reject_category TEXT CHECK(reject_category IS NULL OR reject_category IN (
+    'retriable_gap',
+    'needs_user',
+    'external_blocker'
+  )),
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
   ticket_order INTEGER NOT NULL
 )
+        "#,
+    )
+    .await?;
+    add_column_if_missing(
+        pool,
+        "forge_review_tickets",
+        "reject_category",
+        r#"
+ALTER TABLE forge_review_tickets
+ADD COLUMN reject_category TEXT CHECK(reject_category IS NULL OR reject_category IN (
+  'retriable_gap',
+  'needs_user',
+  'external_blocker'
+))
         "#,
     )
     .await?;

@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::bail;
@@ -120,6 +121,58 @@ ORDER BY question_order ASC
         .bind(goal_id)
         .fetch_all(self.db.pool())
         .await?;
+        rows.iter().map(open_question_from_row).collect()
+    }
+
+    pub(crate) async fn unresolved_for_workspace(
+        &self,
+        workspace_root: Option<&Path>,
+    ) -> anyhow::Result<Vec<OpenQuestion>> {
+        let workspace_root = workspace_root.map(|path| path.display().to_string());
+        let rows = if let Some(workspace_root) = workspace_root {
+            sqlx::query(
+                r#"
+SELECT
+  q.question_id,
+  q.thread_id,
+  q.goal_id,
+  q.question,
+  q.blocks_what,
+  q.status,
+  q.answer,
+  q.created_at_ms,
+  q.updated_at_ms
+FROM forge_open_questions q
+JOIN threads t ON t.id = q.thread_id
+JOIN projects p ON p.id = t.project_id
+WHERE q.status = 'open' AND p.path = ?
+ORDER BY q.question_order ASC
+                "#,
+            )
+            .bind(workspace_root)
+            .fetch_all(self.db.pool())
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+SELECT
+  question_id,
+  thread_id,
+  goal_id,
+  question,
+  blocks_what,
+  status,
+  answer,
+  created_at_ms,
+  updated_at_ms
+FROM forge_open_questions
+WHERE status = 'open'
+ORDER BY question_order ASC
+                "#,
+            )
+            .fetch_all(self.db.pool())
+            .await?
+        };
         rows.iter().map(open_question_from_row).collect()
     }
 

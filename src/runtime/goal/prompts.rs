@@ -80,7 +80,9 @@ pub(crate) fn goal_report_summary_prompt(report: &ThreadGoalReport) -> String {
          Token budget: {}\n\
          Time used seconds: {}\n\
          Changed files: {}\n\
-         Pending approvals: {}",
+         Pending approvals: {}\n\
+         Open questions: {}\n\
+         Latest review: {}",
         escape_xml(&report.objective),
         status_label(report.final_status),
         report.turns_run,
@@ -89,6 +91,8 @@ pub(crate) fn goal_report_summary_prompt(report: &ThreadGoalReport) -> String {
         report.time_used_seconds,
         changed_files_label(&report.changed_files),
         report.pending_approvals_count,
+        open_questions_label(report),
+        review_summary_label(report),
     )
 }
 
@@ -120,6 +124,69 @@ fn changed_files_label(files: &[String]) -> String {
         return "none".to_string();
     }
     files.join(", ")
+}
+
+fn open_questions_label(report: &ThreadGoalReport) -> String {
+    if report.open_questions.is_empty() {
+        return "none".to_string();
+    }
+    report
+        .open_questions
+        .iter()
+        .map(|question| {
+            format!(
+                "{} (blocks: {})",
+                escape_xml(&question.question),
+                escape_xml(&question.blocks_what)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn review_summary_label(report: &ThreadGoalReport) -> String {
+    let Some(review) = report.review_summary.as_ref() else {
+        return "none".to_string();
+    };
+    let mut parts = vec![format!(
+        "{} {}",
+        review.ticket_id,
+        review_status_label(review.status)
+    )];
+    if let Some(category) = review.reject_category {
+        parts.push(format!(
+            "category {}",
+            review_reject_category_label(category)
+        ));
+    }
+    if let Some(findings) = review.findings.as_deref() {
+        parts.push(format!("findings {}", escape_xml(findings)));
+    }
+    parts.join(", ")
+}
+
+fn review_status_label(
+    status: crate::app_server::protocol::ThreadGoalReviewStatus,
+) -> &'static str {
+    match status {
+        crate::app_server::protocol::ThreadGoalReviewStatus::Pending => "pending",
+        crate::app_server::protocol::ThreadGoalReviewStatus::Approved => "approved",
+        crate::app_server::protocol::ThreadGoalReviewStatus::Rejected => "rejected",
+    }
+}
+
+fn review_reject_category_label(
+    category: crate::app_server::protocol::ThreadGoalReviewRejectCategory,
+) -> &'static str {
+    match category {
+        crate::app_server::protocol::ThreadGoalReviewRejectCategory::RetriableGap => {
+            "retriable_gap"
+        }
+        crate::app_server::protocol::ThreadGoalReviewRejectCategory::NeedsUser => "needs_user",
+        crate::app_server::protocol::ThreadGoalReviewRejectCategory::ExternalBlocker => {
+            "external_blocker"
+        }
+    }
 }
 
 fn escape_xml(value: &str) -> String {
@@ -202,6 +269,20 @@ mod tests {
             time_used_seconds: 30,
             changed_files: vec!["src/runtime/goal/runtime.rs".to_string()],
             pending_approvals_count: 1,
+            open_questions: vec![crate::app_server::protocol::ThreadGoalReportOpenQuestion {
+                question_id: "oq_1".to_string(),
+                question: "Which cohort <first>?".to_string(),
+                blocks_what: "release targeting".to_string(),
+            }],
+            review_summary: Some(crate::app_server::protocol::ThreadGoalReviewSummary {
+                ticket_id: "rev_1".to_string(),
+                status: crate::app_server::protocol::ThreadGoalReviewStatus::Rejected,
+                reviewed_hash: Some("hash_1".to_string()),
+                reject_category: Some(
+                    crate::app_server::protocol::ThreadGoalReviewRejectCategory::NeedsUser,
+                ),
+                findings: Some("needs product input".to_string()),
+            }),
             summary: String::new(),
         });
 
@@ -211,6 +292,9 @@ mod tests {
         assert!(prompt.contains("Turns run: 2"));
         assert!(prompt.contains("src/runtime/goal/runtime.rs"));
         assert!(prompt.contains("Pending approvals: 1"));
+        assert!(prompt.contains("Which cohort &lt;first&gt;?"));
+        assert!(prompt.contains("Latest review: rev_1 rejected"));
+        assert!(prompt.contains("category needs_user"));
     }
 
     fn goal(objective: &str) -> ThreadGoal {

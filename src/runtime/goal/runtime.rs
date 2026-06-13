@@ -4,7 +4,10 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::app_server::protocol::{ThreadGoal, ThreadGoalReport, ThreadGoalStatus};
+use crate::app_server::protocol::{
+    ThreadGoal, ThreadGoalReport, ThreadGoalReportOpenQuestion, ThreadGoalReviewRejectCategory,
+    ThreadGoalReviewStatus, ThreadGoalReviewSummary, ThreadGoalStatus,
+};
 use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::index_db::{
     GoalAccountingMode, GoalAccountingOutcome, GoalUpdate, IndexDb, ThreadGoalRecord,
@@ -12,7 +15,9 @@ use crate::index_db::{
 };
 use crate::runtime::forge::escalation::{decision_for_goal, ForgeEscalationDecision};
 use crate::runtime::forge::open_questions::OpenQuestionStore;
-use crate::runtime::forge::review::ReviewStore;
+use crate::runtime::forge::review::{
+    ReviewRejectCategory, ReviewStatus, ReviewStore, ReviewTicket,
+};
 use crate::types::{ThreadId, TokenUsage, TurnId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -717,13 +722,23 @@ impl GoalRuntime {
                         ThreadGoalStatusRecord::Paused,
                     )
                     .await?;
+                let content =
+                    format!("{content}\n\nGoal paused awaiting answers to open questions.");
+                if let Some(report) = self.report_for_forge_pause(&updated).await {
+                    return Ok(Some(
+                        GoalRuntimeEffect::EmitUpdatedInjectContextAndGoalReport {
+                            goal: updated,
+                            source: "forge_open_questions_paused",
+                            content,
+                            report,
+                        },
+                    ));
+                }
                 Ok(Some(
                     GoalRuntimeEffect::EmitUpdatedAndInjectPersistentContext {
                         goal: updated,
                         source: "forge_open_questions_paused",
-                        content: format!(
-                            "{content}\n\nGoal paused awaiting answers to open questions."
-                        ),
+                        content,
                     },
                 ))
             }
@@ -856,9 +871,25 @@ impl GoalRuntime {
     }
 
     async fn report_for_final_status(&self, goal: &ThreadGoal) -> Option<ThreadGoalReport> {
-        if !is_final_report_status(goal.status) {
+        self.report_for_status(goal, false).await
+    }
+
+    async fn report_for_forge_pause(&self, goal: &ThreadGoal) -> Option<ThreadGoalReport> {
+        self.report_for_status(goal, true).await
+    }
+
+    async fn report_for_status(
+        &self,
+        goal: &ThreadGoal,
+        include_paused: bool,
+    ) -> Option<ThreadGoalReport> {
+        if !is_final_report_status(goal.status)
+            && !(include_paused && goal.status == ThreadGoalStatus::Paused)
+        {
             return None;
         }
+        let open_questions = self.report_open_questions(&goal.goal_id).await;
+        let review_summary = self.report_review_summary(&goal.goal_id).await;
         let mut state = self.state.lock().await;
         let key = report_status_key(&goal.goal_id, goal.status);
         if !state.reported_goal_statuses.insert(key) {
@@ -884,8 +915,33 @@ impl GoalRuntime {
             time_used_seconds: goal.time_used_seconds,
             changed_files,
             pending_approvals_count: 0,
+            open_questions,
+            review_summary,
             summary: fallback_report_summary(goal),
         })
+    }
+
+    async fn report_open_questions(&self, goal_id: &str) -> Vec<ThreadGoalReportOpenQuestion> {
+        OpenQuestionStore::new(self.db.clone())
+            .unresolved_for_goal(goal_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|question| ThreadGoalReportOpenQuestion {
+                question_id: question.question_id,
+                question: question.question,
+                blocks_what: question.blocks_what,
+            })
+            .collect()
+    }
+
+    async fn report_review_summary(&self, goal_id: &str) -> Option<ThreadGoalReviewSummary> {
+        ReviewStore::new(self.db.clone())
+            .latest_ticket(goal_id)
+            .await
+            .ok()
+            .flatten()
+            .map(thread_goal_review_summary_from_ticket)
     }
 
     async fn record_changed_files_for_current_goal(
@@ -1065,6 +1121,32 @@ fn is_final_report_status(status: ThreadGoalStatus) -> bool {
             | ThreadGoalStatus::UsageLimited
             | ThreadGoalStatus::BudgetLimited
     )
+}
+
+fn thread_goal_review_summary_from_ticket(ticket: ReviewTicket) -> ThreadGoalReviewSummary {
+    ThreadGoalReviewSummary {
+        ticket_id: ticket.ticket_id,
+        status: match ticket.status {
+            ReviewStatus::Pending => ThreadGoalReviewStatus::Pending,
+            ReviewStatus::Approved => ThreadGoalReviewStatus::Approved,
+            ReviewStatus::Rejected => ThreadGoalReviewStatus::Rejected,
+        },
+        reviewed_hash: ticket.reviewed_hash,
+        reject_category: ticket
+            .reject_category
+            .map(thread_goal_review_reject_category),
+        findings: ticket.findings,
+    }
+}
+
+fn thread_goal_review_reject_category(
+    category: ReviewRejectCategory,
+) -> ThreadGoalReviewRejectCategory {
+    match category {
+        ReviewRejectCategory::RetriableGap => ThreadGoalReviewRejectCategory::RetriableGap,
+        ReviewRejectCategory::NeedsUser => ThreadGoalReviewRejectCategory::NeedsUser,
+        ReviewRejectCategory::ExternalBlocker => ThreadGoalReviewRejectCategory::ExternalBlocker,
+    }
 }
 
 fn report_status_key(goal_id: &str, status: ThreadGoalStatus) -> String {
@@ -1499,11 +1581,28 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
             .await
             .unwrap();
 
-        let GoalRuntimeEffect::EmitUpdatedAndInjectPersistentContext { goal, content, .. } = effect
+        let GoalRuntimeEffect::EmitUpdatedInjectContextAndGoalReport {
+            goal,
+            content,
+            report,
+            ..
+        } = effect
         else {
-            panic!("expected paused context, got {effect:?}");
+            panic!("expected paused report context, got {effect:?}");
         };
         assert_eq!(goal.status, ThreadGoalStatus::Paused);
+        assert_eq!(report.final_status, ThreadGoalStatus::Paused);
+        assert_eq!(report.open_questions.len(), 1);
+        assert_eq!(
+            report.open_questions[0].question,
+            "Which customer segment is first?"
+        );
+        let review_summary = report.review_summary.expect("review summary");
+        assert_eq!(review_summary.ticket_id, ticket.ticket_id);
+        assert_eq!(
+            review_summary.reject_category,
+            Some(crate::app_server::protocol::ThreadGoalReviewRejectCategory::NeedsUser)
+        );
         assert!(content.contains("Which customer segment is first?"));
     }
 

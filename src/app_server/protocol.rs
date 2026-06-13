@@ -31,6 +31,7 @@ pub enum BoundaryCapability {
     AgentTree,
     ApprovalsList,
     CheckpointRestore,
+    OpenQuestionResolve,
     TurnStart,
     TurnInterrupt,
     ApprovalDecision,
@@ -133,7 +134,46 @@ pub struct ThreadGoalReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changed_files: Vec<String>,
     pub pending_approvals_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_questions: Vec<ThreadGoalReportOpenQuestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_summary: Option<ThreadGoalReviewSummary>,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadGoalReportOpenQuestion {
+    pub question_id: String,
+    pub question: String,
+    pub blocks_what: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadGoalReviewSummary {
+    pub ticket_id: String,
+    pub status: ThreadGoalReviewStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reject_category: Option<ThreadGoalReviewRejectCategory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadGoalReviewStatus {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadGoalReviewRejectCategory {
+    RetriableGap,
+    NeedsUser,
+    ExternalBlocker,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -589,6 +629,30 @@ pub struct PendingApprovalItem {
 #[serde(rename_all = "snake_case")]
 pub enum PendingApprovalKind {
     Command,
+    OpenQuestion,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenQuestionResolveStatus {
+    Resolved,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenQuestionResolveParams {
+    pub thread_id: ThreadId,
+    pub question_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    pub workspace_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenQuestionResolveResponse {
+    pub thread_id: ThreadId,
+    pub question_id: String,
+    pub goal_id: String,
+    pub status: OpenQuestionResolveStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -647,6 +711,7 @@ pub enum BoundaryOp {
     AgentTree(AgentTreeParams),
     ApprovalsList(ApprovalsListParams),
     CheckpointRestore(CheckpointRestoreParams),
+    OpenQuestionResolve(OpenQuestionResolveParams),
     TurnStart(TurnStartParams),
     TurnInterrupt(TurnInterruptParams),
     ApprovalDecision(ApprovalDecisionParams),
@@ -669,6 +734,7 @@ pub enum BoundaryOpResponse {
     AgentTree(AgentTreeResponse),
     ApprovalsList(ApprovalsListResponse),
     CheckpointRestored(CheckpointRestoreResponse),
+    OpenQuestionResolved(OpenQuestionResolveResponse),
     TurnStarted(TurnStartResponse),
     TurnInterrupted(TurnInterruptResponse),
     ApprovalDecisionSubmitted(ApprovalDecisionResponse),
@@ -716,6 +782,8 @@ pub enum RuntimeEventKindFilter {
     ThreadGoalTurnStarted,
     ThreadGoalToolCompleted,
     ReviewSubmitted,
+    OpenQuestionRecorded,
+    OpenQuestionResolved,
     ThreadGoalReport,
     RuntimeError,
 }
@@ -958,6 +1026,54 @@ mod tests {
         assert_eq!(response_value["type"], "thread_goal_set");
         let decoded_response: BoundaryOpResponse =
             serde_json::from_value(response_value).expect("deserialize thread goal set response");
+        assert_eq!(decoded_response, response);
+    }
+
+    #[test]
+    fn open_question_resolve_boundary_op_round_trips() {
+        let params = OpenQuestionResolveParams {
+            thread_id: ThreadId::new("thread_open_question_protocol"),
+            question_id: "oq_protocol".to_string(),
+            answer: Some("Ship beta users first".to_string()),
+            workspace_root: Some("/repo".to_string()),
+        };
+        let op = BoundaryOp::OpenQuestionResolve(params.clone());
+
+        let value = serde_json::to_value(&op).expect("serialize open question resolve op");
+        assert_eq!(
+            value,
+            json!({
+                "type": "open_question_resolve",
+                "thread_id": "thread_open_question_protocol",
+                "question_id": "oq_protocol",
+                "answer": "Ship beta users first",
+                "workspace_root": "/repo"
+            })
+        );
+        let decoded: BoundaryOp =
+            serde_json::from_value(value).expect("deserialize open question resolve op");
+        assert_eq!(decoded, op);
+
+        let response = BoundaryOpResponse::OpenQuestionResolved(OpenQuestionResolveResponse {
+            thread_id: ThreadId::new("thread_open_question_protocol"),
+            question_id: "oq_protocol".to_string(),
+            goal_id: "goal_protocol".to_string(),
+            status: OpenQuestionResolveStatus::Resolved,
+        });
+        let response_value =
+            serde_json::to_value(&response).expect("serialize open question resolve response");
+        assert_eq!(
+            response_value,
+            json!({
+                "type": "open_question_resolved",
+                "thread_id": "thread_open_question_protocol",
+                "question_id": "oq_protocol",
+                "goal_id": "goal_protocol",
+                "status": "resolved"
+            })
+        );
+        let decoded_response: BoundaryOpResponse =
+            serde_json::from_value(response_value).expect("deserialize open question response");
         assert_eq!(decoded_response, response);
     }
 

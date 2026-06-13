@@ -57,6 +57,7 @@ pub fn run() {
             commands::approval_decision,
             commands::submit_user_input,
             commands::approvals_list,
+            commands::open_question_resolve,
             commands::checkpoint_restore,
             commands::events_replay,
             commands::events_subscribe,

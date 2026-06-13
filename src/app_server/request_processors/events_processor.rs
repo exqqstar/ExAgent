@@ -207,6 +207,12 @@ fn runtime_event_kind_matches(filter: &RuntimeEventKindFilter, kind: &RuntimeEve
             RuntimeEventKindFilter::ReviewSubmitted,
             RuntimeEventKind::ReviewSubmitted { .. },
         ) | (
+            RuntimeEventKindFilter::OpenQuestionRecorded,
+            RuntimeEventKind::OpenQuestionRecorded { .. },
+        ) | (
+            RuntimeEventKindFilter::OpenQuestionResolved,
+            RuntimeEventKind::OpenQuestionResolved { .. },
+        ) | (
             RuntimeEventKindFilter::ThreadGoalReport,
             RuntimeEventKind::ThreadGoalReport { .. },
         ) | (

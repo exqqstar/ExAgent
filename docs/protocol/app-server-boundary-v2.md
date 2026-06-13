@@ -36,9 +36,11 @@ The current response advertises:
     "agent_tree",
     "approvals_list",
     "checkpoint_restore",
+    "open_question_resolve",
     "turn_start",
     "turn_interrupt",
     "approval_decision",
+    "submit_user_input",
     "events_replay"
   ],
   "supported_streams": ["events_subscribe"],
@@ -248,16 +250,26 @@ The response contains the actionable inbox projection:
       "goal_id": "goal_...",
       "requested_at_ms": 1710000000000,
       "checkpoint_id": "8f3..."
+    },
+    {
+      "thread_id": "session_...",
+      "approval_id": "oq_...",
+      "kind": "open_question",
+      "summary": "Which customer segment ships first?",
+      "detail": "Blocks: rollout targeting",
+      "goal_id": "goal_...",
+      "requested_at_ms": 1710000001000
     }
   ]
 }
 ```
 
-`kind` is currently `command`; patch approvals can use the same shape later.
-For command approvals, `summary` is a compact command line and `detail` is the
-full command. `goal_id` is populated only when the app-server has a goal store
-configured and the approval's thread currently has an active goal. If there is
-no goal store, no goal, or a non-active goal, `goal_id` is `null` or omitted.
+`kind` is currently `command` or `open_question`; patch approvals can use the
+same shape later. For command approvals, `summary` is a compact command line and
+`detail` is the full command. For open questions, `approval_id` carries the
+question id, `summary` is the question, and `detail` names what it blocks.
+`goal_id` is populated when the item belongs to a goal. Command approvals use
+the active goal for the loaded runtime; open questions use their persisted goal.
 `checkpoint_id` is populated for approval-gated mutating commands when a git
 workspace checkpoint was created before the approval request. It is omitted
 when the workspace is not a git repository or checkpoint creation failed.
@@ -267,6 +279,45 @@ loaded runtimes because the in-memory `PolicyManager` is the source of truth
 for actionable approvals. A thread waiting for approval is loaded by
 definition. Cold historical `approval_requested` events are transcript history,
 not inbox items.
+
+Open questions are resolved with:
+
+```json
+{
+  "type": "open_question_resolve",
+  "thread_id": "session_...",
+  "question_id": "oq_...",
+  "answer": "Ship beta users first.",
+  "workspace_root": "."
+}
+```
+
+The response is:
+
+```json
+{
+  "type": "open_question_resolved",
+  "thread_id": "session_...",
+  "question_id": "oq_...",
+  "goal_id": "goal_...",
+  "status": "resolved"
+}
+```
+
+Resolving an open question updates the persisted Forge question store and
+records an `open_question_resolved` event in the thread rollout.
+
+## Goal Reports
+
+`thread_goal_report` events include the base unattended-goal summary fields
+(`goal_id`, `objective`, `final_status`, `turns_run`, `tokens_used`,
+`token_budget`, `time_used_seconds`, `changed_files`,
+`pending_approvals_count`, `summary`). Forge-enabled reports may also include:
+
+- `open_questions`: unresolved questions still blocking completion, each with
+  `question_id`, `question`, and `blocks_what`.
+- `review_summary`: the latest Forge review ticket, with `ticket_id`, `status`,
+  optional `reviewed_hash`, optional `reject_category`, and optional `findings`.
 
 ## Checkpoint Restore
 
@@ -625,6 +676,9 @@ Risky command approvals are exposed as events and inbox items:
 - `approval_requested`: command execution is waiting for a decision. It may
   include `checkpoint_id` when a pre-action workspace checkpoint exists.
 - `approval_decision`: approval or denial has been recorded.
+- `open_question_recorded`: a Forge goal recorded a deferred question.
+- `open_question_resolved`: a deferred Forge question was answered or dismissed
+  through the inbox.
 
 Approval decisions are submitted with the `approval_decision` boundary op using
 the `thread_id`, optional `turn_id`, `approval_id`, and `decision`.

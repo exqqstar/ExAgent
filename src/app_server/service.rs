@@ -8,11 +8,12 @@ use crate::app_server::protocol::{
     AgentRunResponse, AgentTreeParams, AgentTreeResponse, ApprovalDecisionParams,
     ApprovalDecisionResponse, ApprovalsListParams, ApprovalsListResponse, BoundaryOp,
     BoundaryOpResponse, CheckpointRestoreParams, CheckpointRestoreResponse, EventsReplayParams,
-    EventsReplayResponse, EventsSubscribeParams, RunParams, SubmitUserInputParams,
-    SubmitUserInputResponse, ThreadCompactParams, ThreadCompactResponse, ThreadForkParams,
-    ThreadForkResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, TurnInterruptParams,
-    TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    EventsReplayResponse, EventsSubscribeParams, OpenQuestionResolveParams,
+    OpenQuestionResolveResponse, RunParams, SubmitUserInputParams, SubmitUserInputResponse,
+    ThreadCompactParams, ThreadCompactResponse, ThreadForkParams, ThreadForkResponse,
+    ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
+    ThreadStartParams, ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse,
+    TurnStartParams, TurnStartResponse,
 };
 use crate::app_server::ThreadManager;
 use crate::config::AgentConfig;
@@ -49,6 +50,10 @@ pub trait AppServerBoundary: Send + Sync {
         &self,
         params: SubmitUserInputParams,
     ) -> Result<SubmitUserInputResponse>;
+    async fn open_question_resolve(
+        &self,
+        params: OpenQuestionResolveParams,
+    ) -> Result<OpenQuestionResolveResponse>;
     async fn submit_boundary_op(&self, op: BoundaryOp) -> Result<BoundaryOpResponse>;
     async fn events_replay(&self, params: EventsReplayParams) -> Result<EventsReplayResponse>;
     async fn events_subscribe(
@@ -192,6 +197,13 @@ impl AppServerService {
         self.thread_manager.checkpoint_restore(params).await
     }
 
+    pub async fn open_question_resolve(
+        &self,
+        params: OpenQuestionResolveParams,
+    ) -> Result<OpenQuestionResolveResponse> {
+        self.thread_manager.open_question_resolve(params).await
+    }
+
     pub async fn turn_start(&self, params: TurnStartParams) -> Result<TurnStartResponse> {
         self.thread_manager.turn_start(params).await
     }
@@ -301,6 +313,13 @@ impl AppServerBoundary for AppServerService {
         params: SubmitUserInputParams,
     ) -> Result<SubmitUserInputResponse> {
         self.submit_user_input(params).await
+    }
+
+    async fn open_question_resolve(
+        &self,
+        params: OpenQuestionResolveParams,
+    ) -> Result<OpenQuestionResolveResponse> {
+        self.open_question_resolve(params).await
     }
 
     async fn submit_boundary_op(&self, op: BoundaryOp) -> Result<BoundaryOpResponse> {

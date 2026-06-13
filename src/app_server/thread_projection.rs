@@ -969,6 +969,8 @@ mod tests {
                 "apps/desktop/src/components/TranscriptList.tsx".to_string(),
             ],
             pending_approvals_count: 2,
+            open_questions: vec![],
+            review_summary: None,
             summary: "The goal completed after runtime and desktop updates.".to_string(),
         };
         let events = vec![
@@ -1013,6 +1015,8 @@ mod tests {
             time_used_seconds: 90,
             changed_files: vec!["src/runtime/goal/runtime.rs".to_string()],
             pending_approvals_count: 0,
+            open_questions: vec![],
+            review_summary: None,
             summary: "The goal completed after an external status update.".to_string(),
         };
         let events = vec![RuntimeEvent {

@@ -4,12 +4,13 @@ use exagent::app_server::protocol::{
     AgentTreeParams, AgentTreeResponse, ApprovalDecisionParams, ApprovalDecisionResponse,
     ApprovalDecisionStatus, ApprovalsListParams, ApprovalsListResponse, CheckpointRestoreParams,
     CheckpointRestoreResponse, EventsReplayParams, EventsReplayResponse, EventsSubscribeParams,
-    SubmitUserInputParams, SubmitUserInputResponse, ThreadCompactParams, ThreadCompactResponse,
-    ThreadForkParams, ThreadForkResponse, ThreadGoalClearParams, ThreadGoalClearResponse,
-    ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse,
-    ThreadGoalStatus, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadStartResponse, TurnContextOverrides, TurnInterruptParams,
-    TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    OpenQuestionResolveParams, OpenQuestionResolveResponse, SubmitUserInputParams,
+    SubmitUserInputResponse, ThreadCompactParams, ThreadCompactResponse, ThreadForkParams,
+    ThreadForkResponse, ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams,
+    ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus,
+    ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
+    ThreadStartResponse, TurnContextOverrides, TurnInterruptParams, TurnInterruptResponse,
+    TurnStartParams, TurnStartResponse,
 };
 use exagent::config::ThinkingMode;
 use exagent::events::{
@@ -861,6 +862,31 @@ pub async fn approvals_list(
         .approvals_list(
             &project_id,
             ApprovalsListParams {
+                workspace_root: None,
+            },
+        )
+        .await
+        .map_err(error_string)
+}
+
+#[tauri::command]
+pub async fn open_question_resolve(
+    state: State<'_, DesktopState>,
+    project_id: String,
+    thread_id: String,
+    question_id: String,
+    answer: Option<String>,
+) -> CommandResult<OpenQuestionResolveResponse> {
+    state
+        .facade
+        .read()
+        .await
+        .open_question_resolve(
+            &project_id,
+            OpenQuestionResolveParams {
+                thread_id: ThreadId::new(thread_id),
+                question_id,
+                answer,
                 workspace_root: None,
             },
         )

@@ -1252,6 +1252,29 @@ export async function submitApprovalDecision(
   });
 }
 
+export async function resolveOpenQuestion(
+  projectId: string,
+  threadId: string,
+  questionId: string,
+  answer?: string | null
+) {
+  if (!isTauriRuntime()) {
+    mockPendingApprovals = mockPendingApprovals.filter((item) => item.approval_id !== questionId);
+    return {
+      thread_id: threadId,
+      question_id: questionId,
+      status: "resolved"
+    };
+  }
+
+  return invokeCommand("open_question_resolve", {
+    projectId,
+    threadId,
+    questionId,
+    answer: answer?.trim() ? answer.trim() : null
+  });
+}
+
 export async function submitUserInput(
   projectId: string,
   threadId: string,
@@ -1719,6 +1742,7 @@ export const exagentClient = {
   startThread,
   startTurn,
   submitApprovalDecision,
+  resolveOpenQuestion,
   submitUserInput,
   subscribeImageDragDrop,
   subscribeRuntimeEvents,

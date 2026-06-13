@@ -30,6 +30,7 @@ export function ApprovalInbox() {
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [rollbackItem, setRollbackItem] = useState<PendingApprovalItem | null>(null);
   const [rollbackConfirmed, setRollbackConfirmed] = useState(false);
+  const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({});
   const selectedCount = workbench.selectedApprovalIds.size;
   const groups = useMemo(() => groupApprovals(workbench.pendingApprovals, t), [workbench.pendingApprovals, t]);
 
@@ -126,34 +127,39 @@ export function ApprovalInbox() {
                     {group.items.map((item) => {
                       const expanded = expandedIds.has(item.approval_id);
                       const selected = workbench.selectedApprovalIds.has(item.approval_id);
+                      const isOpenQuestion = item.kind === "open_question";
                       return (
                         <article
                           key={item.approval_id}
                           className="rounded-lg border border-border bg-surface px-3 py-3"
                         >
                           <div className="flex min-w-0 items-start gap-3">
-                            <label className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center">
-                              <span className="sr-only">
-                                {t("approvals.inbox.select")} {item.summary}
-                              </span>
-                              <input
-                                type="checkbox"
-                                className="h-4 w-4 rounded border-border bg-surface-2"
-                                checked={selected}
-                                onChange={() => workbench.toggleApprovalSelection(item.approval_id)}
-                              />
-                            </label>
+                            {isOpenQuestion ? null : (
+                              <label className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center">
+                                <span className="sr-only">
+                                  {t("approvals.inbox.select")} {item.summary}
+                                </span>
+                                <input
+                                  type="checkbox"
+                                  className="h-4 w-4 rounded border-border bg-surface-2"
+                                  checked={selected}
+                                  onChange={() => workbench.toggleApprovalSelection(item.approval_id)}
+                                />
+                              </label>
+                            )}
                             <div className="min-w-0 flex-1">
                               <div className="flex min-w-0 items-start justify-between gap-2">
                                 <div className="min-w-0">
                                   <p className="type-title-sm truncate text-ink">{item.summary}</p>
                                   <div className="mt-1 flex flex-wrap items-center gap-1.5">
                                     <Badge variant="warning">{item.kind}</Badge>
-                                    <Badge variant={item.checkpoint_id ? "info" : "neutral"}>
-                                      {item.checkpoint_id
-                                        ? `${t("approvals.inbox.checkpoint")} ${item.checkpoint_id}`
-                                        : t("approvals.inbox.rollbackUnavailable")}
-                                    </Badge>
+                                    {isOpenQuestion ? null : (
+                                      <Badge variant={item.checkpoint_id ? "info" : "neutral"}>
+                                        {item.checkpoint_id
+                                          ? `${t("approvals.inbox.checkpoint")} ${item.checkpoint_id}`
+                                          : t("approvals.inbox.rollbackUnavailable")}
+                                      </Badge>
+                                    )}
                                     <span className="type-code-sm text-subtle">
                                       {t("approvals.inbox.requested")}{" "}
                                       {formatRequestedAt(item.requested_at_ms, t("approvals.inbox.requestedUnknown"))}
@@ -183,50 +189,88 @@ export function ApprovalInbox() {
                                   {item.detail}
                                 </pre>
                               ) : null}
+                              {isOpenQuestion ? (
+                                <textarea
+                                  className="type-body-sm mt-3 min-h-24 w-full resize-y rounded-md border border-border bg-surface-2 px-3 py-2 text-ink outline-none focus:border-accent"
+                                  value={questionAnswers[item.approval_id] ?? ""}
+                                  aria-label={formatTemplate(t("approvals.inbox.answerFor"), {
+                                    summary: item.summary
+                                  })}
+                                  placeholder={t("approvals.inbox.answerPlaceholder")}
+                                  onChange={(event) =>
+                                    setQuestionAnswers((current) => ({
+                                      ...current,
+                                      [item.approval_id]: event.target.value
+                                    }))
+                                  }
+                                />
+                              ) : null}
                               <div className="mt-3 flex flex-wrap items-center gap-2">
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  aria-label={formatTemplate(t("approvals.inbox.approveFor"), {
-                                    summary: item.summary
-                                  })}
-                                  disabled={workbench.approvalsStatus === "submitting"}
-                                  onClick={() => void workbench.approveInboxApproval(item)}
-                                >
-                                  <Check className="h-3.5 w-3.5" />
-                                  {t("approvals.inbox.approve")}
-                                </Button>
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="danger"
-                                  aria-label={formatTemplate(t("approvals.inbox.rejectFor"), {
-                                    summary: item.summary
-                                  })}
-                                  disabled={workbench.approvalsStatus === "submitting"}
-                                  onClick={() => void workbench.rejectInboxApproval(item)}
-                                >
-                                  <X className="h-3.5 w-3.5" />
-                                  {t("approvals.inbox.reject")}
-                                </Button>
-                                {item.checkpoint_id ? (
+                                {isOpenQuestion ? (
                                   <Button
                                     type="button"
                                     size="sm"
-                                    variant="outline"
-                                    aria-label={formatTemplate(t("approvals.inbox.rejectRollbackFor"), {
+                                    aria-label={formatTemplate(t("approvals.inbox.resolveQuestionFor"), {
                                       summary: item.summary
                                     })}
                                     disabled={workbench.approvalsStatus === "submitting"}
-                                    onClick={() => openRollback(item)}
+                                    onClick={() =>
+                                      void workbench.resolveOpenQuestion(
+                                        item,
+                                        questionAnswers[item.approval_id] ?? ""
+                                      )
+                                    }
                                   >
-                                    <RotateCcw className="h-3.5 w-3.5" />
-                                    {t("approvals.inbox.rejectRollback")}
+                                    <Check className="h-3.5 w-3.5" />
+                                    {t("approvals.inbox.resolveQuestion")}
                                   </Button>
                                 ) : (
-                                  <span className="type-body-sm text-muted">
-                                    {t("approvals.inbox.rollbackUnavailable")}
-                                  </span>
+                                  <>
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      aria-label={formatTemplate(t("approvals.inbox.approveFor"), {
+                                        summary: item.summary
+                                      })}
+                                      disabled={workbench.approvalsStatus === "submitting"}
+                                      onClick={() => void workbench.approveInboxApproval(item)}
+                                    >
+                                      <Check className="h-3.5 w-3.5" />
+                                      {t("approvals.inbox.approve")}
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="danger"
+                                      aria-label={formatTemplate(t("approvals.inbox.rejectFor"), {
+                                        summary: item.summary
+                                      })}
+                                      disabled={workbench.approvalsStatus === "submitting"}
+                                      onClick={() => void workbench.rejectInboxApproval(item)}
+                                    >
+                                      <X className="h-3.5 w-3.5" />
+                                      {t("approvals.inbox.reject")}
+                                    </Button>
+                                    {item.checkpoint_id ? (
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        aria-label={formatTemplate(t("approvals.inbox.rejectRollbackFor"), {
+                                          summary: item.summary
+                                        })}
+                                        disabled={workbench.approvalsStatus === "submitting"}
+                                        onClick={() => openRollback(item)}
+                                      >
+                                        <RotateCcw className="h-3.5 w-3.5" />
+                                        {t("approvals.inbox.rejectRollback")}
+                                      </Button>
+                                    ) : (
+                                      <span className="type-body-sm text-muted">
+                                        {t("approvals.inbox.rollbackUnavailable")}
+                                      </span>
+                                    )}
+                                  </>
                                 )}
                               </div>
                             </div>
@@ -318,6 +362,10 @@ function formatApprovalActionStatus(
         t(status.decision === "approved" ? "approvals.inbox.status.approved" : "approvals.inbox.status.denied"),
         { approvalId: status.approval_id }
       );
+    case "open_question_resolved":
+      return formatTemplate(t("approvals.inbox.status.openQuestionResolved"), {
+        approvalId: status.approval_id
+      });
     case "batch_approved":
       return formatTemplate(t("approvals.inbox.status.batchApproved"), {
         count: status.count,

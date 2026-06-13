@@ -175,7 +175,7 @@ export interface AgentTreeResponse {
   root: AgentTreeNode;
 }
 
-export type PendingApprovalKind = "command" | "patch";
+export type PendingApprovalKind = "command" | "patch" | "open_question";
 
 export interface PendingApprovalItem {
   thread_id: string;
@@ -203,6 +203,7 @@ export interface CheckpointRestoreResponse {
 
 export type ApprovalActionStatus =
   | { type: "approval_decision"; approval_id: string; decision: "approved" | "denied" }
+  | { type: "open_question_resolved"; approval_id: string }
   | { type: "batch_approved"; count: number }
   | { type: "batch_partial_failed"; completed: number; total: number; approval_id: string; error: string }
   | { type: "rollback_unavailable"; approval_id: string }
@@ -325,7 +326,23 @@ export interface ThreadGoalReport {
   time_used_seconds: number;
   changed_files: string[];
   pending_approvals_count: number;
+  open_questions?: ThreadGoalReportOpenQuestion[];
+  review_summary?: ThreadGoalReviewSummary | null;
   summary: string;
+}
+
+export interface ThreadGoalReportOpenQuestion {
+  question_id: string;
+  question: string;
+  blocks_what: string;
+}
+
+export interface ThreadGoalReviewSummary {
+  ticket_id: string;
+  status: "pending" | "approved" | "rejected";
+  reviewed_hash?: string | null;
+  reject_category?: "retriable_gap" | "needs_user" | "external_blocker" | null;
+  findings?: string | null;
 }
 
 export interface DraftThreadGoal {

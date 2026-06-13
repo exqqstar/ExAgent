@@ -357,11 +357,21 @@ fn build_chatgpt_codex_responses_request(
                     }));
                 }
             }
-            MessageRole::Tool => input.push(json!({
-                "type": "function_call_output",
-                "call_id": message.tool_call_id.as_deref().unwrap_or_default(),
-                "output": message.content,
-            })),
+            MessageRole::Tool => {
+                let tool_call_id = message.tool_call_id.as_deref().unwrap_or_default();
+                input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": tool_call_id,
+                    "output": message.content,
+                }));
+                if let Some(image_message) = tool_result_image_user_message(tool_call_id, message) {
+                    input.push(json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": build_chatgpt_codex_user_content(&image_message),
+                    }));
+                }
+            }
         }
     }
 
@@ -419,6 +429,36 @@ fn build_chatgpt_codex_user_content(message: &ConversationMessage) -> Vec<Value>
             }
         })
         .collect()
+}
+
+fn tool_result_image_user_message(
+    tool_call_id: &str,
+    message: &ConversationMessage,
+) -> Option<ConversationMessage> {
+    let mut image_parts = message
+        .parts
+        .iter()
+        .filter(|part| part.is_image())
+        .cloned()
+        .collect::<Vec<_>>();
+    if image_parts.is_empty() {
+        return None;
+    }
+    let marker = format!("[image from tool result {tool_call_id}]");
+    let mut parts = vec![ConversationContentPart::Text {
+        text: marker.clone(),
+    }];
+    parts.append(&mut image_parts);
+    Some(ConversationMessage {
+        role: MessageRole::User,
+        content: marker,
+        parts,
+        tool_call_id: None,
+        tool_calls: vec![],
+        reasoning: vec![],
+        injected: true,
+        internal_source: Some("tool_result_image".to_string()),
+    })
 }
 
 fn chatgpt_codex_image_part(url: String, detail: Option<ImageDetail>) -> Value {
@@ -842,7 +882,7 @@ mod tests {
     use crate::llm::{LlmClient, LlmRequestOptions, LlmStreamEvent, LlmStreamSink};
     use crate::model::reasoning::{ReasoningCapabilities, ReasoningProtocol};
     use crate::resolved::ResolvedCredential;
-    use crate::types::{ConversationMessage, ImageDetail, UserInput};
+    use crate::types::{ConversationContentPart, ConversationMessage, ImageDetail, UserInput};
 
     #[derive(Default)]
     struct RecordingTokenRefreshSink {
@@ -991,6 +1031,48 @@ mod tests {
                     .as_str()
                     .is_some_and(|text| text.contains("image unavailable"))
         }));
+    }
+
+    #[test]
+    fn responses_request_injects_tool_result_image_parts() {
+        let message = ConversationMessage::tool_with_parts(
+            "call_1",
+            "Viewed image",
+            vec![ConversationContentPart::ImageUrl {
+                url: "data:image/png;base64,AAA".to_string(),
+                detail: Some(ImageDetail::High),
+            }],
+        );
+
+        let request = super::build_chatgpt_codex_responses_request(
+            "gpt-5.5".to_string(),
+            &[message],
+            &[],
+            &LlmRequestOptions::default(),
+            &openai_reasoning_capabilities(),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            request["input"][0],
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "Viewed image"
+            })
+        );
+        assert_eq!(
+            request["input"][1]["content"],
+            json!([
+                { "type": "input_text", "text": "[image from tool result call_1]" },
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,AAA",
+                    "detail": "high"
+                }
+            ])
+        );
     }
 
     #[tokio::test]

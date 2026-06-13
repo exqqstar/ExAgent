@@ -350,7 +350,7 @@ impl ThreadSession {
                 .live_state
                 .write()
                 .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?;
-            if !state.overlay.has_pending_approval() {
+            if !state.overlay.has_pending_approval() && !state.overlay.has_pending_user_input() {
                 return Err(ThreadRuntimeError::TurnRejected {
                     thread_id: self.thread_id.clone(),
                     reason: "thread has no active turn".to_string(),
@@ -366,20 +366,24 @@ impl ThreadSession {
             let interrupted_turn_id = turn_id.or(latest_turn_id.clone()).ok_or_else(|| {
                 ThreadRuntimeError::TurnRejected {
                     thread_id: self.thread_id.clone(),
-                    reason: "waiting approval has no turn id".to_string(),
+                    reason: "waiting external input has no turn id".to_string(),
                 }
             })?;
             if let Some(latest_turn_id) = latest_turn_id {
                 if latest_turn_id != interrupted_turn_id {
                     return Err(ThreadRuntimeError::TurnRejected {
                         thread_id: self.thread_id.clone(),
-                        reason: format!("waiting approval turn is {}", latest_turn_id.as_str()),
+                        reason: format!(
+                            "waiting external input turn is {}",
+                            latest_turn_id.as_str()
+                        ),
                     }
                     .into());
                 }
             }
 
             state.overlay.clear_pending_approvals();
+            state.overlay.clear_pending_user_inputs();
             (interrupted_turn_id, state.snapshot.clone())
         };
         self.policy.cancel_pending_for_thread(&self.thread_id).await;

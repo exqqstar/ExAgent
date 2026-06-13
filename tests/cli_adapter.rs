@@ -3,11 +3,11 @@ use std::sync::Mutex;
 use exagent::app_server::protocol::{
     AgentRunResponse, AgentTreeParams, AgentTreeResponse, ApprovalDecisionParams,
     ApprovalDecisionResponse, BoundaryOp, BoundaryOpResponse, EventsReplayParams,
-    EventsReplayResponse, EventsSubscribeParams, RunParams, ThreadCompactParams,
-    ThreadCompactResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, ThreadStatus, ThreadView,
-    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnStatus,
-    TurnView,
+    EventsReplayResponse, EventsSubscribeParams, RunParams, SubmitUserInputParams,
+    SubmitUserInputResponse, ThreadCompactParams, ThreadCompactResponse, ThreadReadParams,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
+    ThreadStartResponse, ThreadStatus, ThreadView, TurnInterruptParams, TurnInterruptResponse,
+    TurnStartParams, TurnStartResponse, TurnStatus, TurnView,
 };
 use exagent::app_server::AppServerBoundary;
 use exagent::cli::CliCommand;
@@ -133,6 +133,13 @@ impl AppServerBoundary for CliBoundary {
         _params: ApprovalDecisionParams,
     ) -> anyhow::Result<ApprovalDecisionResponse> {
         panic!("approval_decision is not used in these CLI adapter tests");
+    }
+
+    async fn submit_user_input(
+        &self,
+        _params: SubmitUserInputParams,
+    ) -> anyhow::Result<SubmitUserInputResponse> {
+        panic!("submit_user_input is not used in these CLI adapter tests");
     }
 
     async fn submit_boundary_op(&self, _op: BoundaryOp) -> anyhow::Result<BoundaryOpResponse> {

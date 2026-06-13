@@ -4,7 +4,7 @@ use serde::de;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{PermissionProfile, ThinkingMode};
-use crate::policy::PolicyMode;
+use crate::policy::{PolicyMode, QuestionPrompt};
 use crate::resolved::ModelRef;
 use crate::runtime::agent_profile::AgentType;
 use crate::runtime::turn_mode::TurnMode;
@@ -106,6 +106,15 @@ pub struct PendingApproval {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PendingUserInput {
+    pub request_id: ApprovalId,
+    pub requested_event_id: EventId,
+    pub tool_name: String,
+    pub questions: Vec<QuestionPrompt>,
+    pub status: ApprovalStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ThreadSnapshot {
     pub thread_id: ThreadId,
     pub workspace_root: PathBuf,
@@ -128,6 +137,8 @@ pub struct ThreadSnapshot {
     pub token_info: Option<TokenUsageInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_approvals: Vec<PendingApproval>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_user_inputs: Vec<PendingUserInput>,
 }
 
 impl ThreadSnapshot {
@@ -177,6 +188,7 @@ impl ThreadSnapshot {
             latest_compaction: None,
             token_info: None,
             pending_approvals: vec![],
+            pending_user_inputs: vec![],
         }
     }
 }

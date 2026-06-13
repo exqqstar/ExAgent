@@ -320,6 +320,35 @@ impl ThreadEventRecorder {
         state.overlay.clear_approval(approval_id);
         Ok(())
     }
+
+    pub(crate) fn apply_user_input_requested(
+        &mut self,
+        request_id: ApprovalId,
+        requested_event_id: EventId,
+        tool_name: String,
+        questions: Vec<crate::policy::QuestionPrompt>,
+    ) -> Result<()> {
+        let mut state = self
+            .live_state
+            .write()
+            .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?;
+        state.overlay.apply_user_input_requested(
+            request_id,
+            requested_event_id,
+            tool_name,
+            questions,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn clear_user_input(&mut self, request_id: &ApprovalId) -> Result<()> {
+        let mut state = self
+            .live_state
+            .write()
+            .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?;
+        state.overlay.clear_user_input(request_id);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

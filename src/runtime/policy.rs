@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::session::ApprovalId;
@@ -14,7 +16,7 @@ static APPROVAL_COUNTER: AtomicU64 = AtomicU64::new(1);
 static PENDING_APPROVAL_ORDER_COUNTER: AtomicU64 = AtomicU64::new(1);
 static POLICY_EVENT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyMode {
     Off,
@@ -58,7 +60,7 @@ pub enum PolicyDecision {
     ReviewRequired,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingApprovalSummary {
     pub thread_id: ThreadId,
     pub approval_id: ApprovalId,
@@ -67,7 +69,7 @@ pub struct PendingApprovalSummary {
     pub checkpoint_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PendingApprovalDetail {
     Command {
@@ -91,6 +93,33 @@ pub struct PendingCommandApproval {
     pub persistent: bool,
     pub reason: String,
     pub checkpoint_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct QuestionPrompt {
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<QuestionOption>,
+    #[serde(default)]
+    pub multi_select: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct QuestionOption {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingUserInputRequest {
+    pub request_id: ApprovalId,
+    pub thread_id: ThreadId,
+    pub tool_name: String,
+    pub questions: Vec<QuestionPrompt>,
+    pub answers: Option<Vec<Vec<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +162,7 @@ impl PendingCommandApprovalRecord {
 #[derive(Clone, Default)]
 pub struct PolicyManager {
     pending: Arc<Mutex<HashMap<String, PendingCommandApprovalRecord>>>,
+    pending_user_input: Arc<Mutex<HashMap<String, PendingUserInputRequest>>>,
 }
 
 impl PolicyManager {
@@ -246,15 +276,90 @@ impl PolicyManager {
             .lock()
             .await
             .retain(|_, record| &record.approval.thread_id != thread_id);
+        self.pending_user_input
+            .lock()
+            .await
+            .retain(|_, request| &request.thread_id != thread_id);
     }
 
     pub async fn pending_count_for_thread(&self, thread_id: &ThreadId) -> usize {
-        self.pending
+        let command_count = self
+            .pending
             .lock()
             .await
             .values()
             .filter(|record| &record.approval.thread_id == thread_id)
-            .count()
+            .count();
+        let user_input_count = self
+            .pending_user_input
+            .lock()
+            .await
+            .values()
+            .filter(|request| &request.thread_id == thread_id)
+            .count();
+        command_count + user_input_count
+    }
+
+    pub async fn create_user_input_request(
+        &self,
+        thread_id: ThreadId,
+        tool_name: &str,
+        questions: Vec<QuestionPrompt>,
+    ) -> PendingUserInputRequest {
+        let request = PendingUserInputRequest {
+            request_id: new_approval_id(),
+            thread_id,
+            tool_name: tool_name.to_string(),
+            questions,
+            answers: None,
+        };
+        self.pending_user_input
+            .lock()
+            .await
+            .insert(request.request_id.as_str().to_string(), request.clone());
+        request
+    }
+
+    pub async fn restore_user_input_request(&self, request: PendingUserInputRequest) {
+        self.pending_user_input
+            .lock()
+            .await
+            .insert(request.request_id.as_str().to_string(), request);
+    }
+
+    pub async fn submit_user_input_answers(
+        &self,
+        request_id: &ApprovalId,
+        answers: Vec<Vec<String>>,
+    ) -> Result<(), String> {
+        let mut pending = self.pending_user_input.lock().await;
+        let Some(request) = pending.get_mut(request_id.as_str()) else {
+            return Err(format!(
+                "unknown user input request id: {}",
+                request_id.as_str()
+            ));
+        };
+        request.answers = Some(answers);
+        Ok(())
+    }
+
+    pub async fn take_pending_user_input(
+        &self,
+        request_id: &ApprovalId,
+    ) -> Result<PendingUserInputRequest, String> {
+        self.pending_user_input
+            .lock()
+            .await
+            .remove(request_id.as_str())
+            .ok_or_else(|| format!("unknown user input request id: {}", request_id.as_str()))
+    }
+
+    pub async fn has_pending_user_input_for_thread(&self, thread_id: &ThreadId) -> bool {
+        self.pending_user_input
+            .lock()
+            .await
+            .values()
+            .any(|request| &request.thread_id == thread_id)
     }
 }
 
@@ -299,4 +404,77 @@ fn review_required_reason(command: &str) -> Option<&'static str> {
         return Some("risky command matched approval policy");
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PolicyManager, QuestionOption, QuestionPrompt};
+    use crate::types::ThreadId;
+
+    fn question(text: &str) -> QuestionPrompt {
+        QuestionPrompt {
+            question: text.to_string(),
+            header: Some("Choice".to_string()),
+            options: vec![QuestionOption {
+                label: "A".to_string(),
+                description: Some("Option A".to_string()),
+            }],
+            multi_select: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn user_input_request_create_submit_take_round_trips_answers() {
+        let policy = PolicyManager::default();
+        let thread_id = ThreadId::new("thread_question_policy");
+        let request = policy
+            .create_user_input_request(thread_id.clone(), "ask_user", vec![question("Pick one?")])
+            .await;
+
+        policy
+            .submit_user_input_answers(&request.request_id, vec![vec!["A".to_string()]])
+            .await
+            .unwrap();
+        let taken = policy
+            .take_pending_user_input(&request.request_id)
+            .await
+            .unwrap();
+
+        assert_eq!(taken.thread_id, thread_id);
+        assert_eq!(taken.questions, vec![question("Pick one?")]);
+        assert_eq!(taken.answers, Some(vec![vec!["A".to_string()]]));
+    }
+
+    #[tokio::test]
+    async fn user_input_request_take_without_submit_represents_dismissal() {
+        let policy = PolicyManager::default();
+        let request = policy
+            .create_user_input_request(
+                ThreadId::new("thread_question_dismiss"),
+                "ask_user",
+                vec![question("Continue?")],
+            )
+            .await;
+
+        let taken = policy
+            .take_pending_user_input(&request.request_id)
+            .await
+            .unwrap();
+
+        assert_eq!(taken.answers, None);
+    }
+
+    #[tokio::test]
+    async fn cancel_pending_for_thread_clears_user_input_requests() {
+        let policy = PolicyManager::default();
+        let thread_id = ThreadId::new("thread_question_cancel");
+        policy
+            .create_user_input_request(thread_id.clone(), "ask_user", vec![question("Cancel?")])
+            .await;
+        assert_eq!(policy.pending_count_for_thread(&thread_id).await, 1);
+
+        policy.cancel_pending_for_thread(&thread_id).await;
+
+        assert_eq!(policy.pending_count_for_thread(&thread_id).await, 0);
+    }
 }

@@ -91,6 +91,12 @@ impl ThinkingMode {
 }
 
 #[derive(Debug, Clone)]
+pub struct WebSearchConfig {
+    pub provider: String,
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub model: ResolvedModelConfig,
     pub thinking_mode: Option<ThinkingMode>,
@@ -107,6 +113,7 @@ pub struct AgentConfig {
     pub skills_metadata_max_chars: usize,
     pub skills_user_roots: Vec<PathBuf>,
     pub mcp_servers: Vec<McpServerConfig>,
+    pub web_search: Option<WebSearchConfig>,
 }
 
 impl AgentConfig {
@@ -157,8 +164,22 @@ impl Default for AgentConfig {
                 .into_iter()
                 .collect(),
             mcp_servers: Vec::new(),
+            web_search: web_search_config_from_env(),
         }
     }
+}
+
+fn web_search_config_from_env() -> Option<WebSearchConfig> {
+    let api_key = std::env::var("EXAGENT_WEB_SEARCH_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    let provider = std::env::var("EXAGENT_WEB_SEARCH_PROVIDER")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "brave".to_string());
+    Some(WebSearchConfig { provider, api_key })
 }
 
 fn parse_optional_bool_env(key: &str) -> Option<bool> {
@@ -237,6 +258,8 @@ mod tests {
 
     use crate::model::provider::ProviderProtocol;
     use crate::model::resolved::ResolvedCredential;
+
+    static WEB_SEARCH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn thinking_mode_labels_round_trip_through_serde() {
@@ -425,6 +448,41 @@ mod tests {
     }
 
     #[test]
+    fn web_search_config_from_env_requires_api_key_and_defaults_to_brave() {
+        let _guard = WEB_SEARCH_ENV_LOCK.lock().unwrap();
+        let previous_key = std::env::var("EXAGENT_WEB_SEARCH_API_KEY").ok();
+        let previous_provider = std::env::var("EXAGENT_WEB_SEARCH_PROVIDER").ok();
+        std::env::set_var("EXAGENT_WEB_SEARCH_API_KEY", " search-key ");
+        std::env::remove_var("EXAGENT_WEB_SEARCH_PROVIDER");
+
+        let config = web_search_config_from_env().expect("web search config");
+
+        assert_eq!(config.provider, "brave");
+        assert_eq!(config.api_key, "search-key");
+
+        restore_env("EXAGENT_WEB_SEARCH_API_KEY", previous_key);
+        restore_env("EXAGENT_WEB_SEARCH_PROVIDER", previous_provider);
+    }
+
+    #[test]
+    fn web_search_config_from_env_normalizes_provider_and_ignores_empty_key() {
+        let _guard = WEB_SEARCH_ENV_LOCK.lock().unwrap();
+        let previous_key = std::env::var("EXAGENT_WEB_SEARCH_API_KEY").ok();
+        let previous_provider = std::env::var("EXAGENT_WEB_SEARCH_PROVIDER").ok();
+        std::env::set_var("EXAGENT_WEB_SEARCH_API_KEY", " ");
+        std::env::set_var("EXAGENT_WEB_SEARCH_PROVIDER", " BRAVE ");
+
+        assert!(web_search_config_from_env().is_none());
+
+        std::env::set_var("EXAGENT_WEB_SEARCH_API_KEY", "key");
+        let config = web_search_config_from_env().expect("web search config");
+        assert_eq!(config.provider, "brave");
+
+        restore_env("EXAGENT_WEB_SEARCH_API_KEY", previous_key);
+        restore_env("EXAGENT_WEB_SEARCH_PROVIDER", previous_provider);
+    }
+
+    #[test]
     fn only_full_access_is_supported_for_now() {
         assert!(PermissionProfile::FullAccess.is_supported());
         assert!(!PermissionProfile::External.is_supported());
@@ -433,5 +491,12 @@ mod tests {
             PermissionProfile::supported_profiles(),
             vec![PermissionProfile::FullAccess]
         );
+    }
+
+    fn restore_env(key: &str, value: Option<String>) {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
     }
 }

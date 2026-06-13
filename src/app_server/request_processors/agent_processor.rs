@@ -208,6 +208,7 @@ fn collect_agent_event_details(
 ) {
     let mut active_tools_by_thread: HashMap<ThreadId, Vec<ActiveToolInvocation>> = HashMap::new();
     let mut invocation_by_approval: HashMap<ApprovalId, (ThreadId, String)> = HashMap::new();
+    let mut invocation_by_user_input: HashMap<ApprovalId, (ThreadId, String)> = HashMap::new();
     for event in events {
         match &event.kind {
             RuntimeEventKind::SubagentSpawned {
@@ -250,8 +251,25 @@ fn collect_agent_event_details(
                     (event.thread_id.clone(), invocation_id.clone()),
                 );
             }
+            RuntimeEventKind::ToolInvocationWaitingUserInput {
+                invocation_id,
+                request_id,
+                ..
+            } => {
+                invocation_by_user_input.insert(
+                    request_id.clone(),
+                    (event.thread_id.clone(), invocation_id.clone()),
+                );
+            }
             RuntimeEventKind::ApprovalDecision { approval_id, .. } => {
                 if let Some((thread_id, invocation_id)) = invocation_by_approval.remove(approval_id)
+                {
+                    remove_active_tool(&mut active_tools_by_thread, &thread_id, &invocation_id);
+                }
+            }
+            RuntimeEventKind::UserInputResolved { request_id, .. } => {
+                if let Some((thread_id, invocation_id)) =
+                    invocation_by_user_input.remove(request_id)
                 {
                     remove_active_tool(&mut active_tools_by_thread, &thread_id, &invocation_id);
                 }

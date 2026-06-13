@@ -88,6 +88,7 @@ mod tests {
 
             assert!(profile.tool_policy.allows("read_file"));
             assert!(profile.tool_policy.allows("search_files"));
+            assert!(profile.tool_policy.allows("web_search"));
             assert!(profile.tool_policy.allows("list_agents"));
             assert!(profile.tool_policy.allows("send_message"));
             assert!(profile.tool_policy.allows("wait_agent"));

@@ -303,6 +303,7 @@ mod tests {
                     path: dir.path().display().to_string(),
                     scope: "global".into(),
                 }],
+                web_search: Default::default(),
             })
             .await
             .unwrap();

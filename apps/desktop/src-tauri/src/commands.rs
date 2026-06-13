@@ -4,12 +4,12 @@ use exagent::app_server::protocol::{
     AgentTreeParams, AgentTreeResponse, ApprovalDecisionParams, ApprovalDecisionResponse,
     ApprovalDecisionStatus, ApprovalsListParams, ApprovalsListResponse, CheckpointRestoreParams,
     CheckpointRestoreResponse, EventsReplayParams, EventsReplayResponse, EventsSubscribeParams,
-    ThreadCompactParams, ThreadCompactResponse, ThreadForkParams, ThreadForkResponse,
-    ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse,
-    ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams,
-    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartResponse,
-    TurnContextOverrides, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse,
+    SubmitUserInputParams, SubmitUserInputResponse, ThreadCompactParams, ThreadCompactResponse,
+    ThreadForkParams, ThreadForkResponse, ThreadGoalClearParams, ThreadGoalClearResponse,
+    ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse,
+    ThreadGoalStatus, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadStartResponse, TurnContextOverrides, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse,
 };
 use exagent::config::ThinkingMode;
 use exagent::events::{
@@ -813,6 +813,35 @@ pub async fn approval_decision(
                 approval_id: ApprovalId::new(approval_id),
                 decision,
                 note,
+                workspace_root: None,
+            },
+        )
+        .await
+        .map_err(error_string)
+}
+
+#[tauri::command]
+pub async fn submit_user_input(
+    state: State<'_, DesktopState>,
+    project_id: String,
+    thread_id: String,
+    turn_id: Option<String>,
+    request_id: String,
+    answers: Vec<Vec<String>>,
+    dismissed: bool,
+) -> CommandResult<SubmitUserInputResponse> {
+    state
+        .facade
+        .read()
+        .await
+        .submit_user_input(
+            &project_id,
+            SubmitUserInputParams {
+                thread_id: ThreadId::new(thread_id),
+                turn_id: turn_id.map(TurnId::new),
+                request_id: ApprovalId::new(request_id),
+                answers,
+                dismissed,
                 workspace_root: None,
             },
         )

@@ -157,6 +157,7 @@ impl ToolOrchestrator {
             turn_id,
         )
         .await?;
+        self.record_user_input_requested_events(&hook_ctx, &outcome, recorder, snapshot, turn_id)?;
 
         let after_completion_effects = self
             .hooks
@@ -233,6 +234,30 @@ impl ToolOrchestrator {
         }
         Ok(())
     }
+
+    fn record_user_input_requested_events(
+        &self,
+        hook_ctx: &ToolInvocationContext,
+        outcome: &ToolOutcome,
+        recorder: &mut ThreadEventRecorder,
+        snapshot: &ThreadSnapshot,
+        turn_id: &TurnId,
+    ) -> Result<()> {
+        for effect in &outcome.effects {
+            if let ToolRuntimeEffect::UserInputRequested { request_id, .. } = effect {
+                recorder.record(
+                    snapshot,
+                    Some(turn_id),
+                    RuntimeEventKind::ToolInvocationWaitingUserInput {
+                        invocation_id: hook_ctx.invocation_id.clone(),
+                        request_id: request_id.clone(),
+                        reason: "waiting for user input".to_string(),
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn unknown_tool_outcome(call: ToolCall) -> ToolOutcome {
@@ -242,6 +267,7 @@ fn unknown_tool_outcome(call: ToolCall) -> ToolOutcome {
         status: ToolStatus::Error,
         content: format!("Unknown tool: {}", call.name),
         meta: None,
+        parts: Vec::new(),
     })
 }
 
@@ -252,6 +278,7 @@ fn denied_by_agent_profile_outcome(call: ToolCall) -> ToolOutcome {
         status: ToolStatus::Error,
         content: format!("Tool denied by agent profile: {}", call.name),
         meta: None,
+        parts: Vec::new(),
     })
 }
 
@@ -272,6 +299,7 @@ fn approval_required_outcome(
         status: ToolStatus::ReviewRequired,
         content: reason,
         meta: None,
+        parts: Vec::new(),
     })
     .with_effects(effects)
 }
@@ -347,12 +375,29 @@ impl ToolExecutionOutcome {
             _ => false,
         })
     }
+
+    pub(crate) fn user_input_resolved_matches(
+        &self,
+        request_id: &ApprovalId,
+        dismissed: bool,
+    ) -> bool {
+        self.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                ToolEffect::UserInputUpdate(UserInputUpdate::Resolved {
+                    request_id: effect_request_id,
+                    dismissed: effect_dismissed,
+                }) if effect_request_id == request_id && *effect_dismissed == dismissed
+            )
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum ToolEffect {
     ExecSessionUpdate(ExecSessionUpdate),
     ApprovalUpdate(ApprovalUpdate),
+    UserInputUpdate(UserInputUpdate),
     SubagentSpawned(SubagentSpawned),
     SubagentClosed(SubagentClosed),
     InterAgentMessageSent(InterAgentMessageSent),
@@ -401,6 +446,24 @@ impl ToolEffect {
             ToolRuntimeEffect::ApprovalDenied { approval_id, note } => {
                 Self::ApprovalUpdate(ApprovalUpdate::Denied { approval_id, note })
             }
+            ToolRuntimeEffect::UserInputRequested {
+                request_id,
+                thread_id,
+                tool_name,
+                questions,
+            } => Self::UserInputUpdate(UserInputUpdate::Requested {
+                request_id,
+                thread_id,
+                tool_name,
+                questions,
+            }),
+            ToolRuntimeEffect::UserInputResolved {
+                request_id,
+                dismissed,
+            } => Self::UserInputUpdate(UserInputUpdate::Resolved {
+                request_id,
+                dismissed,
+            }),
             ToolRuntimeEffect::SubagentSpawned {
                 invocation_id,
                 tool_call_id,
@@ -491,6 +554,20 @@ pub(crate) enum ApprovalUpdate {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum UserInputUpdate {
+    Requested {
+        request_id: ApprovalId,
+        thread_id: crate::types::ThreadId,
+        tool_name: String,
+        questions: Vec<crate::policy::QuestionPrompt>,
+    },
+    Resolved {
+        request_id: ApprovalId,
+        dismissed: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct SubagentSpawned {
     invocation_id: String,
     tool_call_id: String,
@@ -532,6 +609,9 @@ fn apply_tool_effect(
         ToolEffect::ExecSessionUpdate(update) => recorder.apply_exec_session_update(update),
         ToolEffect::ApprovalUpdate(update) => {
             apply_approval_update(recorder, snapshot, turn_id, update)
+        }
+        ToolEffect::UserInputUpdate(update) => {
+            apply_user_input_update(recorder, snapshot, turn_id, update)
         }
         ToolEffect::SubagentSpawned(spawned) => {
             recorder.record(
@@ -589,6 +669,56 @@ fn apply_tool_effect(
             Ok(())
         }
     }
+}
+
+fn apply_user_input_update(
+    recorder: &mut ThreadEventRecorder,
+    snapshot: &mut ThreadSnapshot,
+    turn_id: &TurnId,
+    update: UserInputUpdate,
+) -> Result<()> {
+    match update {
+        UserInputUpdate::Requested {
+            request_id,
+            thread_id: _thread_id,
+            tool_name,
+            questions,
+        } => {
+            let event_id = recorder.reserve_event_id();
+            recorder.apply_user_input_requested(
+                request_id.clone(),
+                event_id.clone(),
+                tool_name.clone(),
+                questions.clone(),
+            )?;
+            recorder.record_reserved(
+                snapshot,
+                Some(turn_id),
+                event_id,
+                RuntimeEventKind::UserInputRequested {
+                    request_id,
+                    tool_name,
+                    questions,
+                },
+            )?;
+        }
+        UserInputUpdate::Resolved {
+            request_id,
+            dismissed,
+        } => {
+            recorder.clear_user_input(&request_id)?;
+            recorder.record(
+                snapshot,
+                Some(turn_id),
+                RuntimeEventKind::UserInputResolved {
+                    request_id,
+                    dismissed,
+                },
+            )?;
+        }
+    }
+
+    Ok(())
 }
 
 fn apply_approval_update(

@@ -42,6 +42,7 @@ impl ToolHandler for ReadFileTool {
                     status: ToolStatus::Error,
                     content: err.to_string(),
                     meta: None,
+                    parts: Vec::new(),
                 });
             }
         };
@@ -57,6 +58,7 @@ impl ToolHandler for ReadFileTool {
                 status: ToolStatus::Success,
                 content,
                 meta: Some(workspace_path_meta(&resolved)),
+                parts: Vec::new(),
             }),
             Err(err) => ToolOutcome::from_result(ToolResult {
                 tool_call_id: call.id,
@@ -64,6 +66,7 @@ impl ToolHandler for ReadFileTool {
                 status: ToolStatus::Error,
                 content: err.to_string(),
                 meta: None,
+                parts: Vec::new(),
             }),
         }
     }

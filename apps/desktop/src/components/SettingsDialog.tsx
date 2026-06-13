@@ -10,6 +10,7 @@ import {
   Monitor,
   Moon,
   RefreshCw,
+  Search,
   Server,
   Settings2,
   Sparkles,
@@ -21,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { ArchivedConversationsPanel } from "@/components/settings/ArchivedConversationsPanel";
 import { McpSettingsPanel } from "@/components/settings/McpSettingsPanel";
 import { SkillsSettingsPanel } from "@/components/settings/SkillsSettingsPanel";
+import { WebSearchSettingsPanel } from "@/components/settings/WebSearchSettingsPanel";
 import {
   Dialog,
   DialogContent,
@@ -71,6 +73,7 @@ type SettingsSectionId =
   | "providers"
   | "mcp"
   | "skills"
+  | "webSearch"
   | "archive";
 type ProviderPreset = {
   key: string;
@@ -93,6 +96,7 @@ const settingsSections = [
   { id: "providers", labelKey: "settings.sections.providers", icon: KeyRound },
   { id: "mcp", labelKey: "settings.sections.mcp", icon: Server },
   { id: "skills", labelKey: "settings.sections.skills", icon: Sparkles },
+  { id: "webSearch", labelKey: "settings.sections.webSearch", icon: Search },
   { id: "archive", labelKey: "settings.sections.archive", icon: Archive },
 ] as const;
 
@@ -668,6 +672,14 @@ export function SettingsDialog({
               hidden={section !== "skills"}
             >
               <SkillsSettingsPanel />
+            </section>
+            <section
+              id="settings-panel-webSearch"
+              role="tabpanel"
+              aria-labelledby="settings-tab-webSearch"
+              hidden={section !== "webSearch"}
+            >
+              <WebSearchSettingsPanel />
             </section>
             <section
               id="settings-panel-archive"

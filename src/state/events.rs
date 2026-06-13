@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::PermissionProfile;
+use crate::policy::QuestionPrompt;
 use crate::session::{ApprovalId, ApprovalStatus, CompactionSummary, ExecSessionId};
 use crate::types::{
     AssistantTurn, EventId, ThreadId, TokenUsageInfo, ToolResult, ToolStatus, TurnId,
@@ -67,6 +68,11 @@ pub enum RuntimeEventKind {
         approval_id: ApprovalId,
         reason: String,
     },
+    ToolInvocationWaitingUserInput {
+        invocation_id: String,
+        request_id: ApprovalId,
+        reason: String,
+    },
     ToolInvocationOutputDelta {
         invocation_id: String,
         stream: ExecOutputStream,
@@ -119,6 +125,15 @@ pub enum RuntimeEventKind {
         approval_id: ApprovalId,
         status: ApprovalStatus,
         note: Option<String>,
+    },
+    UserInputRequested {
+        request_id: ApprovalId,
+        tool_name: String,
+        questions: Vec<QuestionPrompt>,
+    },
+    UserInputResolved {
+        request_id: ApprovalId,
+        dismissed: bool,
     },
     CompactionWritten {
         summary: CompactionSummary,

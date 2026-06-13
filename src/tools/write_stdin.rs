@@ -84,5 +84,6 @@ fn argument_error(call: ToolCall, message: String) -> ToolOutcome {
         status: crate::types::ToolStatus::Error,
         content: message,
         meta: None,
+        parts: Vec::new(),
     })
 }

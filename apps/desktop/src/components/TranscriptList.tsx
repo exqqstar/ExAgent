@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { ApprovalCard } from "@/components/ApprovalCard";
+import { QuestionCard } from "@/components/QuestionCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -39,6 +40,7 @@ const statusIcon = {
 const toolStatusLabel: Record<NonNullable<TranscriptMessage["toolStatus"]>, string> = {
   running: "Running",
   waiting_approval: "Waiting approval",
+  waiting_user_input: "Waiting input",
   completed: "Completed",
   failed: "Failed",
   cancelled: "Cancelled"
@@ -105,7 +107,10 @@ function renderItemsForTurn(threadId: string, turnId: string, messages: Transcri
   const turnStatus = messages.find((message) => message.turnStatus)?.turnStatus;
   const hasFinalAssistant = messages.some(isFinalAssistantMessage);
   const hasActiveTool = activity.some(
-    (message) => message.toolStatus === "running" || message.toolStatus === "waiting_approval"
+    (message) =>
+      message.toolStatus === "running" ||
+      message.toolStatus === "waiting_approval" ||
+      message.toolStatus === "waiting_user_input"
   );
   const group: TranscriptRenderItem = {
     type: "activity",
@@ -195,6 +200,10 @@ export function TranscriptItem({
 }) {
   if (message.role === "approval") {
     return <ApprovalCard message={message} readOnly={readOnly} />;
+  }
+
+  if (message.toolStatus === "waiting_user_input" || message.requestId) {
+    return <QuestionCard message={message} readOnly={readOnly} />;
   }
 
   if (message.role === "user") {

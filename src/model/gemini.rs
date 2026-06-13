@@ -422,11 +422,18 @@ fn build_gemini_request(
                 let name = tool_names_by_id
                     .get(&tool_call_id)
                     .cloned()
-                    .unwrap_or(tool_call_id);
+                    .unwrap_or_else(|| tool_call_id.clone());
                 contents.push(GeminiContent {
                     role: "user",
                     parts: vec![GeminiPart::function_response(name, message.content.clone())],
                 });
+                if let Some(image_message) = tool_result_image_user_message(&tool_call_id, message)
+                {
+                    contents.push(GeminiContent {
+                        role: "user",
+                        parts: gemini_user_parts(&image_message),
+                    });
+                }
             }
         }
     }
@@ -490,6 +497,36 @@ fn gemini_user_parts(message: &ConversationMessage) -> Vec<GeminiPart> {
             }
         })
         .collect()
+}
+
+fn tool_result_image_user_message(
+    tool_call_id: &str,
+    message: &ConversationMessage,
+) -> Option<ConversationMessage> {
+    let mut image_parts = message
+        .parts
+        .iter()
+        .filter(|part| part.is_image())
+        .cloned()
+        .collect::<Vec<_>>();
+    if image_parts.is_empty() {
+        return None;
+    }
+    let marker = format!("[image from tool result {tool_call_id}]");
+    let mut parts = vec![ConversationContentPart::Text {
+        text: marker.clone(),
+    }];
+    parts.append(&mut image_parts);
+    Some(ConversationMessage {
+        role: MessageRole::User,
+        content: marker,
+        parts,
+        tool_call_id: None,
+        tool_calls: vec![],
+        reasoning: vec![],
+        injected: true,
+        internal_source: Some("tool_result_image".to_string()),
+    })
 }
 
 fn gemini_image_url_part(url: String) -> GeminiPart {
@@ -671,7 +708,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    use crate::types::{ImageDetail, UserInput};
+    use crate::types::{ConversationContentPart, ImageDetail, UserInput};
 
     #[test]
     fn request_serializes_user_image_url_parts() {
@@ -725,5 +762,43 @@ mod tests {
                 .as_str()
                 .is_some_and(|text| text.contains("image unavailable"))
         }));
+    }
+
+    #[test]
+    fn request_injects_tool_result_image_parts() {
+        let message = ConversationMessage::tool_with_parts(
+            "call_1",
+            "Viewed image",
+            vec![ConversationContentPart::ImageUrl {
+                url: "data:image/png;base64,AAA".to_string(),
+                detail: Some(ImageDetail::High),
+            }],
+        );
+
+        let request = build_gemini_request(
+            "gemini-3-pro-preview",
+            &[message],
+            &[],
+            &LlmRequestOptions::default(),
+        )
+        .unwrap();
+        let value = serde_json::to_value(request).unwrap();
+
+        assert_eq!(
+            value["contents"][0]["parts"],
+            json!([{
+                "functionResponse": {
+                    "name": "call_1",
+                    "response": { "content": "Viewed image" }
+                }
+            }])
+        );
+        assert_eq!(
+            value["contents"][1]["parts"],
+            json!([
+                { "text": "[image from tool result call_1]" },
+                { "inlineData": { "mimeType": "image/png", "data": "AAA" } }
+            ])
+        );
     }
 }

@@ -4,12 +4,14 @@ use serde_json::Value;
 use crate::types::{ToolCall, ToolResult};
 
 pub mod apply_patch;
+pub mod ask_user;
 pub mod close_agent;
 pub mod exec_command;
 pub mod followup_task;
 pub mod goal;
 pub mod handler;
 pub mod list_agents;
+pub mod list_dir;
 pub mod outcome;
 pub(crate) mod output_projection;
 pub mod read_file;
@@ -19,7 +21,10 @@ pub mod search_files;
 pub mod send_message;
 pub mod spawn_agent;
 pub mod spec;
+pub mod view_image;
 pub mod wait_agent;
+pub mod web_fetch;
+pub mod web_search;
 pub mod write_file;
 pub mod write_stdin;
 

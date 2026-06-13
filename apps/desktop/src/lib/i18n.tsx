@@ -62,6 +62,7 @@ export type TranslationKey =
   | "settings.sections.providers"
   | "settings.sections.mcp"
   | "settings.sections.skills"
+  | "settings.sections.webSearch"
   | "settings.sections.archive"
   | "settings.sections.aria"
   | "settings.general.title"
@@ -238,6 +239,7 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "settings.sections.providers": "Providers",
     "settings.sections.mcp": "MCP",
     "settings.sections.skills": "Skills",
+    "settings.sections.webSearch": "Web search",
     "settings.sections.archive": "Archive",
     "settings.sections.aria": "Settings sections",
     "settings.general.title": "General",
@@ -405,6 +407,7 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "settings.sections.providers": "模型提供方",
     "settings.sections.mcp": "MCP",
     "settings.sections.skills": "技能",
+    "settings.sections.webSearch": "网页搜索",
     "settings.sections.archive": "归档",
     "settings.sections.aria": "设置分区",
     "settings.general.title": "通用",

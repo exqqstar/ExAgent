@@ -7,12 +7,13 @@ use tokio::sync::broadcast;
 use crate::app_server::protocol::{
     ApprovalDecisionParams, ApprovalDecisionResponse, ApprovalsListParams, ApprovalsListResponse,
     BoundaryOp, BoundaryOpResponse, CheckpointRestoreParams, CheckpointRestoreResponse,
-    EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, ThreadCompactParams,
-    ThreadCompactResponse, ThreadForkParams, ThreadForkResponse, ThreadGoal, ThreadGoalClearParams,
-    ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams,
-    ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams, ThreadReadResponse,
-    ThreadResumeParams, ThreadResumeResponse, ThreadStartParams, ThreadStartResponse,
-    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, SubmitUserInputParams,
+    SubmitUserInputResponse, ThreadCompactParams, ThreadCompactResponse, ThreadForkParams,
+    ThreadForkResponse, ThreadGoal, ThreadGoalClearParams, ThreadGoalClearResponse,
+    ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse,
+    ThreadGoalStatus, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse,
 };
 use crate::app_server::AppServerService;
 use crate::events::RuntimeEvent;
@@ -388,6 +389,20 @@ impl DesktopFacade {
         let project = self.index.project_by_id(project_id).await?;
         self.service
             .approval_decision(ApprovalDecisionParams {
+                workspace_root: Some(project.path.display().to_string()),
+                ..params
+            })
+            .await
+    }
+
+    pub async fn submit_user_input(
+        &self,
+        project_id: &str,
+        params: SubmitUserInputParams,
+    ) -> Result<SubmitUserInputResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        self.service
+            .submit_user_input(SubmitUserInputParams {
                 workspace_root: Some(project.path.display().to_string()),
                 ..params
             })

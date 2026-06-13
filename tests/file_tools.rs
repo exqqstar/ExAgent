@@ -3,10 +3,10 @@ use exagent::exec_session::ExecSessionManager;
 use exagent::policy::PolicyManager;
 use exagent::registry::{ToolContext, ToolRegistry};
 use exagent::tools::{
-    apply_patch::ApplyPatchTool, read_file::ReadFileTool, search_files::SearchFilesTool,
-    write_file::WriteFileTool,
+    apply_patch::ApplyPatchTool, list_dir::ListDirTool, read_file::ReadFileTool,
+    search_files::SearchFilesTool, view_image::ViewImageTool, write_file::WriteFileTool,
 };
-use exagent::types::{ToolCall, ToolStatus};
+use exagent::types::{ConversationContentPart, ImageDetail, InputModality, ToolCall, ToolStatus};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -307,6 +307,118 @@ async fn search_files_returns_matching_lines_under_workspace() {
 }
 
 #[tokio::test]
+async fn search_files_supports_regex_query_and_reports_query_mode() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/tools.rs"),
+        "fn run_command() {}\nfn read_file() {}\n",
+    )
+    .unwrap();
+
+    let result = execute_search_files(
+        dir.path(),
+        json!({
+            "query": r"fn \w+_command",
+            "path": "src",
+            "max_results": 10
+        }),
+    )
+    .await;
+
+    assert_eq!(result.status, ToolStatus::Success);
+    assert!(result.content.contains("src/tools.rs:1: fn run_command()"));
+    assert!(!result.content.contains("read_file"));
+    assert_eq!(result.meta.unwrap()["query_mode"], "regex");
+}
+
+#[tokio::test]
+async fn search_files_invalid_regex_falls_back_to_literal() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("projection.rs"),
+        "let value = outcome.meta[\"x\"](\n",
+    )
+    .unwrap();
+
+    let result = execute_search_files(
+        dir.path(),
+        json!({
+            "query": "outcome.meta[\"x\"](",
+            "path": ".",
+            "max_results": 10
+        }),
+    )
+    .await;
+
+    assert_eq!(result.status, ToolStatus::Success);
+    assert!(result
+        .content
+        .contains("projection.rs:1: let value = outcome.meta[\"x\"]("));
+    assert_eq!(result.meta.unwrap()["query_mode"], "literal");
+}
+
+#[tokio::test]
+async fn search_files_supports_case_insensitive_query() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "Login Handler\n").unwrap();
+
+    let result = execute_search_files(
+        dir.path(),
+        json!({
+            "query": "login handler",
+            "path": ".",
+            "case_insensitive": true,
+            "max_results": 10
+        }),
+    )
+    .await;
+
+    assert_eq!(result.status, ToolStatus::Success);
+    assert!(result.content.contains("notes.txt:1: Login Handler"));
+    assert_eq!(result.meta.unwrap()["case_insensitive"], true);
+}
+
+#[tokio::test]
+async fn search_files_respects_gitignore_and_glob() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("target")).unwrap();
+    std::fs::write(dir.path().join(".gitignore"), "target/\n*.txt\n").unwrap();
+    std::fs::write(dir.path().join("target/generated.rs"), "ignored_marker\n").unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "kept_marker\n").unwrap();
+    std::fs::write(dir.path().join("main.rs"), "kept_marker\n").unwrap();
+
+    let ignored_result = execute_search_files(
+        dir.path(),
+        json!({
+            "query": "ignored_marker",
+            "path": ".",
+            "max_results": 10
+        }),
+    )
+    .await;
+
+    assert_eq!(ignored_result.status, ToolStatus::Success);
+    assert_eq!(ignored_result.content, "No matches found");
+
+    let glob_result = execute_search_files(
+        dir.path(),
+        json!({
+            "query": "kept_marker",
+            "path": ".",
+            "glob": "*.rs",
+            "max_results": 10
+        }),
+    )
+    .await;
+
+    assert_eq!(glob_result.status, ToolStatus::Success);
+    assert!(glob_result.content.contains("main.rs:1: kept_marker"));
+    assert!(!glob_result.content.contains("notes.txt"));
+    assert_eq!(glob_result.meta.unwrap()["glob"], "*.rs");
+}
+
+#[tokio::test]
 async fn search_files_accepts_configured_skill_root_path() {
     let workspace = tempdir().unwrap();
     let root_parent = tempdir().unwrap();
@@ -332,6 +444,37 @@ async fn search_files_accepts_configured_skill_root_path() {
         "{}:2: skill-marker line",
         canonical_skill_path.display()
     )));
+}
+
+#[tokio::test]
+async fn search_files_glob_applies_to_configured_skill_root_display_path() {
+    let workspace = tempdir().unwrap();
+    let root_parent = tempdir().unwrap();
+    let skill_root = root_parent.path().join("skills");
+    let skill_rs = skill_root.join("my-skill").join("scripts").join("tool.rs");
+    let skill_txt = skill_root.join("my-skill").join("notes.txt");
+    std::fs::create_dir_all(skill_rs.parent().unwrap()).unwrap();
+    std::fs::write(&skill_rs, "skill-marker\n").unwrap();
+    std::fs::write(&skill_txt, "skill-marker\n").unwrap();
+
+    let result = execute_search_files_with_skill_roots(
+        workspace.path(),
+        vec![skill_root.clone()],
+        json!({
+            "query": "skill-marker",
+            "path": skill_root.display().to_string(),
+            "glob": "**/*.rs",
+            "max_results": 10
+        }),
+    )
+    .await;
+
+    assert_eq!(result.status, ToolStatus::Success);
+    assert!(result.content.contains(&format!(
+        "{}:1: skill-marker",
+        std::fs::canonicalize(skill_rs).unwrap().display()
+    )));
+    assert!(!result.content.contains("notes.txt"));
 }
 
 #[tokio::test]
@@ -501,6 +644,238 @@ async fn execute_search_files_with_skill_roots(
             Some(&ctx),
         )
         .await
+}
+
+async fn execute_list_dir(
+    workspace_root: &std::path::Path,
+    arguments: serde_json::Value,
+) -> exagent::types::ToolResult {
+    execute_list_dir_with_skill_roots(workspace_root, Vec::new(), arguments).await
+}
+
+async fn execute_list_dir_with_skill_roots(
+    workspace_root: &std::path::Path,
+    skills_user_roots: Vec<PathBuf>,
+    arguments: serde_json::Value,
+) -> exagent::types::ToolResult {
+    let mut registry = ToolRegistry::new();
+    registry.register(ListDirTool);
+
+    let ctx = tool_context_with_skill_roots(workspace_root, skills_user_roots);
+
+    registry
+        .execute(
+            ToolCall {
+                id: "call_list_dir".into(),
+                name: "list_dir".into(),
+                arguments,
+                thought_signature: None,
+            },
+            Some(&ctx),
+        )
+        .await
+}
+
+async fn execute_view_image(
+    workspace_root: &std::path::Path,
+    arguments: serde_json::Value,
+) -> exagent::types::ToolResult {
+    execute_view_image_with_modalities(
+        workspace_root,
+        vec![InputModality::Text, InputModality::Image],
+        arguments,
+    )
+    .await
+}
+
+async fn execute_view_image_with_modalities(
+    workspace_root: &std::path::Path,
+    input_modalities: Vec<InputModality>,
+    arguments: serde_json::Value,
+) -> exagent::types::ToolResult {
+    let mut registry = ToolRegistry::new();
+    registry.register(ViewImageTool);
+
+    let mut ctx = tool_context(workspace_root);
+    ctx.config.model.capabilities.input_modalities = input_modalities;
+
+    registry
+        .execute(
+            ToolCall {
+                id: "call_view_image".into(),
+                name: "view_image".into(),
+                arguments,
+                thought_signature: None,
+            },
+            Some(&ctx),
+        )
+        .await
+}
+
+fn write_test_png(path: &Path, width: u32, height: u32) {
+    image::RgbImage::new(width, height).save(path).unwrap();
+}
+
+#[tokio::test]
+async fn view_image_returns_local_image_part_and_metadata() {
+    let dir = tempdir().unwrap();
+    let image_path = dir.path().join("screen.png");
+    write_test_png(&image_path, 3, 2);
+    let canonical_path = std::fs::canonicalize(&image_path).unwrap();
+
+    let result = execute_view_image(dir.path(), json!({ "path": "screen.png" })).await;
+
+    assert_eq!(result.status, ToolStatus::Success);
+    assert!(result.content.contains("Viewed image screen.png"));
+    assert_eq!(result.parts.len(), 1);
+    match &result.parts[0] {
+        ConversationContentPart::LocalImage { path, detail } => {
+            assert_eq!(path, &canonical_path);
+            assert_eq!(*detail, Some(ImageDetail::High));
+        }
+        other => panic!("expected local image part, got {other:?}"),
+    }
+    let meta = result.meta.unwrap();
+    assert_eq!(meta["path"], canonical_path.display().to_string());
+    assert_eq!(meta["width"], 3);
+    assert_eq!(meta["height"], 2);
+    assert_eq!(meta["mime"], "image/png");
+}
+
+#[tokio::test]
+async fn view_image_rejects_text_only_models_before_reading_file() {
+    let dir = tempdir().unwrap();
+
+    let result = execute_view_image_with_modalities(
+        dir.path(),
+        vec![InputModality::Text],
+        json!({ "path": "missing.png" }),
+    )
+    .await;
+
+    assert_eq!(result.status, ToolStatus::Error);
+    assert!(result.content.contains("does not support image input"));
+    assert!(!result.content.contains("missing.png"));
+    assert!(result.parts.is_empty());
+}
+
+#[tokio::test]
+async fn view_image_rejects_paths_outside_workspace() {
+    let workspace = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let image_path = outside.path().join("outside.png");
+    write_test_png(&image_path, 1, 1);
+
+    let result = execute_view_image(
+        workspace.path(),
+        json!({ "path": image_path.display().to_string() }),
+    )
+    .await;
+
+    assert_eq!(result.status, ToolStatus::Error);
+    assert!(result.content.contains("workspace"));
+    assert!(result.parts.is_empty());
+}
+
+#[tokio::test]
+async fn view_image_rejects_non_image_files() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "not an image").unwrap();
+
+    let result = execute_view_image(dir.path(), json!({ "path": "notes.txt" })).await;
+
+    assert_eq!(result.status, ToolStatus::Error);
+    assert!(result.content.contains("unsupported image"));
+    assert!(result.parts.is_empty());
+}
+
+#[tokio::test]
+async fn list_dir_default_depth_lists_children_and_grandchildren_only() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src/nested/deeper")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "lib").unwrap();
+    std::fs::write(dir.path().join("src/nested/mod.rs"), "mod").unwrap();
+    std::fs::write(dir.path().join("src/nested/deeper/file.rs"), "deep").unwrap();
+
+    let result = execute_list_dir(dir.path(), json!({ "path": "." })).await;
+
+    assert_eq!(result.status, ToolStatus::Success);
+    assert!(result.content.contains("src/"));
+    assert!(result.content.contains("src/lib.rs"));
+    assert!(result.content.contains("src/nested/"));
+    assert!(!result.content.contains("src/nested/mod.rs"));
+    assert!(!result.content.contains("src/nested/deeper/"));
+}
+
+#[tokio::test]
+async fn list_dir_respects_gitignore_glob_and_entry_cap() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("target")).unwrap();
+    std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+    std::fs::write(dir.path().join("target/generated.rs"), "ignored").unwrap();
+    std::fs::write(dir.path().join("a.rs"), "a").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+    std::fs::write(dir.path().join("c.rs"), "c").unwrap();
+
+    let result = execute_list_dir(
+        dir.path(),
+        json!({
+            "path": ".",
+            "glob": "*.rs",
+            "depth": 1,
+            "max_entries": 1
+        }),
+    )
+    .await;
+
+    assert_eq!(result.status, ToolStatus::Success);
+    assert!(result.content.contains(".rs"));
+    assert!(!result.content.contains("b.txt"));
+    assert!(!result.content.contains("target"));
+    assert!(result.content.contains("[output truncated]"));
+    assert_eq!(result.meta.unwrap()["truncated"], true);
+}
+
+#[tokio::test]
+async fn list_dir_accepts_configured_skill_root_and_rejects_other_absolute_paths() {
+    let workspace = tempdir().unwrap();
+    let root_parent = tempdir().unwrap();
+    let skill_root = root_parent.path().join("skills");
+    let skill_dir = skill_root.join("my-skill");
+    let outside = root_parent.path().join("outside");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(skill_dir.join("SKILL.md"), "skill").unwrap();
+    std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+
+    let skill_result = execute_list_dir_with_skill_roots(
+        workspace.path(),
+        vec![skill_root.clone()],
+        json!({
+            "path": skill_root.display().to_string(),
+            "depth": 2
+        }),
+    )
+    .await;
+
+    let canonical_skill_file = std::fs::canonicalize(skill_dir.join("SKILL.md")).unwrap();
+    assert_eq!(skill_result.status, ToolStatus::Success);
+    assert!(skill_result
+        .content
+        .contains(&canonical_skill_file.display().to_string()));
+
+    let outside_result = execute_list_dir_with_skill_roots(
+        workspace.path(),
+        vec![skill_root],
+        json!({
+            "path": outside.display().to_string(),
+            "depth": 1
+        }),
+    )
+    .await;
+
+    assert_eq!(outside_result.status, ToolStatus::Error);
+    assert!(outside_result.content.contains("workspace"));
 }
 
 fn tool_context(workspace_root: &Path) -> ToolContext {

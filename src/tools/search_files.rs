@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use globset::{GlobBuilder, GlobMatcher};
+use ignore::WalkBuilder;
+use regex::RegexBuilder;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -21,8 +24,13 @@ const OUTPUT_TRUNCATED_MARKER: &str = "[output truncated]";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchFilesArgs {
+    /// Regex query to match against UTF-8 text lines; invalid regexes fall back to literal text.
     pub query: String,
     pub path: Option<String>,
+    /// Glob filter on the displayed file path, e.g. "*.rs" or "src/**/*.ts".
+    pub glob: Option<String>,
+    /// Run a case-insensitive search.
+    pub case_insensitive: Option<bool>,
     pub max_results: Option<usize>,
 }
 
@@ -33,7 +41,7 @@ impl ToolHandler for SearchFilesTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec::function(
             "search_files",
-            "Search UTF-8 text files in the workspace or configured skill roots and return matching lines",
+            "Search UTF-8 text files in the workspace or configured skill roots using regex, gitignore-aware traversal, optional glob filtering, and case-insensitive matching",
             serde_json::to_value(schemars::schema_for!(SearchFilesArgs)).unwrap(),
         )
     }
@@ -53,6 +61,7 @@ impl ToolHandler for SearchFilesTool {
                     status: ToolStatus::Error,
                     content: err.to_string(),
                     meta: None,
+                    parts: Vec::new(),
                 })
             }
         };
@@ -63,7 +72,7 @@ impl ToolHandler for SearchFilesTool {
             &args,
         ) {
             Ok((resolved, matches)) => {
-                let formatted = format_matches(&matches);
+                let formatted = format_matches(&matches.entries);
                 ToolOutcome::from_result(ToolResult {
                     tool_call_id: call.id,
                     tool_name: call.name,
@@ -72,9 +81,13 @@ impl ToolHandler for SearchFilesTool {
                     meta: Some(json!({
                         "query": args.query,
                         "path": resolved.canonical_path,
-                        "match_count": matches.len(),
+                        "match_count": matches.entries.len(),
                         "truncated": formatted.truncated,
+                        "query_mode": matches.query_mode,
+                        "glob": args.glob,
+                        "case_insensitive": args.case_insensitive.unwrap_or(false),
                     })),
+                    parts: Vec::new(),
                 })
             }
             Err(err) => ToolOutcome::from_result(ToolResult {
@@ -83,6 +96,7 @@ impl ToolHandler for SearchFilesTool {
                 status: ToolStatus::Error,
                 content: err,
                 meta: None,
+                parts: Vec::new(),
             }),
         }
     }
@@ -95,7 +109,7 @@ impl Tool for SearchFilesTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search UTF-8 text files in the workspace or configured skill roots"
+        "Search UTF-8 text files in the workspace or configured skill roots using regex, gitignore-aware traversal, optional glob filtering, and case-insensitive matching"
     }
 
     fn input_schema(&self) -> Value {
@@ -124,11 +138,70 @@ struct FormattedMatches {
     truncated: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchMatches {
+    entries: Vec<SearchMatch>,
+    query_mode: &'static str,
+}
+
+enum QueryMatcher {
+    Regex(regex::Regex),
+    Literal {
+        needle: String,
+        case_insensitive: bool,
+    },
+}
+
+impl QueryMatcher {
+    fn new(query: &str, case_insensitive: bool) -> Self {
+        match RegexBuilder::new(query)
+            .case_insensitive(case_insensitive)
+            .build()
+        {
+            Ok(regex) => Self::Regex(regex),
+            Err(_) => {
+                let needle = if case_insensitive {
+                    query.to_lowercase()
+                } else {
+                    query.to_string()
+                };
+                Self::Literal {
+                    needle,
+                    case_insensitive,
+                }
+            }
+        }
+    }
+
+    fn is_match(&self, line: &str) -> bool {
+        match self {
+            Self::Regex(regex) => regex.is_match(line),
+            Self::Literal {
+                needle,
+                case_insensitive,
+            } => {
+                if *case_insensitive {
+                    line.to_lowercase().contains(needle)
+                } else {
+                    line.contains(needle)
+                }
+            }
+        }
+    }
+
+    fn mode(&self) -> &'static str {
+        match self {
+            Self::Regex(_) => "regex",
+            Self::Literal { .. } => "literal",
+        }
+    }
+}
+
 fn search_files(
     workspace_root: &Path,
     extra_read_roots: &[PathBuf],
     args: &SearchFilesArgs,
-) -> Result<(ResolvedWorkspacePath, Vec<SearchMatch>), String> {
+) -> Result<(ResolvedWorkspacePath, SearchMatches), String> {
     let query = args.query.trim();
     if query.is_empty() {
         return Err("query must not be empty".to_string());
@@ -141,6 +214,8 @@ fn search_files(
         .max_results
         .unwrap_or(DEFAULT_MAX_RESULTS)
         .clamp(1, HARD_MAX_RESULTS);
+    let matcher = QueryMatcher::new(query, args.case_insensitive.unwrap_or(false));
+    let glob = compile_glob(args.glob.as_deref())?;
     let readable_roots =
         canonical_read_roots(workspace_root, extra_read_roots).map_err(|err| err.to_string())?;
     let workspace_root = readable_roots
@@ -154,7 +229,8 @@ fn search_files(
             &workspace_root,
             &readable_roots,
             &resolved.canonical_path,
-            query,
+            &matcher,
+            glob.as_ref(),
             max_results,
             &mut matches,
         )?;
@@ -163,7 +239,8 @@ fn search_files(
             &workspace_root,
             &readable_roots,
             &resolved.canonical_path,
-            query,
+            &matcher,
+            glob.as_ref(),
             max_results,
             &mut matches,
         )?;
@@ -171,54 +248,52 @@ fn search_files(
         return Err("path must be a file or directory".to_string());
     }
 
-    Ok((resolved, matches))
+    Ok((
+        resolved,
+        SearchMatches {
+            entries: matches,
+            query_mode: matcher.mode(),
+        },
+    ))
 }
 
 fn search_dir(
     workspace_root: &Path,
     readable_roots: &[PathBuf],
     dir: &Path,
-    query: &str,
+    matcher: &QueryMatcher,
+    glob: Option<&GlobMatcher>,
     max_results: usize,
     matches: &mut Vec<SearchMatch>,
 ) -> Result<(), String> {
     if matches.len() >= max_results {
         return Ok(());
     }
-    let mut entries = std::fs::read_dir(dir)
-        .map_err(|err| err.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| err.to_string())?;
-    entries.sort_by_key(|entry| entry.path());
+    let mut builder = WalkBuilder::new(dir);
+    builder
+        .standard_filters(true)
+        .require_git(false)
+        .follow_links(false)
+        .sort_by_file_path(|a, b| a.cmp(b));
 
-    for entry in entries {
+    for entry in builder.build() {
         if matches.len() >= max_results {
             break;
         }
-        let path = entry.path();
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
+        let entry = match entry {
+            Ok(entry) => entry,
             Err(_) => continue,
         };
-        let file_type = metadata.file_type();
-        if file_type.is_symlink() {
+        let Some(file_type) = entry.file_type() else {
             continue;
-        }
-        if file_type.is_dir() {
-            search_dir(
-                workspace_root,
-                readable_roots,
-                &path,
-                query,
-                max_results,
-                matches,
-            )?;
-        } else if file_type.is_file() {
+        };
+        if file_type.is_file() {
             search_file(
                 workspace_root,
                 readable_roots,
-                &path,
-                query,
+                entry.path(),
+                matcher,
+                glob,
                 max_results,
                 matches,
             )?;
@@ -232,7 +307,8 @@ fn search_file(
     workspace_root: &Path,
     readable_roots: &[PathBuf],
     file: &Path,
-    query: &str,
+    matcher: &QueryMatcher,
+    glob: Option<&GlobMatcher>,
     max_results: usize,
     matches: &mut Vec<SearchMatch>,
 ) -> Result<(), String> {
@@ -254,11 +330,16 @@ fn search_file(
     let display_path = canonical_file
         .strip_prefix(workspace_root)
         .unwrap_or(&canonical_file);
+    if let Some(glob) = glob {
+        if !glob.is_match(display_path) {
+            return Ok(());
+        }
+    }
     for (index, line) in body.lines().enumerate() {
         if matches.len() >= max_results {
             break;
         }
-        if line.contains(query) {
+        if matcher.is_match(line) {
             matches.push(SearchMatch {
                 display_path: display_path.to_path_buf(),
                 line_number: index + 1,
@@ -267,6 +348,16 @@ fn search_file(
         }
     }
     Ok(())
+}
+
+fn compile_glob(pattern: Option<&str>) -> Result<Option<GlobMatcher>, String> {
+    let Some(pattern) = pattern else {
+        return Ok(None);
+    };
+    let glob = GlobBuilder::new(pattern)
+        .build()
+        .map_err(|err| err.to_string())?;
+    Ok(Some(glob.compile_matcher()))
 }
 
 fn format_matches(matches: &[SearchMatch]) -> FormattedMatches {
@@ -353,5 +444,30 @@ fn truncate_line(line: &str) -> TruncatedLine {
             content,
             truncated: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::ToolSpecKind;
+
+    #[test]
+    fn tool_spec_advertises_regex_gitignore_and_case_insensitive_search() {
+        let spec = SearchFilesTool.spec();
+
+        assert!(spec.description.contains("regex"));
+        assert!(spec.description.contains("gitignore"));
+        assert!(spec.description.contains("case-insensitive"));
+
+        let ToolSpecKind::Function { input_schema } = spec.kind;
+        assert!(input_schema["properties"]["query"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("regex")));
+        assert!(
+            input_schema["properties"]["case_insensitive"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("case-insensitive"))
+        );
     }
 }

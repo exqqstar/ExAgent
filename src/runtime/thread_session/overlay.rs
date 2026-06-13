@@ -4,6 +4,7 @@ use crate::config::PermissionProfile;
 use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::session::{
     ApprovalId, ApprovalStatus, ExecSessionRef, ExecSessionStatus, PendingApproval,
+    PendingUserInput,
 };
 use crate::types::EventId;
 
@@ -13,6 +14,7 @@ use super::super::tool_orchestrator::ExecSessionUpdate;
 pub(crate) struct RuntimeOverlay {
     pub(crate) open_exec_sessions: Vec<ExecSessionRef>,
     pub(crate) pending_approvals: Vec<PendingApproval>,
+    pub(crate) pending_user_inputs: Vec<PendingUserInput>,
     pub(crate) active_tool_invocations: Vec<ActiveToolInvocation>,
 }
 
@@ -27,6 +29,7 @@ impl RuntimeOverlay {
     pub(crate) fn from_events(events: &[RuntimeEvent]) -> Self {
         let mut overlay = Self::default();
         let mut invocation_approvals: HashMap<String, ApprovalId> = HashMap::new();
+        let mut invocation_user_inputs: HashMap<String, ApprovalId> = HashMap::new();
 
         for event in events {
             match &event.kind {
@@ -37,11 +40,21 @@ impl RuntimeOverlay {
                 } => {
                     invocation_approvals.insert(invocation_id.clone(), approval_id.clone());
                 }
+                RuntimeEventKind::ToolInvocationWaitingUserInput {
+                    invocation_id,
+                    request_id,
+                    ..
+                } => {
+                    invocation_user_inputs.insert(invocation_id.clone(), request_id.clone());
+                }
                 RuntimeEventKind::ToolInvocationCompleted { invocation_id, .. }
                 | RuntimeEventKind::ToolInvocationFailed { invocation_id, .. }
                 | RuntimeEventKind::ToolInvocationCancelled { invocation_id, .. } => {
                     if let Some(approval_id) = invocation_approvals.remove(invocation_id) {
                         overlay.clear_approval(&approval_id);
+                    }
+                    if let Some(request_id) = invocation_user_inputs.remove(invocation_id) {
+                        overlay.clear_user_input(&request_id);
                     }
                 }
                 RuntimeEventKind::ApprovalRequested {
@@ -69,9 +82,25 @@ impl RuntimeOverlay {
                     overlay.clear_approval(approval_id);
                     invocation_approvals.retain(|_, id| id != approval_id);
                 }
+                RuntimeEventKind::UserInputRequested {
+                    request_id,
+                    tool_name,
+                    questions,
+                } => overlay.apply_user_input_requested(
+                    request_id.clone(),
+                    event.event_id.clone(),
+                    tool_name.clone(),
+                    questions.clone(),
+                ),
+                RuntimeEventKind::UserInputResolved { request_id, .. } => {
+                    overlay.clear_user_input(request_id);
+                    invocation_user_inputs.retain(|_, id| id != request_id);
+                }
                 RuntimeEventKind::TurnInterrupted => {
                     overlay.clear_pending_approvals();
+                    overlay.clear_pending_user_inputs();
                     invocation_approvals.clear();
+                    invocation_user_inputs.clear();
                 }
                 _ => {}
             }
@@ -141,16 +170,54 @@ impl RuntimeOverlay {
         self.pending_approvals.clear();
     }
 
+    pub(crate) fn apply_user_input_requested(
+        &mut self,
+        request_id: ApprovalId,
+        requested_event_id: EventId,
+        tool_name: String,
+        questions: Vec<crate::policy::QuestionPrompt>,
+    ) {
+        self.clear_user_input(&request_id);
+        self.pending_user_inputs.push(PendingUserInput {
+            request_id,
+            requested_event_id,
+            tool_name,
+            questions,
+            status: ApprovalStatus::Pending,
+        });
+    }
+
+    pub(crate) fn clear_user_input(&mut self, request_id: &ApprovalId) {
+        self.pending_user_inputs
+            .retain(|entry| &entry.request_id != request_id);
+    }
+
+    pub(crate) fn clear_pending_user_inputs(&mut self) {
+        self.pending_user_inputs.clear();
+    }
+
     pub(crate) fn has_pending_approval(&self) -> bool {
         self.pending_approvals
             .iter()
             .any(|approval| matches!(approval.status, ApprovalStatus::Pending))
     }
 
+    pub(crate) fn has_pending_user_input(&self) -> bool {
+        self.pending_user_inputs
+            .iter()
+            .any(|input| matches!(input.status, ApprovalStatus::Pending))
+    }
+
     pub(crate) fn has_pending_approval_id(&self, approval_id: &ApprovalId) -> bool {
         self.pending_approvals.iter().any(|approval| {
             matches!(approval.status, ApprovalStatus::Pending)
                 && approval.approval_id == *approval_id
+        })
+    }
+
+    pub(crate) fn has_pending_user_input_id(&self, request_id: &ApprovalId) -> bool {
+        self.pending_user_inputs.iter().any(|input| {
+            matches!(input.status, ApprovalStatus::Pending) && input.request_id == *request_id
         })
     }
 

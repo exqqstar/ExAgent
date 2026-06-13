@@ -43,6 +43,7 @@ impl ToolHandler for ApplyPatchTool {
                     status: ToolStatus::Error,
                     content: err.to_string(),
                     meta: None,
+                    parts: Vec::new(),
                 });
             }
         };
@@ -54,6 +55,7 @@ impl ToolHandler for ApplyPatchTool {
                 status: ToolStatus::Success,
                 content: format!("Applied patch to {} file(s)", summary.changed_files.len()),
                 meta: Some(json!({ "changed_files": summary.changed_files })),
+                parts: Vec::new(),
             }),
             Err(err) => ToolOutcome::from_result(ToolResult {
                 tool_call_id: call.id,
@@ -61,6 +63,7 @@ impl ToolHandler for ApplyPatchTool {
                 status: ToolStatus::Error,
                 content: err,
                 meta: None,
+                parts: Vec::new(),
             }),
         }
     }

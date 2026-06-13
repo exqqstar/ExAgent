@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::config::PermissionProfile;
 use crate::events::ApprovalCommandPayload;
+use crate::policy::QuestionPrompt;
 use crate::session::{ApprovalId, ExecSessionId};
 use crate::types::{ThreadId, ToolResult, ToolStatus};
 
@@ -37,6 +38,7 @@ impl ToolOutcome {
                 status: ToolStatus::Success,
                 content: model_output.content,
                 meta: None,
+                parts: Vec::new(),
             },
             effects: Vec::new(),
         }
@@ -88,6 +90,16 @@ pub enum ToolRuntimeEffect {
     ApprovalDenied {
         approval_id: ApprovalId,
         note: Option<String>,
+    },
+    UserInputRequested {
+        request_id: ApprovalId,
+        thread_id: ThreadId,
+        tool_name: String,
+        questions: Vec<QuestionPrompt>,
+    },
+    UserInputResolved {
+        request_id: ApprovalId,
+        dismissed: bool,
     },
     SubagentSpawned {
         invocation_id: String,

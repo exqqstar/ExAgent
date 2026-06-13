@@ -7,11 +7,11 @@ use exagent::app_server::protocol::{
     AgentRunResponse, AgentTreeAgentStatus, AgentTreeNode, AgentTreeParams, AgentTreeResponse,
     ApprovalDecisionParams, ApprovalDecisionResponse, BoundaryCapability, BoundaryOp,
     BoundaryOpResponse, EventsReplayParams, EventsReplayResponse, EventsSubscribeParams,
-    IgnoredOverrideField, InitializeResponse, RunParams, ThreadCompactParams,
-    ThreadCompactResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, ThreadStatus, ThreadView,
-    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnStatus,
-    TurnView, BOUNDARY_PROTOCOL_VERSION,
+    IgnoredOverrideField, InitializeResponse, RunParams, SubmitUserInputParams,
+    SubmitUserInputResponse, ThreadCompactParams, ThreadCompactResponse, ThreadReadParams,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
+    ThreadStartResponse, ThreadStatus, ThreadView, TurnInterruptParams, TurnInterruptResponse,
+    TurnStartParams, TurnStartResponse, TurnStatus, TurnView, BOUNDARY_PROTOCOL_VERSION,
 };
 use exagent::app_server::{AppServerBoundary, AppServerError};
 use exagent::cli::{parse_cli_command, CliCommand};
@@ -162,6 +162,17 @@ impl AppServerBoundary for StubBoundary {
         .into())
     }
 
+    async fn submit_user_input(
+        &self,
+        _params: SubmitUserInputParams,
+    ) -> anyhow::Result<SubmitUserInputResponse> {
+        self.calls.lock().unwrap().push("submit_user_input".into());
+        Err(AppServerError::InvalidRequest(
+            "submit user input is not used in these API tests".into(),
+        )
+        .into())
+    }
+
     async fn submit_boundary_op(&self, op: BoundaryOp) -> anyhow::Result<BoundaryOpResponse> {
         self.calls.lock().unwrap().push("submit_boundary_op".into());
         match op {
@@ -277,6 +288,13 @@ impl AppServerBoundary for ErrorBoundary {
         &self,
         _params: ApprovalDecisionParams,
     ) -> anyhow::Result<ApprovalDecisionResponse> {
+        Err(self.error())
+    }
+
+    async fn submit_user_input(
+        &self,
+        _params: SubmitUserInputParams,
+    ) -> anyhow::Result<SubmitUserInputResponse> {
         Err(self.error())
     }
 

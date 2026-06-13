@@ -127,6 +127,7 @@ type WorkbenchState = WorkbenchSnapshot & {
   approveSelectedApprovals: () => Promise<void>;
   rejectAndRollbackApproval: (item: PendingApprovalItem) => Promise<void>;
   submitApproval: (message: TranscriptMessage, decision: "approved" | "denied") => Promise<void>;
+  submitUserInput: (message: TranscriptMessage, answers: string[][], dismissed: boolean) => Promise<void>;
   renameSession: (sessionId: string, title: string) => Promise<void>;
   archiveSession: (sessionId: string) => Promise<void>;
   unarchiveSession: (projectId: string, sessionId: string) => Promise<void>;
@@ -1164,6 +1165,31 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     }
   },
 
+  async submitUserInput(message: TranscriptMessage, answers: string[][], dismissed: boolean) {
+    const context = currentApprovalsRefreshContext(get);
+    const threadId = message.threadId ?? get().activeSessionId;
+    if (!context || !threadId || !message.requestId) {
+      return;
+    }
+    try {
+      await exagentClient.submitUserInput(
+        context.projectId,
+        threadId,
+        message.turnId,
+        message.requestId,
+        answers,
+        dismissed
+      );
+      if (isActiveApprovalsRefreshContext(get, context)) {
+        void refreshApprovalsForContext(get, set, context);
+      }
+    } catch (error) {
+      if (isActiveApprovalsRefreshContext(get, context)) {
+        set({ error: errorMessage(error) });
+      }
+    }
+  },
+
   async renameSession(sessionId: string, title: string) {
     const nextTitle = title.trim();
     if (!nextTitle) {
@@ -1785,6 +1811,8 @@ export const setThreadGoalStatus = (
 export const clearThreadGoal = () => useWorkbenchStore.getState().clearThreadGoal();
 export const submitApproval = (message: TranscriptMessage, decision: "approved" | "denied") =>
   useWorkbenchStore.getState().submitApproval(message, decision);
+export const submitUserInput = (message: TranscriptMessage, answers: string[][], dismissed: boolean) =>
+  useWorkbenchStore.getState().submitUserInput(message, answers, dismissed);
 
 function composerAttachmentFromPath(path: string): ComposerAttachment {
   const normalizedPath = path.trim();
@@ -2242,7 +2270,13 @@ function activeTurnIdFromThread(thread: ThreadView): string | null {
 }
 
 function isActiveTurnStatus(status: string | undefined): boolean {
-  return status === "running" || status === "waiting_approval" || status === "started" || status === "in_progress";
+  return (
+    status === "running" ||
+    status === "waiting_approval" ||
+    status === "waiting_user_input" ||
+    status === "started" ||
+    status === "in_progress"
+  );
 }
 
 function applyActiveTurnEvents(
@@ -2266,6 +2300,8 @@ function applyActiveTurnEvent(
     case "turn_started":
     case "approval_requested":
     case "tool_invocation_waiting_approval":
+    case "user_input_requested":
+    case "tool_invocation_waiting_user_input":
       return event.turn_id ?? activeTurnId;
     case "turn_completed":
     case "turn_interrupted":
@@ -2287,6 +2323,8 @@ function threadItemEventId(item: ThreadItem): string | null {
     case "exec_output":
     case "approval_requested":
     case "approval_decision":
+    case "user_input_requested":
+    case "user_input_resolved":
     case "runtime_error":
     case "goal_report":
       return item.event_id ?? null;
@@ -2377,6 +2415,7 @@ function threadItemToTranscript(
         toolCallId: item.tool_call_id ?? undefined,
         toolName: item.tool_name ?? undefined,
         approvalId: item.approval_id ?? undefined,
+        requestId: item.request_id ?? undefined,
         toolStatus: normalizeToolInvocationStatus(item.status),
         mutating: item.mutating ?? undefined
       };
@@ -2408,6 +2447,36 @@ function threadItemToTranscript(
         turnId,
         turnStatus,
         approvalId: item.approval_id ?? undefined
+      };
+    case "user_input_requested":
+      return {
+        id,
+        role: "tool",
+        title: "Question for you",
+        body: item.questions.map((question) => question.question).join("\n"),
+        timestamp: "history",
+        status: item.status === "pending" ? "warning" : "info",
+        threadId,
+        turnId,
+        turnStatus,
+        requestId: item.request_id,
+        toolName: item.tool_name,
+        toolStatus: item.status === "pending" ? "waiting_user_input" : "completed",
+        questions: item.questions
+      };
+    case "user_input_resolved":
+      return {
+        id,
+        role: "tool",
+        title: item.dismissed ? "Question dismissed" : "Question answered",
+        body: item.dismissed ? "User dismissed the question." : "User answered the question.",
+        timestamp: "history",
+        status: item.dismissed ? "warning" : "success",
+        threadId,
+        turnId,
+        turnStatus,
+        requestId: item.request_id,
+        toolStatus: "completed"
       };
     case "runtime_error":
       return {
@@ -2457,6 +2526,8 @@ function normalizeToolInvocationStatus(status: string): ToolInvocationTranscript
   switch (status) {
     case "waiting_approval":
       return "waiting_approval";
+    case "waiting_user_input":
+      return "waiting_user_input";
     case "completed":
     case "approved":
       return "completed";
@@ -2475,6 +2546,9 @@ function normalizeToolInvocationStatus(status: string): ToolInvocationTranscript
 function toolInvocationTitle(item: Extract<ThreadItem, { type: "tool_invocation" }>) {
   if (item.status === "waiting_approval") {
     return "Waiting for approval";
+  }
+  if (item.status === "waiting_user_input") {
+    return "Waiting for user input";
   }
   if (item.status === "approved") {
     return item.tool_name ?? "Approval approved";
@@ -2504,6 +2578,9 @@ function toolInvocationBody(item: Extract<ThreadItem, { type: "tool_invocation" 
   if (item.status === "denied") {
     return "Approval denied.";
   }
+  if (item.status === "waiting_user_input") {
+    return "Waiting for the user to answer.";
+  }
   if (item.status === "failed") {
     return "Tool failed.";
   }
@@ -2516,6 +2593,7 @@ function toolInvocationBody(item: Extract<ThreadItem, { type: "tool_invocation" 
 function toolInvocationTone(item: Extract<ThreadItem, { type: "tool_invocation" }>): TranscriptMessage["status"] {
   switch (item.status) {
     case "waiting_approval":
+    case "waiting_user_input":
     case "cancelled":
       return "warning";
     case "completed":
@@ -2643,6 +2721,8 @@ function transcriptTurnStatusFromEvent(event: BackendRuntimeEvent): string | nul
       return "running";
     case "approval_requested":
     case "tool_invocation_waiting_approval":
+    case "user_input_requested":
+    case "tool_invocation_waiting_user_input":
       return "waiting_approval";
     case "turn_completed":
       return "completed";
@@ -2873,13 +2953,15 @@ function runtimeEventToToolInvocationTranscript(event: BackendRuntimeEvent): Tra
   switch (event.kind.type) {
     case "tool_result":
       if (isReviewRequiredToolResult(event.kind.result.status)) {
+        const waitingForUserInput = event.kind.result.tool_name === "ask_user";
         return {
           ...base,
-          title: "Waiting for approval",
+          title: waitingForUserInput ? "Waiting for user input" : "Waiting for approval",
           body: event.kind.result.content || toolResultFallbackBody(event.kind.result.status),
           status: "warning",
           toolCallId: event.kind.result.tool_call_id,
-          toolStatus: "waiting_approval"
+          toolName: event.kind.result.tool_name,
+          toolStatus: waitingForUserInput ? "waiting_user_input" : "waiting_approval"
         };
       }
       return {
@@ -2912,6 +2994,16 @@ function runtimeEventToToolInvocationTranscript(event: BackendRuntimeEvent): Tra
         invocationId: event.kind.invocation_id,
         approvalId: event.kind.approval_id,
         toolStatus: "waiting_approval"
+      };
+    case "tool_invocation_waiting_user_input":
+      return {
+        ...base,
+        title: "Waiting for user input",
+        body: event.kind.reason,
+        status: "warning",
+        invocationId: event.kind.invocation_id,
+        requestId: event.kind.request_id,
+        toolStatus: "waiting_user_input"
       };
     case "tool_invocation_output_delta":
       return {
@@ -2964,6 +3056,26 @@ function runtimeEventToToolInvocationTranscript(event: BackendRuntimeEvent): Tra
         approvalId: event.kind.approval_id,
         toolStatus: event.kind.status === "approved" ? "completed" : "cancelled"
       };
+    case "user_input_requested":
+      return {
+        ...base,
+        title: "Question for you",
+        body: event.kind.questions.map((question) => question.question).join("\n"),
+        status: "warning",
+        requestId: event.kind.request_id,
+        toolName: event.kind.tool_name,
+        toolStatus: "waiting_user_input",
+        questions: event.kind.questions
+      };
+    case "user_input_resolved":
+      return {
+        ...base,
+        title: event.kind.dismissed ? "Question dismissed" : "Question answered",
+        body: event.kind.dismissed ? "User dismissed the question." : "User answered the question.",
+        status: event.kind.dismissed ? "warning" : "success",
+        requestId: event.kind.request_id,
+        toolStatus: "completed"
+      };
     default:
       return null;
   }
@@ -2973,7 +3085,7 @@ function upsertToolInvocationMessage(
   transcript: TranscriptMessage[],
   update: TranscriptMessage
 ): TranscriptMessage[] {
-  if (!update.invocationId && !update.toolCallId && !update.approvalId) {
+  if (!update.invocationId && !update.toolCallId && !update.approvalId && !update.requestId) {
     return [...transcript, update];
   }
 
@@ -2992,7 +3104,7 @@ function appendTranscriptMessage(
   transcript: TranscriptMessage[],
   message: TranscriptMessage
 ): TranscriptMessage[] {
-  if (message.invocationId) {
+  if (message.invocationId || message.requestId) {
     return upsertToolInvocationMessage(transcript, message);
   }
   return [...transcript, message];
@@ -3017,6 +3129,7 @@ function mergeToolInvocationMessage(
     toolCallId: update.toolCallId ?? current.toolCallId,
     toolName: update.toolName ?? current.toolName,
     approvalId: update.approvalId ?? current.approvalId,
+    requestId: update.requestId ?? current.requestId,
     mutating: update.mutating ?? current.mutating
   };
 }
@@ -3032,9 +3145,16 @@ function matchingToolMessageIndex(transcript: TranscriptMessage[], update: Trans
     update.approvalId
       ? (message: TranscriptMessage) => message.approvalId === update.approvalId
       : null,
+    update.requestId
+      ? (message: TranscriptMessage) => message.requestId === update.requestId
+      : null,
     update.toolStatus === "waiting_approval" && update.approvalId
       ? (message: TranscriptMessage) =>
           message.toolStatus === "waiting_approval" && !message.approvalId && !message.invocationId
+      : null,
+    update.toolStatus === "waiting_user_input" && update.requestId
+      ? (message: TranscriptMessage) =>
+          message.toolStatus === "waiting_user_input" && !message.requestId && !message.invocationId
       : null
   ].filter((matcher): matcher is (message: TranscriptMessage) => boolean => Boolean(matcher));
 
@@ -3062,26 +3182,30 @@ function isTerminalToolStatus(status: ToolInvocationTranscriptStatus | undefined
 }
 
 function mergedToolTitle(current: TranscriptMessage, update: TranscriptMessage) {
-  if (update.toolStatus === "waiting_approval") {
+  if (update.toolStatus === "waiting_approval" || update.toolStatus === "waiting_user_input") {
     return update.title ?? current.title;
   }
-  if (update.approvalId && update.toolStatus) {
+  if ((update.approvalId || update.requestId) && update.toolStatus) {
     return update.title ?? current.title;
   }
   return update.toolName ?? current.toolName ?? update.title ?? current.title;
 }
 
 function mergedToolBody(current: TranscriptMessage, update: TranscriptMessage) {
-  if (current.toolStatus === "waiting_approval" && update.toolStatus === "waiting_approval") {
-    if (update.approvalId || update.invocationId) {
+  if (
+    (current.toolStatus === "waiting_approval" && update.toolStatus === "waiting_approval") ||
+    (current.toolStatus === "waiting_user_input" && update.toolStatus === "waiting_user_input")
+  ) {
+    if (update.approvalId || update.requestId || update.invocationId) {
       return update.body || current.body;
     }
     return current.body || update.body;
   }
   if (
-    update.approvalId &&
+    (update.approvalId || update.requestId) &&
     update.toolStatus &&
-    update.toolStatus !== "waiting_approval"
+    update.toolStatus !== "waiting_approval" &&
+    update.toolStatus !== "waiting_user_input"
   ) {
     return update.body || current.body;
   }
@@ -3116,6 +3240,7 @@ function strongestToolStatus(
   const order: Record<ToolInvocationTranscriptStatus, number> = {
     running: 0,
     waiting_approval: 1,
+    waiting_user_input: 1,
     completed: 2,
     cancelled: 3,
     failed: 4
@@ -3155,6 +3280,7 @@ function toolInvocationId(event: BackendRuntimeEvent) {
   switch (event.kind.type) {
     case "tool_invocation_started":
     case "tool_invocation_waiting_approval":
+    case "tool_invocation_waiting_user_input":
     case "tool_invocation_output_delta":
     case "tool_invocation_completed":
     case "tool_invocation_failed":
@@ -3202,6 +3328,8 @@ function eventDetail(event: BackendRuntimeEvent) {
       return event.kind.tool_name;
     case "tool_invocation_waiting_approval":
       return event.kind.reason;
+    case "tool_invocation_waiting_user_input":
+      return event.kind.reason;
     case "tool_invocation_output_delta":
       return `${event.kind.stream} #${event.kind.sequence}`;
     case "tool_invocation_completed":
@@ -3214,6 +3342,10 @@ function eventDetail(event: BackendRuntimeEvent) {
       return event.kind.reason;
     case "approval_decision":
       return event.kind.note ?? event.kind.status;
+    case "user_input_requested":
+      return event.kind.questions.map((question) => question.question).join(" ");
+    case "user_input_resolved":
+      return event.kind.dismissed ? "dismissed" : "answered";
     case "compaction_written":
       return event.kind.summary.summary;
     case "runtime_error":
@@ -3229,9 +3361,13 @@ function eventTone(event: BackendRuntimeEvent): RuntimeEvent["tone"] {
       return "danger";
     case "approval_requested":
     case "tool_invocation_waiting_approval":
+    case "user_input_requested":
+    case "tool_invocation_waiting_user_input":
       return "warning";
     case "approval_decision":
       return event.kind.status === "approved" ? "success" : "danger";
+    case "user_input_resolved":
+      return event.kind.dismissed ? "warning" : "success";
     case "tool_invocation_completed":
       return "success";
     case "tool_invocation_failed":
@@ -3315,8 +3451,11 @@ function shouldRefreshAgentTreeAfterEvent(event: BackendRuntimeEvent) {
     case "tool_invocation_failed":
     case "tool_invocation_cancelled":
     case "tool_invocation_waiting_approval":
+    case "tool_invocation_waiting_user_input":
     case "approval_requested":
     case "approval_decision":
+    case "user_input_requested":
+    case "user_input_resolved":
     case "token_count":
       return true;
     default:
@@ -3329,6 +3468,9 @@ function shouldRefreshApprovalsAfterEvent(event: BackendRuntimeEvent) {
     case "approval_requested":
     case "approval_decision":
     case "tool_invocation_waiting_approval":
+    case "user_input_requested":
+    case "user_input_resolved":
+    case "tool_invocation_waiting_user_input":
       return true;
     default:
       return false;
@@ -3341,11 +3483,14 @@ function statusFromEvent(event: BackendRuntimeEvent, current: SessionSummary["st
       return "running";
     case "approval_requested":
     case "tool_invocation_waiting_approval":
+    case "user_input_requested":
+    case "tool_invocation_waiting_user_input":
       return "awaiting_approval";
     case "tool_invocation_failed":
     case "runtime_error":
       return "failed";
     case "approval_decision":
+    case "user_input_resolved":
     case "turn_completed":
     case "turn_interrupted":
       return "idle";

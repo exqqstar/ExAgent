@@ -124,6 +124,7 @@ pub fn snapshot_from_rollout_items(
         latest_compaction,
         token_info,
         pending_approvals: vec![],
+        pending_user_inputs: vec![],
     };
     Ok(snapshot)
 }
@@ -176,11 +177,14 @@ fn should_persist_event(event: &RuntimeEvent) -> bool {
             | RuntimeEventKind::ToolResult { .. }
             | RuntimeEventKind::ToolInvocationStarted { .. }
             | RuntimeEventKind::ToolInvocationWaitingApproval { .. }
+            | RuntimeEventKind::ToolInvocationWaitingUserInput { .. }
             | RuntimeEventKind::ToolInvocationCompleted { .. }
             | RuntimeEventKind::ToolInvocationFailed { .. }
             | RuntimeEventKind::ToolInvocationCancelled { .. }
             | RuntimeEventKind::ApprovalRequested { .. }
             | RuntimeEventKind::ApprovalDecision { .. }
+            | RuntimeEventKind::UserInputRequested { .. }
+            | RuntimeEventKind::UserInputResolved { .. }
             | RuntimeEventKind::SubagentSpawned { .. }
             | RuntimeEventKind::SubagentClosed { .. }
             | RuntimeEventKind::InterAgentMessageSent { .. }

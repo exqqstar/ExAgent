@@ -768,14 +768,14 @@ fn build_request_messages(
     messages: &[ConversationMessage],
     requires_empty_reasoning_content: bool,
 ) -> Result<Vec<Value>> {
-    messages
-        .iter()
-        .map(|message| match message.role {
-            MessageRole::System => Ok(json!({
+    let mut request_messages = Vec::new();
+    for message in messages {
+        match message.role {
+            MessageRole::System => request_messages.push(json!({
                 "role": "system",
                 "content": message.content,
             })),
-            MessageRole::User => Ok(json!({
+            MessageRole::User => request_messages.push(json!({
                 "role": "user",
                 "content": build_user_content(message),
             })),
@@ -811,18 +811,29 @@ fn build_request_messages(
                     &message.reasoning,
                     requires_empty_reasoning_content,
                 );
-                Ok(value)
+                request_messages.push(value);
             }
-            MessageRole::Tool => Ok(json!({
-                "role": "tool",
-                "content": message.content,
-                "tool_call_id": message
+            MessageRole::Tool => {
+                let tool_call_id = message
                     .tool_call_id
                     .clone()
-                    .ok_or_else(|| anyhow!("Tool messages require tool_call_id"))?,
-            })),
-        })
-        .collect()
+                    .ok_or_else(|| anyhow!("Tool messages require tool_call_id"))?;
+                request_messages.push(json!({
+                    "role": "tool",
+                    "content": message.content,
+                    "tool_call_id": tool_call_id,
+                }));
+                if let Some(image_message) = tool_result_image_user_message(&tool_call_id, message)
+                {
+                    request_messages.push(json!({
+                        "role": "user",
+                        "content": build_user_content(&image_message),
+                    }));
+                }
+            }
+        }
+    }
+    Ok(request_messages)
 }
 
 fn build_user_content(message: &ConversationMessage) -> Value {
@@ -858,6 +869,36 @@ fn build_user_content(message: &ConversationMessage) -> Value {
     Value::Array(content)
 }
 
+fn tool_result_image_user_message(
+    tool_call_id: &str,
+    message: &ConversationMessage,
+) -> Option<ConversationMessage> {
+    let mut image_parts = message
+        .parts
+        .iter()
+        .filter(|part| part.is_image())
+        .cloned()
+        .collect::<Vec<_>>();
+    if image_parts.is_empty() {
+        return None;
+    }
+    let marker = format!("[image from tool result {tool_call_id}]");
+    let mut parts = vec![ConversationContentPart::Text {
+        text: marker.clone(),
+    }];
+    parts.append(&mut image_parts);
+    Some(ConversationMessage {
+        role: MessageRole::User,
+        content: marker,
+        parts,
+        tool_call_id: None,
+        tool_calls: vec![],
+        reasoning: vec![],
+        injected: true,
+        internal_source: Some("tool_result_image".to_string()),
+    })
+}
+
 fn openai_image_url_part(url: String, detail: Option<ImageDetail>) -> Value {
     let mut image_url = Map::new();
     image_url.insert("url".to_string(), json!(url));
@@ -883,7 +924,7 @@ mod tests {
     use super::*;
     use crate::config::ThinkingMode;
     use crate::tools::ToolSpec;
-    use crate::types::{ImageDetail, UserInput};
+    use crate::types::{ConversationContentPart, ImageDetail, UserInput};
 
     #[test]
     fn chat_completion_request_keeps_reasoning_fields_out_of_base_dto() {
@@ -1010,5 +1051,43 @@ mod tests {
                     .as_str()
                     .is_some_and(|text| text.contains("image unavailable"))
         }));
+    }
+
+    #[test]
+    fn chat_completion_request_injects_tool_result_image_parts() {
+        let message = ConversationMessage::tool_with_parts(
+            "call_1",
+            "Viewed image",
+            vec![ConversationContentPart::ImageUrl {
+                url: "data:image/png;base64,AAA".to_string(),
+                detail: Some(ImageDetail::High),
+            }],
+        );
+
+        let messages = build_request_messages(&[message], false).unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0],
+            json!({
+                "role": "tool",
+                "content": "Viewed image",
+                "tool_call_id": "call_1"
+            })
+        );
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(
+            messages[1]["content"],
+            json!([
+                { "type": "text", "text": "[image from tool result call_1]" },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,AAA",
+                        "detail": "high"
+                    }
+                }
+            ])
+        );
     }
 }

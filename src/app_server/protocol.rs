@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{PermissionProfile, ThinkingMode};
 use crate::events::RuntimeEvent;
+use crate::policy::QuestionPrompt;
 use crate::resolved::ModelRef;
 use crate::runtime::agent_profile::AgentType;
 use crate::runtime::turn_mode::TurnMode;
@@ -33,6 +34,7 @@ pub enum BoundaryCapability {
     TurnStart,
     TurnInterrupt,
     ApprovalDecision,
+    SubmitUserInput,
     EventsSubscribe,
     EventsReplay,
 }
@@ -268,6 +270,8 @@ pub enum ThreadItem {
         tool_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         approval_id: Option<ApprovalId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<ApprovalId>,
         status: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mutating: Option<bool>,
@@ -302,6 +306,20 @@ pub enum ThreadItem {
         approval_id: Option<ApprovalId>,
         status: String,
         note: Option<String>,
+    },
+    UserInputRequested {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_id: Option<EventId>,
+        request_id: ApprovalId,
+        tool_name: String,
+        questions: Vec<QuestionPrompt>,
+        status: String,
+    },
+    UserInputResolved {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_id: Option<EventId>,
+        request_id: ApprovalId,
+        dismissed: bool,
     },
     RuntimeError {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -594,6 +612,27 @@ pub struct ApprovalDecisionResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubmitUserInputParams {
+    pub thread_id: ThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<TurnId>,
+    pub request_id: ApprovalId,
+    #[serde(default)]
+    pub answers: Vec<Vec<String>>,
+    #[serde(default)]
+    pub dismissed: bool,
+    pub workspace_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubmitUserInputResponse {
+    pub thread_id: ThreadId,
+    pub turn_id: TurnId,
+    pub request_id: ApprovalId,
+    pub dismissed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BoundaryOp {
     Initialize(InitializeParams),
@@ -611,6 +650,7 @@ pub enum BoundaryOp {
     TurnStart(TurnStartParams),
     TurnInterrupt(TurnInterruptParams),
     ApprovalDecision(ApprovalDecisionParams),
+    SubmitUserInput(SubmitUserInputParams),
     EventsReplay(EventsReplayParams),
 }
 
@@ -632,6 +672,7 @@ pub enum BoundaryOpResponse {
     TurnStarted(TurnStartResponse),
     TurnInterrupted(TurnInterruptResponse),
     ApprovalDecisionSubmitted(ApprovalDecisionResponse),
+    UserInputSubmitted(SubmitUserInputResponse),
     EventsReplayed(EventsReplayResponse),
 }
 
@@ -657,6 +698,7 @@ pub enum RuntimeEventKindFilter {
     ToolResult,
     ToolInvocationStarted,
     ToolInvocationWaitingApproval,
+    ToolInvocationWaitingUserInput,
     ToolInvocationOutputDelta,
     ToolInvocationCompleted,
     ToolInvocationFailed,
@@ -664,6 +706,8 @@ pub enum RuntimeEventKindFilter {
     ExecOutput,
     ApprovalRequested,
     ApprovalDecision,
+    UserInputRequested,
+    UserInputResolved,
     CompactionWritten,
     SubagentSpawned,
     SubagentClosed,

@@ -153,6 +153,9 @@ fn runtime_event_kind_matches(filter: &RuntimeEventKindFilter, kind: &RuntimeEve
             RuntimeEventKindFilter::ToolInvocationWaitingApproval,
             RuntimeEventKind::ToolInvocationWaitingApproval { .. },
         ) | (
+            RuntimeEventKindFilter::ToolInvocationWaitingUserInput,
+            RuntimeEventKind::ToolInvocationWaitingUserInput { .. },
+        ) | (
             RuntimeEventKindFilter::ToolInvocationOutputDelta,
             RuntimeEventKind::ToolInvocationOutputDelta { .. },
         ) | (
@@ -173,6 +176,12 @@ fn runtime_event_kind_matches(filter: &RuntimeEventKindFilter, kind: &RuntimeEve
         ) | (
             RuntimeEventKindFilter::ApprovalDecision,
             RuntimeEventKind::ApprovalDecision { .. },
+        ) | (
+            RuntimeEventKindFilter::UserInputRequested,
+            RuntimeEventKind::UserInputRequested { .. },
+        ) | (
+            RuntimeEventKindFilter::UserInputResolved,
+            RuntimeEventKind::UserInputResolved { .. },
         ) | (
             RuntimeEventKindFilter::CompactionWritten,
             RuntimeEventKind::CompactionWritten { .. },

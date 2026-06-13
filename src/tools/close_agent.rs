@@ -119,6 +119,7 @@ fn error_result(
         status: ToolStatus::Error,
         content: message.into(),
         meta: None,
+        parts: Vec::new(),
     })
 }
 

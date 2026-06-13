@@ -54,3 +54,36 @@ pub fn strip_images_from_messages(messages: &mut [ConversationMessage]) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::types::{ConversationContentPart, ConversationMessage, ImageDetail, MessageRole};
+
+    use super::{strip_images_from_messages, IMAGE_OMITTED_PLACEHOLDER};
+
+    #[test]
+    fn strip_images_from_messages_replaces_tool_result_parts_and_syncs_content() {
+        let mut messages = vec![ConversationMessage::tool_with_parts(
+            "call_view",
+            "Viewed image screen.png",
+            vec![ConversationContentPart::LocalImage {
+                path: PathBuf::from("/tmp/screen.png"),
+                detail: Some(ImageDetail::High),
+            }],
+        )];
+
+        strip_images_from_messages(&mut messages);
+
+        assert_eq!(messages[0].role, MessageRole::Tool);
+        assert_eq!(messages[0].tool_call_id.as_deref(), Some("call_view"));
+        assert_eq!(
+            messages[0].parts,
+            vec![ConversationContentPart::Text {
+                text: IMAGE_OMITTED_PLACEHOLDER.to_string(),
+            }]
+        );
+        assert_eq!(messages[0].content, IMAGE_OMITTED_PLACEHOLDER);
+    }
+}

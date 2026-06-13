@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -78,6 +79,8 @@ pub struct ToolResult {
     pub status: ToolStatus,
     pub content: String,
     pub meta: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<ConversationContentPart>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -182,7 +185,7 @@ pub enum MessageRole {
     Tool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageDetail {
     Auto,
@@ -344,10 +347,18 @@ impl ConversationMessage {
     }
 
     pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::tool_with_parts(tool_call_id, content, vec![])
+    }
+
+    pub fn tool_with_parts(
+        tool_call_id: impl Into<String>,
+        content: impl Into<String>,
+        parts: Vec<ConversationContentPart>,
+    ) -> Self {
         Self {
             role: MessageRole::Tool,
             content: content.into(),
-            parts: vec![],
+            parts,
             tool_call_id: Some(tool_call_id.into()),
             tool_calls: vec![],
             reasoning: vec![],
@@ -568,6 +579,64 @@ mod tests {
         .unwrap();
 
         assert_eq!(tool_call.thought_signature, None);
+    }
+
+    #[test]
+    fn legacy_tool_result_deserializes_without_parts() {
+        let result: ToolResult = serde_json::from_value(serde_json::json!({
+            "tool_call_id": "call_1",
+            "tool_name": "read_file",
+            "status": "success",
+            "content": "body",
+            "meta": null
+        }))
+        .unwrap();
+
+        assert!(result.parts.is_empty());
+    }
+
+    #[test]
+    fn tool_result_parts_round_trip_and_empty_parts_serialize_compatibly() {
+        let empty = ToolResult {
+            tool_call_id: "call_1".to_string(),
+            tool_name: "read_file".to_string(),
+            status: ToolStatus::Success,
+            content: "body".to_string(),
+            meta: None,
+            parts: Vec::new(),
+        };
+
+        let empty_value = serde_json::to_value(&empty).unwrap();
+        assert!(empty_value.get("parts").is_none());
+
+        let with_image = ToolResult {
+            parts: vec![ConversationContentPart::LocalImage {
+                path: std::path::PathBuf::from("/tmp/screen.png"),
+                detail: Some(ImageDetail::High),
+            }],
+            ..empty
+        };
+        let value = serde_json::to_value(&with_image).unwrap();
+        let round_trip: ToolResult = serde_json::from_value(value).unwrap();
+
+        assert_eq!(round_trip.parts, with_image.parts);
+    }
+
+    #[test]
+    fn tool_message_constructor_preserves_tool_result_parts() {
+        let message = ConversationMessage::tool_with_parts(
+            "call_1",
+            "Viewed image",
+            vec![ConversationContentPart::LocalImage {
+                path: std::path::PathBuf::from("/tmp/screen.png"),
+                detail: Some(ImageDetail::High),
+            }],
+        );
+
+        assert_eq!(message.role, MessageRole::Tool);
+        assert_eq!(message.tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(message.content, "Viewed image");
+        assert_eq!(message.parts.len(), 1);
     }
 
     #[test]

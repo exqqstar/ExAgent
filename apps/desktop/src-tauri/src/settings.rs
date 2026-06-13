@@ -14,7 +14,7 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use exagent::config::{
     load_skills, AgentConfig, SkillConfig, SkillMetadata, SkillScope, SkillWarning,
-    SkillWarningKind, ThinkingMode,
+    SkillWarningKind, ThinkingMode, WebSearchConfig,
 };
 use exagent::llm::OpenAiCompatibleLlm;
 use exagent::mcp::config::McpServerConfig;
@@ -42,6 +42,7 @@ pub use exagent::provider::{ProviderAuthMode, ProviderProtocol};
 const SECRET_SERVICE: &str = "io.github.exqqstar.exagent";
 const DEFAULT_PROVIDER_ID: &str = "openai";
 const DEFAULT_CREDENTIAL_ID: &str = "key-1";
+const DEFAULT_WEB_SEARCH_PROVIDER: &str = "brave";
 
 pub trait SecretStore: Send + Sync {
     fn get_secret(&self, account: &str) -> Result<Option<String>>;
@@ -377,12 +378,39 @@ pub struct SkillRootSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebSearchSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_web_search_provider")]
+    pub provider: String,
+    #[serde(default)]
+    pub has_api_key: bool,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub clear_api_key: bool,
+}
+
+impl Default for WebSearchSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: DEFAULT_WEB_SEARCH_PROVIDER.to_string(),
+            has_api_key: false,
+            api_key: None,
+            clear_api_key: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeSettingsResponse {
     pub default_model: String,
     pub default_thinking_mode: Option<ThinkingMode>,
     pub presets: Vec<RuntimePresetSettings>,
     pub mcp_servers: Vec<McpServerSettings>,
     pub skill_roots: Vec<SkillRootSettings>,
+    pub web_search: WebSearchSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -392,6 +420,8 @@ pub struct RuntimeSettingsSaveRequest {
     pub presets: Vec<RuntimePresetSettings>,
     pub mcp_servers: Vec<McpServerSettings>,
     pub skill_roots: Vec<SkillRootSettings>,
+    #[serde(default)]
+    pub web_search: WebSearchSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -462,6 +492,8 @@ struct SettingsFile {
     mcp_servers: Vec<McpServerSettings>,
     #[serde(default)]
     skill_roots: Vec<SkillRootSettings>,
+    #[serde(default)]
+    web_search: StoredWebSearchSettings,
 }
 
 impl Default for SettingsFile {
@@ -483,6 +515,24 @@ impl Default for SettingsFile {
             runtime_presets: Vec::new(),
             mcp_servers: Vec::new(),
             skill_roots: Vec::new(),
+            web_search: StoredWebSearchSettings::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct StoredWebSearchSettings {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_web_search_provider")]
+    provider: String,
+}
+
+impl Default for StoredWebSearchSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: DEFAULT_WEB_SEARCH_PROVIDER.to_string(),
         }
     }
 }
@@ -630,6 +680,7 @@ impl DesktopSettingsStore {
             runtime_presets: existing.runtime_presets,
             mcp_servers: existing.mcp_servers,
             skill_roots: existing.skill_roots,
+            web_search: existing.web_search,
         };
 
         let selected_credential_id = self.apply_credential_save_request(&mut file, &request)?;
@@ -899,12 +950,14 @@ impl DesktopSettingsStore {
 
     pub async fn load_runtime_settings(&self) -> Result<RuntimeSettingsResponse> {
         let file = self.load_file().await?;
+        let web_search = self.web_search_settings_view(&file.web_search)?;
         Ok(RuntimeSettingsResponse {
             default_model: normalized_or_default(&file.runtime_default_model, &file.model),
             default_thinking_mode: file.runtime_default_thinking_mode,
             presets: file.runtime_presets,
             mcp_servers: file.mcp_servers,
             skill_roots: effective_skill_roots(&file.skill_roots),
+            web_search,
         })
     }
 
@@ -919,6 +972,31 @@ impl DesktopSettingsStore {
         file.runtime_presets = request.presets;
         file.mcp_servers = request.mcp_servers;
         file.skill_roots = request.skill_roots;
+        let web_search = normalized_web_search_settings(&request.web_search)?;
+        let new_api_key = request
+            .web_search
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let has_existing_api_key = if request.web_search.clear_api_key {
+            web_search_env_api_key(&web_search.provider).is_some()
+        } else {
+            self.effective_web_search_api_key(&web_search.provider)?
+                .is_some()
+        };
+        if web_search.enabled && new_api_key.is_none() && !has_existing_api_key {
+            anyhow::bail!("Web search API key is required when enabled");
+        }
+        if request.web_search.clear_api_key {
+            self.secrets
+                .delete_secret(&web_search_api_key_account(&web_search.provider))?;
+        }
+        if let Some(api_key) = new_api_key {
+            self.secrets
+                .set_secret(&web_search_api_key_account(&web_search.provider), api_key)?;
+        }
+        file.web_search = web_search;
         self.save_file(&file).await?;
         self.load_runtime_settings().await
     }
@@ -1213,6 +1291,7 @@ impl DesktopSettingsStore {
     pub async fn runtime_config(&self) -> Result<AgentConfig> {
         let file = self.load_file().await?;
         let mut config = AgentConfig::default();
+        config.web_search = None;
         let model_ref = ModelRef::new(file.provider_id.clone(), file.model);
         config.model = self.resolve(&model_ref).await?;
         extend_unique_paths(
@@ -1249,7 +1328,45 @@ impl DesktopSettingsStore {
                 }),
             })
             .collect();
+        if file.web_search.enabled {
+            let web_search = normalized_stored_web_search_settings(&file.web_search)?;
+            if let Some(api_key) = self.effective_web_search_api_key(&web_search.provider)? {
+                config.web_search = Some(WebSearchConfig {
+                    provider: web_search.provider,
+                    api_key,
+                });
+            }
+        }
         Ok(config)
+    }
+
+    fn web_search_settings_view(
+        &self,
+        settings: &StoredWebSearchSettings,
+    ) -> Result<WebSearchSettings> {
+        let settings = normalized_stored_web_search_settings(settings)?;
+        let has_api_key = self
+            .effective_web_search_api_key(&settings.provider)?
+            .is_some();
+        Ok(WebSearchSettings {
+            enabled: settings.enabled,
+            provider: settings.provider,
+            has_api_key,
+            api_key: None,
+            clear_api_key: false,
+        })
+    }
+
+    fn effective_web_search_api_key(&self, provider: &str) -> Result<Option<String>> {
+        if let Some(api_key) = self
+            .secrets
+            .get_secret(&web_search_api_key_account(provider))?
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(Some(api_key));
+        }
+        Ok(web_search_env_api_key(provider))
     }
 
     async fn resolve_connection_api_key(
@@ -2175,6 +2292,10 @@ fn default_runtime_model() -> String {
     default_provider_profile().default_model.to_string()
 }
 
+fn default_web_search_provider() -> String {
+    DEFAULT_WEB_SEARCH_PROVIDER.to_string()
+}
+
 fn effective_skill_roots(roots: &[SkillRootSettings]) -> Vec<SkillRootSettings> {
     if roots.is_empty() {
         return default_desktop_skill_roots();
@@ -2247,6 +2368,47 @@ fn credential_label(credential_id: &str, fallback_index: usize) -> String {
 
 fn provider_env_api_key(provider_id: &str) -> Option<String> {
     exagent::resolver::provider_env_api_key(provider_id)
+}
+
+fn web_search_api_key_account(provider: &str) -> String {
+    format!(
+        "web_search:{}:api_key",
+        provider.trim().to_ascii_lowercase()
+    )
+}
+
+fn web_search_env_api_key(provider: &str) -> Option<String> {
+    (normalize_web_search_provider(provider).ok()? == DEFAULT_WEB_SEARCH_PROVIDER).then(|| {
+        std::env::var("EXAGENT_WEB_SEARCH_API_KEY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })?
+}
+
+fn normalize_web_search_provider(provider: &str) -> Result<String> {
+    let normalized =
+        normalized_or_default(provider, DEFAULT_WEB_SEARCH_PROVIDER).to_ascii_lowercase();
+    if normalized != DEFAULT_WEB_SEARCH_PROVIDER {
+        anyhow::bail!("Unsupported web search provider `{normalized}`");
+    }
+    Ok(normalized)
+}
+
+fn normalized_web_search_settings(settings: &WebSearchSettings) -> Result<StoredWebSearchSettings> {
+    Ok(StoredWebSearchSettings {
+        enabled: settings.enabled,
+        provider: normalize_web_search_provider(&settings.provider)?,
+    })
+}
+
+fn normalized_stored_web_search_settings(
+    settings: &StoredWebSearchSettings,
+) -> Result<StoredWebSearchSettings> {
+    Ok(StoredWebSearchSettings {
+        enabled: settings.enabled,
+        provider: normalize_web_search_provider(&settings.provider)?,
+    })
 }
 
 fn normalized_or_default(value: &str, default: &str) -> String {
@@ -2386,6 +2548,8 @@ fn auth_required(auth_mode: ProviderAuthMode) -> bool {
 }
 
 fn validate_runtime_settings(request: &RuntimeSettingsSaveRequest) -> Result<()> {
+    normalize_web_search_provider(&request.web_search.provider)?;
+
     for preset in &request.presets {
         if preset.name.trim().is_empty() {
             anyhow::bail!("Runtime preset name is required");
@@ -3263,6 +3427,7 @@ mod tests {
             presets: Vec::new(),
             mcp_servers,
             skill_roots: Vec::new(),
+            web_search: WebSearchSettings::default(),
         }
     }
 
@@ -3466,6 +3631,7 @@ mod tests {
                     },
                 ],
                 skill_roots: Vec::new(),
+                web_search: WebSearchSettings::default(),
             })
             .await
             .unwrap();
@@ -3491,5 +3657,88 @@ mod tests {
 
         assert_eq!(config.mcp_servers[1].id, "Local_Files");
         assert_eq!(config.mcp_servers[1].working_directory, None);
+    }
+
+    #[tokio::test]
+    async fn runtime_config_includes_enabled_web_search_with_saved_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = DesktopSettingsStore::with_secret_store(
+            dir.path().join("settings.json"),
+            Arc::new(MemorySecretStore::default()),
+        );
+
+        let response = settings
+            .save_runtime_settings(RuntimeSettingsSaveRequest {
+                default_model: "gpt-4.1-mini".into(),
+                default_thinking_mode: None,
+                presets: Vec::new(),
+                mcp_servers: Vec::new(),
+                skill_roots: Vec::new(),
+                web_search: WebSearchSettings {
+                    enabled: true,
+                    provider: " brave ".into(),
+                    has_api_key: false,
+                    api_key: Some(" search-key ".into()),
+                    clear_api_key: false,
+                },
+            })
+            .await
+            .unwrap();
+
+        assert!(response.web_search.enabled);
+        assert_eq!(response.web_search.provider, "brave");
+        assert!(response.web_search.has_api_key);
+        assert_eq!(response.web_search.api_key, None);
+
+        let config = settings.runtime_config().await.unwrap();
+        let web_search = config.web_search.expect("web search config");
+        assert_eq!(web_search.provider, "brave");
+        assert_eq!(web_search.api_key, "search-key");
+    }
+
+    #[tokio::test]
+    async fn runtime_config_does_not_register_web_search_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecretStore::default());
+        secrets
+            .set_secret("web_search:brave:api_key", "search-key")
+            .unwrap();
+        let settings =
+            DesktopSettingsStore::with_secret_store(dir.path().join("settings.json"), secrets);
+
+        let config = settings.runtime_config().await.unwrap();
+
+        assert!(config.web_search.is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_settings_reject_enabled_web_search_without_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = DesktopSettingsStore::with_secret_store(
+            dir.path().join("settings.json"),
+            Arc::new(MemorySecretStore::default()),
+        );
+
+        let error = settings
+            .save_runtime_settings(RuntimeSettingsSaveRequest {
+                default_model: "gpt-4.1-mini".into(),
+                default_thinking_mode: None,
+                presets: Vec::new(),
+                mcp_servers: Vec::new(),
+                skill_roots: Vec::new(),
+                web_search: WebSearchSettings {
+                    enabled: true,
+                    provider: "brave".into(),
+                    has_api_key: false,
+                    api_key: None,
+                    clear_api_key: false,
+                },
+            })
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("Web search API key is required when enabled"));
     }
 }

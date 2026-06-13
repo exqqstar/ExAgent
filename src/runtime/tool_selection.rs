@@ -16,6 +16,7 @@ use crate::tools::list_agents::ListAgentsTool;
 use crate::tools::send_message::SendMessageTool;
 use crate::tools::spawn_agent::SpawnAgentTool;
 use crate::tools::wait_agent::WaitAgentTool;
+use crate::tools::web_search::{BraveSearchProvider, WebSearchTool};
 use crate::tools::ToolSpec;
 
 pub(crate) struct ToolSelection {
@@ -89,6 +90,14 @@ async fn assemble_tool_registry(input: &ToolSelectionInput<'_>) -> Result<ToolRe
         registry.register_handler(UpdateGoalTool::new(goal_api));
     }
 
+    if let Some(web_search) = &input.config.web_search {
+        if web_search.provider == "brave" {
+            registry.register_handler(WebSearchTool::new(Arc::new(BraveSearchProvider::new(
+                web_search.api_key.clone(),
+            ))));
+        }
+    }
+
     if input.config.model.capabilities.supports_tools {
         for handler in input.mcp_runtime.handlers().await? {
             registry.register_handler(handler);
@@ -120,6 +129,7 @@ pub(crate) fn authorize_tool(tool_name: &str, agent_tool_policy: &AgentToolPolic
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::WebSearchConfig;
     use crate::runtime::subagent::{
         CloseAgentResponse, CloseAgentsRequest, DeliverInterAgentMessageRequest,
         SendMessageResponse, SpawnAgentResponse, SpawnCleanChildRequest, SubagentLifecycle,
@@ -317,5 +327,68 @@ mod tests {
                 "expected {tool_name} to be hidden by agent policy"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn build_selection_registers_web_search_only_when_configured() {
+        let mut config = AgentConfig::default();
+        config.model.capabilities.supports_tools = true;
+        config.web_search = None;
+        let mcp_runtime = Arc::new(McpRuntimeManager::new(
+            config.mcp_servers.clone(),
+            config.workspace_root.clone(),
+        ));
+
+        let without_search = build_tool_selection(ToolSelectionInput {
+            base_registry: registry(),
+            config: &config,
+            mcp_runtime: mcp_runtime.clone(),
+            subagent_control: None,
+            goal_api: None,
+            agent_tool_policy: AgentToolPolicy::all(),
+        })
+        .await
+        .expect("selection without search");
+        assert!(!visible_tool_names(&without_search).contains(&"web_search"));
+
+        config.web_search = Some(WebSearchConfig {
+            provider: "brave".to_string(),
+            api_key: "search-key".to_string(),
+        });
+        let with_search = build_tool_selection(ToolSelectionInput {
+            base_registry: registry(),
+            config: &config,
+            mcp_runtime: mcp_runtime.clone(),
+            subagent_control: None,
+            goal_api: None,
+            agent_tool_policy: AgentToolPolicy::read_only_basic_collaboration(),
+        })
+        .await
+        .expect("selection with search");
+        assert!(visible_tool_names(&with_search).contains(&"web_search"));
+
+        config.web_search = Some(WebSearchConfig {
+            provider: "unsupported".to_string(),
+            api_key: "search-key".to_string(),
+        });
+        let unsupported_provider = build_tool_selection(ToolSelectionInput {
+            base_registry: registry(),
+            config: &config,
+            mcp_runtime,
+            subagent_control: None,
+            goal_api: None,
+            agent_tool_policy: AgentToolPolicy::all(),
+        })
+        .await
+        .expect("selection with unsupported provider");
+        assert!(!visible_tool_names(&unsupported_provider).contains(&"web_search"));
+    }
+
+    fn visible_tool_names(selection: &ToolSelection) -> Vec<&str> {
+        selection
+            .visible_specs()
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect()
     }
 }

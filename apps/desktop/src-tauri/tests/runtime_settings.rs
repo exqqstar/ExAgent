@@ -109,6 +109,7 @@ async fn runtime_settings_round_trip_defaults_mcp_and_skills() {
                 path: dir.path().display().to_string(),
                 scope: "global".into(),
             }],
+            web_search: Default::default(),
         })
         .await
         .unwrap();
@@ -149,6 +150,7 @@ async fn runtime_config_preserves_env_skill_root_when_settings_roots_are_saved()
                 path: settings_root.display().to_string(),
                 scope: "global".into(),
             }],
+            web_search: Default::default(),
         })
         .await
         .unwrap();
@@ -207,6 +209,7 @@ async fn runtime_config_includes_enabled_skill_roots_and_ignores_disabled_roots(
                     scope: "project".into(),
                 },
             ],
+            web_search: Default::default(),
         })
         .await
         .unwrap();
@@ -245,6 +248,7 @@ async fn runtime_settings_bootstraps_existing_desktop_skill_roots() {
             presets: vec![],
             mcp_servers: vec![],
             skill_roots: vec![],
+            web_search: Default::default(),
         })
         .await
         .unwrap();
@@ -335,6 +339,7 @@ async fn scan_skill_catalog_reports_sources_explicit_only_and_shadowed_skills() 
                     scope: "global".into(),
                 },
             ],
+            web_search: Default::default(),
         })
         .await
         .unwrap();
@@ -441,6 +446,7 @@ async fn runtime_settings_reject_blank_mcp_command() {
                 working_directory: None,
             }],
             skill_roots: vec![],
+            web_search: Default::default(),
         })
         .await
         .unwrap_err();
@@ -477,6 +483,7 @@ async fn provider_settings_save_preserves_runtime_mcp_and_skills() {
                 path: String::new(),
                 scope: "global".into(),
             }],
+            web_search: Default::default(),
         })
         .await
         .unwrap();

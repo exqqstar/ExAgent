@@ -384,6 +384,13 @@ let mockRuntimeSettings: RuntimeSettingsResponse = {
     }
   ],
   mcp_servers: [],
+  web_search: {
+    enabled: false,
+    provider: "brave",
+    has_api_key: false,
+    api_key: null,
+    clear_api_key: false
+  },
   skill_roots: [
     {
       id: "skills-user-preview",

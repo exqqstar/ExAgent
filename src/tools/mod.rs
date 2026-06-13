@@ -24,6 +24,7 @@ pub mod spec;
 pub mod view_image;
 pub mod wait_agent;
 pub mod web_fetch;
+pub mod web_search;
 pub mod write_file;
 pub mod write_stdin;
 

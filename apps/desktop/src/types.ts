@@ -761,6 +761,15 @@ export interface RuntimeSettingsResponse {
   presets: RuntimePresetSettings[];
   mcp_servers: McpServerSettings[];
   skill_roots: SkillRootSettings[];
+  web_search?: WebSearchSettings;
 }
 
 export type RuntimeSettingsSaveRequest = RuntimeSettingsResponse;
+
+export interface WebSearchSettings {
+  enabled: boolean;
+  provider: string;
+  has_api_key: boolean;
+  api_key?: string | null;
+  clear_api_key?: boolean;
+}

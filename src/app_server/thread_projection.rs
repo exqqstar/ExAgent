@@ -1,5 +1,5 @@
 use crate::app_server::protocol::{
-    ThreadItem, ThreadStatus, ThreadView, TurnState, TurnStatus, TurnView,
+    ThreadGoalMode, ThreadItem, ThreadStatus, ThreadView, TurnState, TurnStatus, TurnView,
 };
 use crate::config::ThinkingMode;
 use crate::events::{RuntimeEvent, RuntimeEventKind};
@@ -47,6 +47,7 @@ pub(in crate::app_server) fn latest_turn_state(events: &[RuntimeEvent]) -> Optio
             | RuntimeEventKind::OpenQuestionResolved { .. }
             | RuntimeEventKind::TokenCount { .. } => Some(TurnStatus::InProgress),
             RuntimeEventKind::ThreadGoalUpdated { .. }
+            | RuntimeEventKind::ThreadGoalModeUpdated { .. }
             | RuntimeEventKind::ThreadGoalCleared { .. }
             | RuntimeEventKind::ThreadGoalContinuationStarted { .. }
             | RuntimeEventKind::ThreadGoalContinuationSuppressed { .. }
@@ -102,6 +103,7 @@ pub(in crate::app_server) fn build_thread_view_with_selection(
         model,
         thinking_mode,
         goal: None,
+        goal_mode: ThreadGoalMode::Standard,
     }
 }
 
@@ -223,6 +225,7 @@ fn build_turn_views(events: Vec<RuntimeEvent>) -> Vec<TurnView> {
                 }
             }
             RuntimeEventKind::ThreadGoalUpdated { .. }
+            | RuntimeEventKind::ThreadGoalModeUpdated { .. }
             | RuntimeEventKind::ThreadGoalCleared { .. }
             | RuntimeEventKind::ThreadGoalContinuationStarted { .. }
             | RuntimeEventKind::ThreadGoalContinuationSuppressed { .. }
@@ -578,6 +581,7 @@ fn thread_item_from_event(event: &RuntimeEvent) -> Option<ThreadItem> {
         | RuntimeEventKind::ToolInvocationCancelled { .. }
         | RuntimeEventKind::TokenCount { .. }
         | RuntimeEventKind::ThreadGoalUpdated { .. }
+        | RuntimeEventKind::ThreadGoalModeUpdated { .. }
         | RuntimeEventKind::ThreadGoalCleared { .. }
         | RuntimeEventKind::ThreadGoalContinuationStarted { .. }
         | RuntimeEventKind::ThreadGoalContinuationSuppressed { .. }

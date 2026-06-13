@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   compactThread,
+  getThreadGoal,
   importImageFiles,
   listApprovals,
   pickImageFiles,
@@ -44,7 +45,8 @@ describe("exagentClient", () => {
   it("sends an explicit clear-token-budget flag to the desktop command", async () => {
     await setThreadGoal("project-exagent", "thread-goal", {
       tokenBudget: null,
-      clearTokenBudget: true
+      clearTokenBudget: true,
+      mode: "reviewed"
     });
 
     expect(tauriMocks.invoke).toHaveBeenCalledWith("thread_goal_set", {
@@ -53,8 +55,19 @@ describe("exagentClient", () => {
       objective: null,
       status: null,
       tokenBudget: null,
-      clearTokenBudget: true
+      clearTokenBudget: true,
+      mode: "reviewed"
     });
+  });
+
+  it("returns standard goal mode in browser preview", async () => {
+    delete (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+
+    await expect(getThreadGoal("project-exagent", "thread-goal")).resolves.toEqual({
+      goal: null,
+      mode: "standard"
+    });
+    expect(tauriMocks.invoke).not.toHaveBeenCalled();
   });
 
   it("compacts a thread through the desktop command", async () => {

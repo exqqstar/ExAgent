@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::app_server::protocol::ThreadGoalMode;
 use crate::config::AgentConfig;
 use crate::exec_session::{ExecOutputEventSink, ExecSessionManager};
 use crate::llm::{LlmClient, LlmRequestOptions, LlmStreamSink};
@@ -13,6 +14,7 @@ use crate::policy::PolicyManager;
 use crate::registry::ToolRegistry;
 use crate::runtime::agent_profile::AgentToolPolicy;
 use crate::runtime::forge::gate::ForgeGateHooks;
+use crate::runtime::forge::goal_modes::ForgeGoalModeStore;
 use crate::runtime::forge::review::ReviewStore;
 use crate::runtime::goal::GoalToolApi;
 use crate::runtime::subagent::AgentControl;
@@ -174,6 +176,7 @@ impl Agent {
         turn_config.workspace_root = workspace_root;
         turn_config.cwd = cwd.clone();
         let forge_gate_enabled = turn_config.forge_review_gate_enabled;
+        let active_goal_mode = self.active_goal_mode(&thread_id).await?;
         // This turn_config is local to Agent::tool_runtime after applying
         // workspace_root/cwd. It is separate from the LLM turn_config built in
         // run_session_turn for model/thinking/profile defaults.
@@ -184,6 +187,7 @@ impl Agent {
             subagent_control: self.subagent_control.clone(),
             goal_api: self.goal_api.clone(),
             forge_review_store: self.forge_review_store.clone(),
+            active_goal_mode,
             agent_tool_policy: agent_tool_policy.clone(),
         })
         .await?;
@@ -214,6 +218,20 @@ impl Agent {
         }
         runtime = runtime.with_goal_api(self.goal_api.clone());
         Ok(runtime)
+    }
+
+    async fn active_goal_mode(&self, thread_id: &ThreadId) -> Result<ThreadGoalMode> {
+        let (Some(goal_api), Some(review_store)) =
+            (self.goal_api.as_ref(), self.forge_review_store.as_ref())
+        else {
+            return Ok(ThreadGoalMode::Standard);
+        };
+        let Some(goal) = goal_api.get_goal(thread_id).await? else {
+            return Ok(ThreadGoalMode::Standard);
+        };
+        ForgeGoalModeStore::new(review_store.db())
+            .mode_for_goal(thread_id, &goal.goal_id)
+            .await
     }
 }
 

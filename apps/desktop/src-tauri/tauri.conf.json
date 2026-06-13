@@ -12,11 +12,19 @@
   "app": {
     "windows": [
       {
-        "title": "ExAgent",
+        "title": "",
         "width": 1280,
         "height": 860,
         "minWidth": 900,
-        "minHeight": 620
+        "minHeight": 620,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 24
+        },
+        "acceptFirstMouse": true
       }
     ],
     "security": {

@@ -121,6 +121,43 @@ pub enum ThreadGoalStatus {
     Complete,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadGoalMode {
+    #[default]
+    Standard,
+    Reviewed,
+    Intensive,
+}
+
+impl ThreadGoalMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Reviewed => "reviewed",
+            Self::Intensive => "intensive",
+        }
+    }
+
+    pub fn is_review_gated(self) -> bool {
+        matches!(self, Self::Reviewed | Self::Intensive)
+    }
+
+    pub fn is_intensive(self) -> bool {
+        matches!(self, Self::Intensive)
+    }
+}
+
+impl From<bool> for ThreadGoalMode {
+    fn from(intensive: bool) -> Self {
+        if intensive {
+            Self::Intensive
+        } else {
+            Self::Standard
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadGoalReport {
     pub goal_id: String,
@@ -207,11 +244,14 @@ pub struct ThreadGoalSetParams {
         deserialize_with = "deserialize_optional_token_budget_update"
     )]
     pub token_budget: Option<Option<i64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ThreadGoalMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadGoalSetResponse {
     pub goal: ThreadGoal,
+    pub mode: ThreadGoalMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -223,6 +263,7 @@ pub struct ThreadGoalGetParams {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadGoalGetResponse {
     pub goal: Option<ThreadGoal>,
+    pub mode: ThreadGoalMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -262,6 +303,8 @@ pub struct ThreadView {
     pub thinking_mode: Option<ThinkingMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<ThreadGoal>,
+    #[serde(default)]
+    pub goal_mode: ThreadGoalMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -991,6 +1034,7 @@ mod tests {
             objective: Some("ship durable goal runtime".to_string()),
             status: Some(ThreadGoalStatus::Active),
             token_budget: Some(Some(50_000)),
+            mode: Some(ThreadGoalMode::Reviewed),
         };
         let op = BoundaryOp::ThreadGoalSet(params.clone());
 
@@ -1003,6 +1047,7 @@ mod tests {
                 "objective": "ship durable goal runtime",
                 "status": "active",
                 "token_budget": 50000,
+                "mode": "reviewed",
                 "workspace_root": "/repo"
             })
         );
@@ -1020,13 +1065,55 @@ mod tests {
             serde_json::from_value(params_value).expect("deserialize thread goal set params");
         assert_eq!(decoded_params, params);
 
-        let response = BoundaryOpResponse::ThreadGoalSet(ThreadGoalSetResponse { goal });
+        let response = BoundaryOpResponse::ThreadGoalSet(ThreadGoalSetResponse {
+            goal: goal.clone(),
+            mode: ThreadGoalMode::Reviewed,
+        });
         let response_value =
             serde_json::to_value(&response).expect("serialize thread goal set response");
         assert_eq!(response_value["type"], "thread_goal_set");
         let decoded_response: BoundaryOpResponse =
             serde_json::from_value(response_value).expect("deserialize thread goal set response");
         assert_eq!(decoded_response, response);
+
+        let get_response = BoundaryOpResponse::ThreadGoalGet(ThreadGoalGetResponse {
+            goal: Some(goal),
+            mode: ThreadGoalMode::Reviewed,
+        });
+        let get_response_value =
+            serde_json::to_value(&get_response).expect("serialize thread goal get response");
+        assert_eq!(get_response_value["mode"], json!("reviewed"));
+        let decoded_get_response: BoundaryOpResponse = serde_json::from_value(get_response_value)
+            .expect("deserialize thread goal get response");
+        assert_eq!(decoded_get_response, get_response);
+    }
+
+    #[test]
+    fn thread_goal_mode_serializes_as_snake_case_sidecar_value() {
+        assert_eq!(
+            serde_json::to_value(ThreadGoalMode::Standard).unwrap(),
+            json!("standard")
+        );
+        assert_eq!(
+            serde_json::to_value(ThreadGoalMode::Reviewed).unwrap(),
+            json!("reviewed")
+        );
+        assert_eq!(
+            serde_json::to_value(ThreadGoalMode::Intensive).unwrap(),
+            json!("intensive")
+        );
+        assert_eq!(
+            serde_json::from_value::<ThreadGoalMode>(json!("standard")).unwrap(),
+            ThreadGoalMode::Standard
+        );
+        assert_eq!(
+            serde_json::from_value::<ThreadGoalMode>(json!("reviewed")).unwrap(),
+            ThreadGoalMode::Reviewed
+        );
+        assert_eq!(
+            serde_json::from_value::<ThreadGoalMode>(json!("intensive")).unwrap(),
+            ThreadGoalMode::Intensive
+        );
     }
 
     #[test]

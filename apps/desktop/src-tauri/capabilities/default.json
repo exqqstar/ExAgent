@@ -3,5 +3,11 @@
   "identifier": "default",
   "description": "Default desktop permissions for ExAgent.",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-title",
+    "core:window:allow-set-title-bar-style",
+    "dialog:default"
+  ]
 }

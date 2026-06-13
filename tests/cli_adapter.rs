@@ -5,10 +5,10 @@ use exagent::app_server::protocol::{
     ApprovalDecisionResponse, BoundaryOp, BoundaryOpResponse, EventsReplayParams,
     EventsReplayResponse, EventsSubscribeParams, OpenQuestionResolveParams,
     OpenQuestionResolveResponse, RunParams, SubmitUserInputParams, SubmitUserInputResponse,
-    ThreadCompactParams, ThreadCompactResponse, ThreadReadParams, ThreadReadResponse,
-    ThreadResumeParams, ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, ThreadStatus,
-    ThreadView, TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
-    TurnStatus, TurnView,
+    ThreadCompactParams, ThreadCompactResponse, ThreadGoalMode, ThreadReadParams,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
+    ThreadStartResponse, ThreadStatus, ThreadView, TurnInterruptParams, TurnInterruptResponse,
+    TurnStartParams, TurnStartResponse, TurnStatus, TurnView,
 };
 use exagent::app_server::AppServerBoundary;
 use exagent::cli::CliCommand;
@@ -181,6 +181,7 @@ fn sample_thread_view(id: ThreadId) -> ThreadView {
         model: None,
         thinking_mode: None,
         goal: None,
+        goal_mode: ThreadGoalMode::Standard,
     }
 }
 

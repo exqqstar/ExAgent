@@ -9,10 +9,10 @@ use exagent::app_server::protocol::{
     BoundaryOpResponse, EventsReplayParams, EventsReplayResponse, EventsSubscribeParams,
     IgnoredOverrideField, InitializeResponse, OpenQuestionResolveParams,
     OpenQuestionResolveResponse, RunParams, SubmitUserInputParams, SubmitUserInputResponse,
-    ThreadCompactParams, ThreadCompactResponse, ThreadReadParams, ThreadReadResponse,
-    ThreadResumeParams, ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, ThreadStatus,
-    ThreadView, TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
-    TurnStatus, TurnView, BOUNDARY_PROTOCOL_VERSION,
+    ThreadCompactParams, ThreadCompactResponse, ThreadGoalMode, ThreadReadParams,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
+    ThreadStartResponse, ThreadStatus, ThreadView, TurnInterruptParams, TurnInterruptResponse,
+    TurnStartParams, TurnStartResponse, TurnStatus, TurnView, BOUNDARY_PROTOCOL_VERSION,
 };
 use exagent::app_server::{AppServerBoundary, AppServerError};
 use exagent::cli::{parse_cli_command, CliCommand};
@@ -959,6 +959,7 @@ fn sample_thread_view() -> ThreadView {
         model: None,
         thinking_mode: None,
         goal: None,
+        goal_mode: ThreadGoalMode::Standard,
     }
 }
 
@@ -997,6 +998,7 @@ fn sample_thread_json() -> Value {
         "id": "thread_123",
         "status": "idle",
         "active_turn": null,
+        "goal_mode": "standard",
         "turns": []
     })
 }

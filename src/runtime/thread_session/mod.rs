@@ -201,6 +201,7 @@ impl ThreadSession {
             ));
         }
         let overlay = RuntimeOverlay::from_events(&events);
+        let unfinished_turn_id = unfinished_turn_without_external_wait(&events, &overlay);
         let live_event_buffer_cap = live_event_buffer_cap.max(1);
         let next_event_index = next_event_index(&events);
         let overflow = events.len().saturating_sub(live_event_buffer_cap);
@@ -225,7 +226,7 @@ impl ThreadSession {
             events,
             status: ThreadRuntimeStatus::Idle,
         }));
-        let recorder = ThreadEventRecorder::new(
+        let mut recorder = ThreadEventRecorder::new(
             thread_id.clone(),
             rollout_store.clone(),
             event_tx,
@@ -233,6 +234,17 @@ impl ThreadSession {
             next_event_index,
             live_event_buffer_cap,
         );
+        if let Some(turn_id) = unfinished_turn_id {
+            recorder.record(
+                &snapshot,
+                Some(&turn_id),
+                RuntimeEventKind::RuntimeError {
+                    message:
+                        "Thread runtime resumed with an unfinished turn; marking the turn failed."
+                            .to_string(),
+                },
+            )?;
+        }
 
         Ok(Self {
             thread_id,
@@ -448,6 +460,33 @@ fn next_turn_index_from_rollout_items(items: &[RolloutItem]) -> u64 {
         + 1
 }
 
+fn unfinished_turn_without_external_wait(
+    events: &[RuntimeEvent],
+    overlay: &RuntimeOverlay,
+) -> Option<TurnId> {
+    if overlay.has_pending_approval() || overlay.has_pending_user_input() {
+        return None;
+    }
+    let latest_turn_id = events
+        .iter()
+        .rev()
+        .find_map(|event| event.turn_id.clone())?;
+    for event in events
+        .iter()
+        .rev()
+        .filter(|event| event.turn_id.as_ref() == Some(&latest_turn_id))
+    {
+        match &event.kind {
+            RuntimeEventKind::TurnCompleted
+            | RuntimeEventKind::TurnInterrupted
+            | RuntimeEventKind::RuntimeError { .. } => return None,
+            RuntimeEventKind::TurnStarted => return Some(latest_turn_id),
+            _ => {}
+        }
+    }
+    None
+}
+
 fn turn_ids_from_rollout_item(item: &RolloutItem) -> Vec<&TurnId> {
     match item {
         RolloutItem::ResponseItem(response_item) => vec![&response_item.turn_id],
@@ -635,6 +674,143 @@ mod tests {
         );
     }
 
+    #[test]
+    fn session_load_marks_unclosed_turn_without_pending_input_failed() {
+        let dir = tempdir().unwrap();
+        let thread_id = ThreadId::new("session_load_unclosed_turn_failed");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        let snapshot = ThreadSnapshot::new_thread(
+            thread_id.clone(),
+            config.workspace_root.clone(),
+            config.cwd.clone(),
+        );
+        let turn_id = TurnId::new("turn_1");
+        let rollout_paths =
+            crate::state::rollout::rollout_paths(&config.workspace_root, &thread_id);
+        crate::state::rollout::RolloutStore::new(rollout_paths.rollout_path.clone())
+            .append_items_blocking(&[
+                RolloutItem::ThreadMeta(crate::state::rollout::thread_meta_from_snapshot(
+                    &snapshot,
+                )),
+                RolloutItem::EventMsg(RuntimeEvent {
+                    event_id: EventId::new("evt_1"),
+                    thread_id: thread_id.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    kind: RuntimeEventKind::TurnStarted,
+                }),
+            ])
+            .expect("write rollout");
+
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(MockLlm::new(vec![])),
+                ToolRegistry::new(),
+            ))
+        });
+
+        let session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config,
+            agent_factory,
+        ))
+        .expect("create thread session");
+        let live_view =
+            ThreadSession::live_view_from_state(thread_id, &session.live_state_handle());
+
+        assert!(live_view.events.iter().any(|event| matches!(
+            &event.kind,
+            RuntimeEventKind::RuntimeError { message }
+                if event.turn_id.as_ref() == Some(&turn_id)
+                    && message.contains("unfinished turn")
+        )));
+        let rollout_items =
+            crate::state::rollout::RolloutStore::read_items_blocking(&rollout_paths.rollout_path)
+                .expect("read rollout");
+        assert!(rollout_items.iter().any(|item| matches!(
+            item,
+            RolloutItem::EventMsg(event)
+                if event.turn_id.as_ref() == Some(&turn_id)
+                    && matches!(event.kind, RuntimeEventKind::RuntimeError { .. })
+        )));
+    }
+
+    #[test]
+    fn session_load_keeps_unclosed_turn_waiting_for_approval() {
+        let dir = tempdir().unwrap();
+        let thread_id = ThreadId::new("session_load_unclosed_turn_pending_approval");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        let snapshot = ThreadSnapshot::new_thread(
+            thread_id.clone(),
+            config.workspace_root.clone(),
+            config.cwd.clone(),
+        );
+        let turn_id = TurnId::new("turn_1");
+        let approval_id = ApprovalId::new("approval_1");
+        let rollout_paths =
+            crate::state::rollout::rollout_paths(&config.workspace_root, &thread_id);
+        crate::state::rollout::RolloutStore::new(rollout_paths.rollout_path.clone())
+            .append_items_blocking(&[
+                RolloutItem::ThreadMeta(crate::state::rollout::thread_meta_from_snapshot(
+                    &snapshot,
+                )),
+                RolloutItem::EventMsg(RuntimeEvent {
+                    event_id: EventId::new("evt_1"),
+                    thread_id: thread_id.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    kind: RuntimeEventKind::TurnStarted,
+                }),
+                RolloutItem::EventMsg(RuntimeEvent {
+                    event_id: EventId::new("evt_2"),
+                    thread_id: thread_id.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    kind: RuntimeEventKind::ApprovalRequested {
+                        approval_id,
+                        tool_name: "run_command".to_string(),
+                        reason: "approval required".to_string(),
+                        checkpoint_id: None,
+                        permission_profile: PermissionProfile::FullAccess,
+                        filesystem_sandbox: crate::config::default_boundary_none(),
+                        network_sandbox: crate::config::default_boundary_none(),
+                        env_isolation: crate::config::default_boundary_none(),
+                        command: None,
+                    },
+                }),
+            ])
+            .expect("write rollout");
+
+        let agent_factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(MockLlm::new(vec![])),
+                ToolRegistry::new(),
+            ))
+        });
+
+        let session = ThreadSession::new(ThreadSessionOptions::new(
+            thread_id.clone(),
+            config,
+            agent_factory,
+        ))
+        .expect("create thread session");
+        let live_view =
+            ThreadSession::live_view_from_state(thread_id, &session.live_state_handle());
+
+        assert!(!live_view
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, RuntimeEventKind::RuntimeError { .. })));
+        assert!(live_view.overlay.has_pending_approval());
+    }
+
     #[tokio::test]
     async fn handle_interrupt_cancels_pending_policy_approvals() {
         let dir = tempdir().unwrap();
@@ -726,12 +902,17 @@ mod tests {
         let mut rollout_items = vec![crate::state::rollout::RolloutItem::ThreadMeta(
             crate::state::rollout::thread_meta_from_snapshot(&snapshot),
         )];
-        for event_index in 1..=4 {
+        for (event_index, turn_index, kind) in [
+            (1, 1, RuntimeEventKind::TurnStarted),
+            (2, 1, RuntimeEventKind::TurnCompleted),
+            (3, 2, RuntimeEventKind::TurnStarted),
+            (4, 2, RuntimeEventKind::TurnCompleted),
+        ] {
             rollout_items.push(crate::state::rollout::RolloutItem::EventMsg(RuntimeEvent {
                 event_id: EventId::new(format!("evt_{}", event_index)),
                 thread_id: thread_id.clone(),
-                turn_id: Some(TurnId::new(format!("turn_{}", event_index))),
-                kind: RuntimeEventKind::TurnStarted,
+                turn_id: Some(TurnId::new(format!("turn_{}", turn_index))),
+                kind,
             }));
         }
         let rollout_paths =

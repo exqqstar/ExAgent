@@ -5,7 +5,7 @@ use anyhow::Result;
 
 use crate::app_server::override_policy::{OverridePolicy, RuntimeOverrides};
 use crate::app_server::protocol::{
-    IgnoredOverrideField, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    IgnoredOverrideField, ThreadGoalMode, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
     ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, ThreadStatus, ThreadView,
     TurnStatus,
 };
@@ -75,6 +75,7 @@ pub(in crate::app_server) fn thread_start(
             model: None,
             thinking_mode: None,
             goal: None,
+            goal_mode: ThreadGoalMode::Standard,
         },
     })
 }

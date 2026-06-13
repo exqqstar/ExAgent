@@ -189,6 +189,7 @@ fn should_persist_event(event: &RuntimeEvent) -> bool {
             | RuntimeEventKind::SubagentClosed { .. }
             | RuntimeEventKind::InterAgentMessageSent { .. }
             | RuntimeEventKind::TokenCount { .. }
+            | RuntimeEventKind::ThreadGoalModeUpdated { .. }
             | RuntimeEventKind::ThreadGoalTurnStarted { .. }
             | RuntimeEventKind::ThreadGoalToolCompleted { .. }
             | RuntimeEventKind::ReviewSubmitted { .. }

@@ -1,6 +1,6 @@
 use sqlx::{Executor, SqlitePool};
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 pub async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
     pool.execute("PRAGMA foreign_keys = ON").await?;
@@ -150,9 +150,31 @@ CREATE TABLE IF NOT EXISTS forge_goal_modes (
   thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
   goal_id TEXT NOT NULL,
   intensive INTEGER NOT NULL DEFAULT 0,
+  mode TEXT NOT NULL DEFAULT 'standard' CHECK(mode IN ('standard', 'reviewed', 'intensive')),
   updated_at_ms INTEGER NOT NULL,
   PRIMARY KEY(thread_id, goal_id)
 )
+        "#,
+    )
+    .await?;
+    add_column_if_missing(
+        pool,
+        "forge_goal_modes",
+        "mode",
+        r#"
+ALTER TABLE forge_goal_modes
+ADD COLUMN mode TEXT NOT NULL DEFAULT 'standard'
+        "#,
+    )
+    .await?;
+    pool.execute(
+        r#"
+UPDATE forge_goal_modes
+SET mode = CASE
+  WHEN intensive != 0 THEN 'intensive'
+  WHEN mode NOT IN ('standard', 'reviewed', 'intensive') THEN 'standard'
+  ELSE mode
+END
         "#,
     )
     .await?;

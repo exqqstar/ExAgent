@@ -60,6 +60,10 @@ type ProjectConfirmation =
   | { type: "archive_conversations"; project: ProjectSummary }
   | { type: "remove_project"; project: ProjectSummary }
   | null;
+type SessionSearchResult = {
+  session: SessionSummary;
+  project: ProjectSummary;
+};
 
 const statusVariant: Record<SessionStatus, "neutral" | "success" | "warning" | "danger"> = {
   idle: "neutral",
@@ -71,7 +75,6 @@ const statusVariant: Record<SessionStatus, "neutral" | "success" | "warning" | "
 
 export function Sidebar({ state }: { state: WorkbenchState }) {
   const { t } = useI18n();
-  const activeProject = state.projects.find((project) => project.id === state.activeProjectId);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const renamingSession = state.sessions.find((session) => session.id === renamingSessionId) ?? null;
   const [renameTitle, setRenameTitle] = useState("");
@@ -84,6 +87,16 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
   const [projectSessions, setProjectSessions] = useState<Record<string, SessionSummary[]>>({});
   const [loadingProjectSessions, setLoadingProjectSessions] = useState<Record<string, boolean>>({});
   const [projectSessionErrors, setProjectSessionErrors] = useState<Record<string, string>>({});
+  const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
+  const [sessionSearchQuery, setSessionSearchQuery] = useState("");
+  const [sessionSearchResults, setSessionSearchResults] = useState<SessionSearchResult[]>([]);
+  const [sessionSearchLoading, setSessionSearchLoading] = useState(false);
+  const [sessionSearchError, setSessionSearchError] = useState<string | null>(null);
+  const visibleProjects = state.projects.filter((project) => !isPersonalProject(project));
+  const normalizedSessionSearchQuery = sessionSearchQuery.trim().toLowerCase();
+  const searchableSessions = sessionSearchResults.filter((result) =>
+    result.session.title.toLowerCase().includes(normalizedSessionSearchQuery)
+  );
 
   useEffect(() => {
     setRenameTitle(renamingSession?.title ?? "");
@@ -111,6 +124,52 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
     setProjectSessions(state.activeProjectId ? { [state.activeProjectId]: state.sessions } : {});
     setProjectSessionErrors({});
   }, [state.search]);
+
+  useEffect(() => {
+    if (!sessionSearchOpen) {
+      return;
+    }
+
+    let canceled = false;
+    const projects = state.projects.filter((project) => !project.archived);
+    setSessionSearchLoading(true);
+    setSessionSearchError(null);
+
+    async function loadRecentSessions() {
+      try {
+        const groupedResults = await Promise.all(
+          projects.map(async (project) => {
+            const sessions =
+              project.id === state.activeProjectId
+                ? state.sessions
+                : (await exagentClient.listThreads(project.id, false, null)).map(exagentClient.threadRecordToSession);
+            return sessions.map((session) => ({ session, project }));
+          })
+        );
+        if (canceled) {
+          return;
+        }
+        setSessionSearchResults(
+          groupedResults
+            .flat()
+            .sort((left, right) => (right.session.createdAt ?? 0) - (left.session.createdAt ?? 0))
+        );
+      } catch (error) {
+        if (!canceled) {
+          setSessionSearchError(errorMessage(error));
+        }
+      } finally {
+        if (!canceled) {
+          setSessionSearchLoading(false);
+        }
+      }
+    }
+
+    void loadRecentSessions();
+    return () => {
+      canceled = true;
+    };
+  }, [sessionSearchOpen, state.activeProjectId, state.projects, state.sessions]);
 
   function toggleProject(projectId: string) {
     setExpandedProjectId((current) => (current === projectId ? null : projectId));
@@ -318,37 +377,27 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      <div className="space-y-3 p-3">
-        <div className="flex items-center justify-between gap-2">
-          <div className="min-w-0">
-            <p className="type-label-sm tracking-normal text-muted">Project</p>
-            <h1 className="type-title-md truncate text-ink">{activeProject?.name ?? "No project"}</h1>
-          </div>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                size="icon"
-                variant="secondary"
-                aria-label="New session"
-                onClick={() => void state.startSession()}
-              >
-                <Plus className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>New session</TooltipContent>
-          </Tooltip>
-        </div>
-
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-subtle" />
-          <Input
-            className="pl-8"
-            placeholder="Search sessions"
-            aria-label="Search sessions"
-            value={state.search}
-            onChange={(event) => void state.setSearch(event.target.value)}
-          />
-        </div>
+      <span className="sr-only">Project</span>
+      <div className="sidebar-quick-actions p-1.5">
+        <button
+          type="button"
+          className="sidebar-action-row group"
+          aria-label="New chat"
+          onClick={() => void state.startPersonalSession()}
+        >
+          <Pencil className="h-3.5 w-3.5 shrink-0 text-muted transition-colors group-hover:text-ink" />
+          <span className="min-w-0 flex-1 truncate">新对话</span>
+          <kbd className="sidebar-shortcut">Cmd N</kbd>
+        </button>
+        <button
+          type="button"
+          className="sidebar-action-row group"
+          aria-label="Search sessions"
+          onClick={() => setSessionSearchOpen(true)}
+        >
+          <Search className="h-3.5 w-3.5 shrink-0 text-muted transition-colors group-hover:text-ink" />
+          <span className="min-w-0 flex-1 truncate">搜索</span>
+        </button>
       </div>
 
       <Separator />
@@ -373,7 +422,7 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
             </Tooltip>
           </div>
           <div className="space-y-1">
-            {state.projects.map((project) => {
+            {visibleProjects.map((project) => {
               const active = project.id === state.activeProjectId;
               const expanded = project.id === expandedProjectId;
               const sessions = projectSessions[project.id] ?? (active ? state.sessions : []);
@@ -526,6 +575,59 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
         </Tooltip>
       </div>
 
+      <Dialog open={sessionSearchOpen} onOpenChange={setSessionSearchOpen}>
+        <DialogContent className="w-[min(560px,calc(100vw-32px))] gap-0 overflow-hidden p-0">
+          <DialogHeader className="border-b border-border px-4 py-3">
+            <DialogTitle>搜索会话</DialogTitle>
+            <DialogDescription>按名称查找最近的 session。</DialogDescription>
+          </DialogHeader>
+          <div className="border-b border-border p-3">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-subtle" />
+              <Input
+                className="pl-8"
+                placeholder="Search sessions"
+                aria-label="Search sessions"
+                value={sessionSearchQuery}
+                onChange={(event) => setSessionSearchQuery(event.target.value)}
+              />
+            </div>
+          </div>
+          <div className="max-h-[360px] overflow-y-auto p-2">
+            {searchableSessions.length > 0 ? (
+              <div className="space-y-1">
+                {searchableSessions.map(({ session, project }) => (
+                  <button
+                    key={session.id}
+                    type="button"
+                    className="type-body-sm flex w-full items-center justify-between gap-3 rounded-md px-2.5 py-2 text-left text-muted transition-colors hover:bg-surface-2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+                    onClick={() => {
+                      setSessionSearchOpen(false);
+                      setSessionSearchQuery("");
+                      openProjectSession(session);
+                    }}
+                  >
+                    <span className="min-w-0 flex-1 overflow-hidden">
+                      <span className="block truncate">{session.title}</span>
+                      <span className="type-label-sm block truncate text-subtle">
+                        {isPersonalProject(project) ? "未指定项目" : project.name}
+                      </span>
+                    </span>
+                    <span className="type-label-sm shrink-0 text-subtle">{session.updatedAt}</span>
+                  </button>
+                ))}
+              </div>
+            ) : sessionSearchLoading ? (
+              <p className="type-body-sm px-2.5 py-6 text-center text-subtle">Loading sessions...</p>
+            ) : sessionSearchError ? (
+              <p className="type-body-sm px-2.5 py-6 text-center text-danger">{sessionSearchError}</p>
+            ) : (
+              <p className="type-body-sm px-2.5 py-6 text-center text-subtle">No matching sessions</p>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={renamingSession !== null} onOpenChange={(open) => !open && setRenamingSessionId(null)}>
         <DialogContent>
           <DialogHeader>
@@ -666,6 +768,10 @@ function buildSessionBranchRows(sessions: SessionSummary[]): SessionBranchNode[]
   }
 
   return roots;
+}
+
+function isPersonalProject(project: ProjectSummary) {
+  return project.name === "Personal" && /[\\/]conversations$/i.test(project.path);
 }
 
 function forkTurnLabel(turnId: string) {

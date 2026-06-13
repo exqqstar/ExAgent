@@ -1003,7 +1003,7 @@ mod tests {
     use async_trait::async_trait;
     use tempfile::tempdir;
 
-    use crate::app_server::protocol::ThreadGoalStatus;
+    use crate::app_server::protocol::{ThreadGoalReport, ThreadGoalStatus};
     use crate::events::RuntimeEventKind;
     use crate::index_db::{IndexDb, ProjectUpsert};
     use crate::llm::{LlmClient, LlmRequestOptions, MockLlm};
@@ -1168,6 +1168,24 @@ mod tests {
         .expect("runtime error event")
     }
 
+    async fn wait_for_goal_continuation_started(
+        events: &mut broadcast::Receiver<RuntimeEvent>,
+    ) -> TurnId {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let event = events.recv().await.expect("runtime event");
+                if matches!(
+                    event.kind,
+                    RuntimeEventKind::ThreadGoalContinuationStarted { .. }
+                ) {
+                    return event.turn_id.expect("continuation turn id");
+                }
+            }
+        })
+        .await
+        .expect("goal continuation started")
+    }
+
     async fn wait_until_no_active_turn(runtime: &ThreadRuntime) {
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
@@ -1209,6 +1227,21 @@ mod tests {
         })
         .await
         .expect("goal reached expected status");
+    }
+
+    async fn wait_for_goal_report(
+        events: &mut broadcast::Receiver<RuntimeEvent>,
+    ) -> ThreadGoalReport {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let event = events.recv().await.expect("runtime event");
+                if let RuntimeEventKind::ThreadGoalReport { report } = event.kind {
+                    return report;
+                }
+            }
+        })
+        .await
+        .expect("goal report event")
     }
 
     fn usage(total_tokens: i64) -> TokenUsage {
@@ -1327,6 +1360,95 @@ VALUES (?, ?, ?, 'Goal thread', 'Goal preview', 'test', 0, 'idle', 1, 1)
         .await
         .expect("continuation started");
         wait_for_goal_status(&db, &thread_id, ThreadGoalStatus::Complete).await;
+        let report = wait_for_goal_report(&mut events).await;
+        assert_eq!(report.tokens_used, 55);
+        runtime.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn failed_goal_continuation_records_runtime_error_for_replay() {
+        let dir = tempdir().expect("tempdir");
+        let thread_id = ThreadId::new("thread_failed_goal_continuation_error");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        let db = IndexDb::open(dir.path().join("index.sqlite"))
+            .await
+            .expect("index db");
+        let project = db
+            .upsert_project(ProjectUpsert {
+                name: "Goal Project".to_string(),
+                path: dir.path().to_path_buf(),
+            })
+            .await
+            .expect("project");
+        sqlx::query(
+            r#"
+INSERT INTO threads (
+  id, project_id, rollout_path, fallback_title, preview, title_source,
+  pinned, status, created_at, updated_at
+)
+VALUES (?, ?, ?, 'Goal thread', 'Goal preview', 'test', 0, 'idle', 1, 1)
+            "#,
+        )
+        .bind(thread_id.as_str())
+        .bind(&project.id)
+        .bind(format!("/tmp/{}/rollout.jsonl", thread_id.as_str()))
+        .execute(db.pool())
+        .await
+        .expect("thread row");
+        db.insert_thread_goal(&thread_id, "continue and fail visibly", None)
+            .await
+            .expect("insert goal")
+            .expect("new goal");
+
+        let factory: AgentFactory = Arc::new(move |config| {
+            Ok(Agent::new(
+                config,
+                Box::new(MockLlm::new(vec![AssistantTurn {
+                    text: Some("initial progress".to_string()),
+                    tool_calls: vec![],
+                    reasoning: vec![],
+                }])),
+                ToolRegistry::new(),
+            ))
+        });
+        let runtime = ThreadRuntime::spawn(
+            ThreadRuntimeOptions::new(thread_id.clone(), config.clone(), factory)
+                .with_goal_runtime(Arc::new(GoalRuntime::new(db.clone()))),
+        )
+        .expect("runtime");
+        let mut events = runtime.subscribe_events();
+
+        runtime
+            .submit_user_input_and_wait("start".to_string(), None)
+            .await
+            .expect("initial turn");
+        let failed_turn_id = wait_for_goal_continuation_started(&mut events).await;
+        let message = wait_for_runtime_error(&mut events, &failed_turn_id).await;
+        assert!(message.contains("MockLlm is out of scripted turns"));
+        wait_until_no_active_turn(&runtime).await;
+
+        let rollout_paths = rollout_paths(&config.workspace_root, &thread_id);
+        let rollout_items = RolloutStore::read_items(&rollout_paths.rollout_path)
+            .await
+            .expect("read rollout");
+        assert!(rollout_items.iter().any(|item| matches!(
+            item,
+            RolloutItem::EventMsg(event)
+                if event.turn_id.as_ref() == Some(&failed_turn_id)
+                    && matches!(event.kind, crate::events::RuntimeEventKind::TurnStarted)
+        )));
+        assert!(rollout_items.iter().any(|item| matches!(
+            item,
+            RolloutItem::EventMsg(event)
+                if event.turn_id.as_ref() == Some(&failed_turn_id)
+                    && matches!(event.kind, crate::events::RuntimeEventKind::RuntimeError { .. })
+        )));
+
         runtime.shutdown().await.expect("shutdown");
     }
 

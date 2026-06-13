@@ -62,7 +62,7 @@ fn agent_does_not_parse_tool_meta() {
 }
 
 #[test]
-fn thread_goal_shape_stays_codex_thin() {
+fn thread_goal_shape_has_no_forge_fields() {
     let source =
         std::fs::read_to_string("src/app_server/protocol.rs").expect("read protocol source");
     let status_body = source
@@ -119,6 +119,10 @@ fn thread_goal_shape_stays_codex_thin() {
         ],
         "Forge state must stay outside ThreadGoal"
     );
+    assert!(!fields.contains(&"mode"));
+    assert!(!fields.contains(&"goal_mode"));
+    assert!(!fields.contains(&"review"));
+    assert!(!fields.contains(&"forge"));
 }
 
 #[test]

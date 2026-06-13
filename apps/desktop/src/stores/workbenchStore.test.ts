@@ -844,6 +844,7 @@ describe("workbenchStore runtime events", () => {
       thread: {
         id: "thread-root",
         status: "running",
+        goal_mode: "standard",
         active_turn: null,
         turns: []
       }
@@ -1058,6 +1059,7 @@ function threadReadResponse(threadId: string): ThreadReadResponse {
     thread: {
       id: threadId,
       status: "running",
+      goal_mode: "standard",
       active_turn: null,
       turns: []
     }

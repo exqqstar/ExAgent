@@ -24,6 +24,7 @@ import type {
   RuntimeSettingsSaveRequest,
   SessionSummary,
   ThreadGoal,
+  ThreadGoalMode,
   ThreadGoalReport,
   ThreadGoalStatus,
   ThinkingMode,
@@ -77,6 +78,7 @@ type WorkbenchState = WorkbenchSnapshot & {
   composerValue: string;
   composerAttachments: ComposerAttachment[];
   currentGoal: ThreadGoal | null;
+  currentGoalMode: ThreadGoalMode;
   draftGoal: DraftThreadGoal | null;
   goalEditorOpen: boolean;
   search: string;
@@ -108,13 +110,14 @@ type WorkbenchState = WorkbenchSnapshot & {
   selectProject: (projectId: string, sessionId?: string) => Promise<void>;
   openSession: (sessionId: string) => Promise<void>;
   startSession: (projectId?: string) => Promise<string | null>;
+  startPersonalSession: () => Promise<string | null>;
   sendPrompt: () => Promise<void>;
   interruptActiveTurn: () => Promise<void>;
   compactActiveThread: () => Promise<void>;
   forkThreadFromTurn: (threadId: string, turnId: string) => Promise<void>;
   openThreadGoalEditor: () => void;
   closeThreadGoalEditor: () => void;
-  saveThreadGoal: (objective: string, tokenBudget?: number | null) => Promise<void>;
+  saveThreadGoal: (objective: string, tokenBudget?: number | null, mode?: ThreadGoalMode) => Promise<void>;
   setThreadGoalStatus: (status: Extract<ThreadGoalStatus, "active" | "paused" | "blocked" | "complete">) => Promise<void>;
   clearThreadGoal: () => Promise<void>;
   refreshAgentTree: () => Promise<void>;
@@ -185,6 +188,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   composerAttachments: [],
   composerPlanMode: false,
   currentGoal: null,
+  currentGoalMode: "standard",
   draftGoal: null,
   goalEditorOpen: false,
   search: "",
@@ -232,6 +236,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         selectedThinkingMode: normalized.selectedThinkingMode,
         activeProviderId: normalized.activeProviderId,
         draftGoal: null,
+        currentGoalMode: "standard",
         appliedRuntimeEventIds: new Set(),
         compareThreadId: null,
         compareView: null,
@@ -251,6 +256,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         activeProviderId: DEFAULT_PROVIDER_ID,
         providerSettings: null,
         draftGoal: null,
+        currentGoalMode: "standard",
         appliedRuntimeEventIds: new Set(),
         pendingApprovals: [],
         approvalsStatus: "idle",
@@ -284,6 +290,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         activeSessionId: sessions[0]?.id ?? null,
         activeTurnId: null,
         transcript: [],
+        currentGoal: null,
+        currentGoalMode: "standard",
         draftGoal: null,
         events: [],
         cwd: project.path
@@ -357,6 +365,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         transcript: [],
         events: [],
         changedFiles: [],
+        currentGoal: null,
+        currentGoalMode: "standard",
         draftGoal: null,
         appliedRuntimeEventIds: new Set(),
         compareThreadId: null,
@@ -402,6 +412,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         transcript: [],
         events: [],
         changedFiles: [],
+        currentGoal: null,
+        currentGoalMode: "standard",
         draftGoal: null,
         cwd: project.path,
         appliedRuntimeEventIds: new Set(),
@@ -446,6 +458,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       eventUnlisten: null,
       transcript: [],
       events: [],
+      currentGoal: null,
+      currentGoalMode: "standard",
       draftGoal: null,
       agents: [],
       pendingApprovals: [],
@@ -488,11 +502,14 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       const representedEventIds = threadViewEventIds(read.thread);
       const readStatus = sessionStatusFromThreadStatus(read.thread.status);
       const readSelection = selectionForThread(get(), sessionId, threadViewSelection(read.thread));
+      const readGoal = visibleCurrentGoal(read.thread.goal ?? null);
+      const readGoalMode = readGoal ? read.thread.goal_mode ?? "standard" : "standard";
       set({
         sessions: updateSessionStatus(get().sessions, sessionId, readStatus),
         activeTurnId: activeTurnIdFromThread(read.thread),
         transcript: threadViewToTranscript(read.thread),
-        currentGoal: read.thread.goal ?? null,
+        currentGoal: readGoal,
+        currentGoalMode: readGoalMode,
         agents: buildAgentForest(sessionId, rootAgentStatus(readStatus), agentRecordsFromThreadView(read.thread)),
         activeProviderId: readSelection.activeProviderId,
         selectedModel: readSelection.selectedModel,
@@ -570,7 +587,11 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         [...replay.events, ...inspectorLiveEvents],
         sessionId
       );
-      const currentGoal = applyGoalRuntimeEvents(read.thread.goal ?? null, [
+      const currentGoal = applyGoalRuntimeEvents(readGoal, [
+        ...replay.events,
+        ...inspectorLiveEvents
+      ]);
+      const currentGoalMode = applyGoalModeRuntimeEvents(readGoalMode, [
         ...replay.events,
         ...inspectorLiveEvents
       ]);
@@ -596,6 +617,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         transcript: applyTranscriptEvents(threadViewToTranscript(read.thread), bufferedEvents, representedEventIds),
         activeTurnId,
         currentGoal: applyGoalRuntimeEvents(currentGoal, bufferedEvents),
+        currentGoalMode: applyGoalModeRuntimeEvents(currentGoalMode, bufferedEvents),
         sessions,
         events: [
           ...runtimeEventsToInspector(inspectorLiveEvents).reverse(),
@@ -644,6 +666,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         composerAttachments: [],
         composerPlanMode: false,
         currentGoal: null,
+        currentGoalMode: "standard",
         draftGoal: null,
         goalEditorOpen: false,
         appliedRuntimeEventIds: new Set(),
@@ -662,6 +685,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
           activeTurnId: null,
           transcript: [],
           currentGoal: null,
+          currentGoalMode: "standard",
           draftGoal: null,
           goalEditorOpen: false,
           events: [],
@@ -691,6 +715,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       activeTurnId: null,
       transcript: [],
       currentGoal: null,
+      currentGoalMode: "standard",
       draftGoal: null,
       goalEditorOpen: false,
       events: [],
@@ -710,6 +735,25 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       error: null
     });
     return null;
+  },
+
+  async startPersonalSession() {
+    set({ loading: true, error: null });
+    try {
+      const project = await exagentClient.getOrCreatePersonalProject();
+      const projects = await exagentClient.listProjects();
+      set({
+        projects: projects.map((item) => projectRecordToSummary(item, item.id === project.id)),
+        activeProjectId: project.id,
+        cwd: project.path,
+        loading: false,
+        error: null
+      });
+      return await get().startSession(project.id);
+    } catch (error) {
+      set({ loading: false, error: errorMessage(error) });
+      return null;
+    }
   },
 
   async sendPrompt() {
@@ -902,10 +946,11 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     set({ goalEditorOpen: false });
   },
 
-  async saveThreadGoal(objective: string, tokenBudget?: number | null) {
+  async saveThreadGoal(objective: string, tokenBudget?: number | null, mode?: ThreadGoalMode) {
     const projectId = get().activeProjectId;
     const threadId = get().activeSessionId;
     const trimmedObjective = objective.trim();
+    const selectedMode = mode ?? get().currentGoalMode;
     if (!projectId) {
       set({ error: "Choose a project folder before starting a goal." });
       return;
@@ -918,7 +963,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       set({
         draftGoal: {
           objective: trimmedObjective,
-          token_budget: tokenBudget ?? null
+          token_budget: tokenBudget ?? null,
+          mode: selectedMode
         },
         goalEditorOpen: false,
         error: null
@@ -930,9 +976,15 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         objective: trimmedObjective,
         status: "active",
         tokenBudget: tokenBudget ?? null,
-        clearTokenBudget: tokenBudget === null
+        clearTokenBudget: tokenBudget === null,
+        mode: selectedMode
       });
-      set({ currentGoal: response.goal, goalEditorOpen: false, error: null });
+      set({
+        currentGoal: response.goal,
+        currentGoalMode: response.mode,
+        goalEditorOpen: false,
+        error: null
+      });
     } catch (error) {
       set({ error: errorMessage(error) });
     }
@@ -946,7 +998,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     }
     try {
       const response = await exagentClient.setThreadGoal(projectId, threadId, { status });
-      set({ currentGoal: response.goal, error: null });
+      set({ currentGoal: response.goal, currentGoalMode: response.mode, error: null });
     } catch (error) {
       set({ error: errorMessage(error) });
     }
@@ -956,7 +1008,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     const projectId = get().activeProjectId;
     const threadId = get().activeSessionId;
     if (!threadId) {
-      set({ draftGoal: null, goalEditorOpen: false, error: null });
+      set({ draftGoal: null, currentGoalMode: "standard", goalEditorOpen: false, error: null });
       return;
     }
     if (!projectId) {
@@ -964,7 +1016,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     }
     try {
       await exagentClient.clearThreadGoal(projectId, threadId);
-      set({ currentGoal: null, goalEditorOpen: false, error: null });
+      set({ currentGoal: null, currentGoalMode: "standard", goalEditorOpen: false, error: null });
     } catch (error) {
       set({ error: errorMessage(error) });
     }
@@ -1519,6 +1571,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     const appliedRuntimeEventIds = new Set(current.appliedRuntimeEventIds);
     let transcript = current.transcript;
     let currentGoal = current.currentGoal;
+    let currentGoalMode = current.currentGoalMode;
     let inspectorEvents = current.events;
     let sessions = current.sessions;
     let agentRecords = flattenAgentForest(current.agents);
@@ -1547,6 +1600,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         activeTurnId = applyActiveTurnEvent(activeTurnId, event);
         transcript = applyTranscriptEvent(transcript, event);
         currentGoal = applyGoalRuntimeEvent(currentGoal, event);
+        currentGoalMode = applyGoalModeRuntimeEvent(currentGoalMode, event);
         const nextAgentRecords = applyAgentEvent(agentRecords, event);
         if (nextAgentRecords !== agentRecords) {
           agentRecords = nextAgentRecords;
@@ -1579,6 +1633,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     set({
       transcript,
       currentGoal,
+      currentGoalMode,
       events: inspectorEvents,
       agents,
       appliedRuntimeEventIds,
@@ -1816,8 +1871,8 @@ export const interruptActiveTurn = () => useWorkbenchStore.getState().interruptA
 export const compactActiveThread = () => useWorkbenchStore.getState().compactActiveThread();
 export const openThreadGoalEditor = () => useWorkbenchStore.getState().openThreadGoalEditor();
 export const closeThreadGoalEditor = () => useWorkbenchStore.getState().closeThreadGoalEditor();
-export const saveThreadGoal = (objective: string, tokenBudget?: number | null) =>
-  useWorkbenchStore.getState().saveThreadGoal(objective, tokenBudget);
+export const saveThreadGoal = (objective: string, tokenBudget?: number | null, mode?: ThreadGoalMode) =>
+  useWorkbenchStore.getState().saveThreadGoal(objective, tokenBudget, mode);
 export const setThreadGoalStatus = (
   status: Extract<ThreadGoalStatus, "active" | "paused" | "blocked" | "complete">
 ) => useWorkbenchStore.getState().setThreadGoalStatus(status);
@@ -2075,10 +2130,12 @@ async function persistDraftGoal(
       objective: draftGoal.objective,
       status: "active",
       tokenBudget: draftGoal.token_budget,
-      clearTokenBudget: draftGoal.token_budget === null
+      clearTokenBudget: draftGoal.token_budget === null,
+      mode: draftGoal.mode
     });
     set({
       currentGoal: response.goal,
+      currentGoalMode: response.mode,
       draftGoal: null,
       goalEditorOpen: false,
       error: null
@@ -2171,6 +2228,7 @@ async function refreshProjectSelection(
       activeTurnId: null,
       transcript: [],
       currentGoal: null,
+      currentGoalMode: "standard",
       draftGoal: null,
       goalEditorOpen: false,
       events: [],
@@ -2198,6 +2256,7 @@ async function refreshProjectSelection(
     activeTurnId: null,
     transcript: [],
     currentGoal: null,
+    currentGoalMode: "standard",
     draftGoal: null,
     goalEditorOpen: false,
     events: [],
@@ -2635,6 +2694,10 @@ function applyGoalRuntimeEvents(goal: ThreadGoal | null, events: BackendRuntimeE
   return events.reduce((currentGoal, event) => applyGoalRuntimeEvent(currentGoal, event), goal);
 }
 
+function applyGoalModeRuntimeEvents(mode: ThreadGoalMode, events: BackendRuntimeEvent[]): ThreadGoalMode {
+  return events.reduce((currentMode, event) => applyGoalModeRuntimeEvent(currentMode, event), mode);
+}
+
 function applyTokenUsageEvents(
   current: Record<string, ThreadTokenUsage>,
   events: BackendRuntimeEvent[]
@@ -2662,12 +2725,34 @@ function applyTokenUsageEvents(
 function applyGoalRuntimeEvent(goal: ThreadGoal | null, event: BackendRuntimeEvent): ThreadGoal | null {
   switch (event.kind.type) {
     case "thread_goal_updated":
-      return event.kind.goal;
+      return visibleCurrentGoal(event.kind.goal);
     case "thread_goal_cleared":
       return null;
+    case "thread_goal_report":
+      return event.kind.report.final_status === "complete" ? null : goal;
     default:
       return goal;
   }
+}
+
+function applyGoalModeRuntimeEvent(mode: ThreadGoalMode, event: BackendRuntimeEvent): ThreadGoalMode {
+  switch (event.kind.type) {
+    case "thread_goal_mode_updated":
+      return event.kind.mode;
+    case "thread_goal_cleared":
+      return "standard";
+    case "thread_goal_report":
+      return event.kind.report.final_status === "complete" ? "standard" : mode;
+    default:
+      return mode;
+  }
+}
+
+function visibleCurrentGoal(goal: ThreadGoal | null): ThreadGoal | null {
+  if (goal?.status === "complete") {
+    return null;
+  }
+  return goal;
 }
 
 function applyTranscriptEvent(

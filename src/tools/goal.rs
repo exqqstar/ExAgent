@@ -5,7 +5,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::app_server::protocol::{validate_thread_goal_objective, ThreadGoal, ThreadGoalStatus};
+use crate::app_server::protocol::{
+    validate_thread_goal_objective, ThreadGoal, ThreadGoalMode, ThreadGoalStatus,
+};
 use crate::registry::ToolContext;
 use crate::runtime::goal::{CreateGoalOptions, GoalToolApi};
 use crate::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
@@ -19,7 +21,7 @@ pub(crate) struct GetGoalTool {
 #[derive(Clone)]
 pub(crate) struct CreateGoalTool {
     api: Arc<GoalToolApi>,
-    forge_intensive_enabled: bool,
+    forge_modes_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -35,7 +37,26 @@ struct CreateGoalArgs {
     objective: String,
     token_budget: Option<i64>,
     #[serde(default)]
-    intensive: bool,
+    mode: CreateGoalModeArg,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum CreateGoalModeArg {
+    #[default]
+    Standard,
+    Reviewed,
+    Intensive,
+}
+
+impl From<CreateGoalModeArg> for ThreadGoalMode {
+    fn from(mode: CreateGoalModeArg) -> Self {
+        match mode {
+            CreateGoalModeArg::Standard => ThreadGoalMode::Standard,
+            CreateGoalModeArg::Reviewed => ThreadGoalMode::Reviewed,
+            CreateGoalModeArg::Intensive => ThreadGoalMode::Intensive,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -57,13 +78,10 @@ impl GetGoalTool {
 }
 
 impl CreateGoalTool {
-    pub(crate) fn new_with_forge_intensive(
-        api: Arc<GoalToolApi>,
-        forge_intensive_enabled: bool,
-    ) -> Self {
+    pub(crate) fn new_with_forge_modes(api: Arc<GoalToolApi>, forge_modes_enabled: bool) -> Self {
         Self {
             api,
-            forge_intensive_enabled,
+            forge_modes_enabled,
         }
     }
 }
@@ -104,18 +122,18 @@ impl ToolHandler for GetGoalTool {
 impl ToolHandler for CreateGoalTool {
     fn spec(&self) -> ToolSpec {
         let mut schema = serde_json::to_value(schemars::schema_for!(CreateGoalArgs)).unwrap();
-        if !self.forge_intensive_enabled {
+        if !self.forge_modes_enabled {
             if let Some(properties) = schema
                 .get_mut("properties")
                 .and_then(|properties| properties.as_object_mut())
             {
-                properties.remove("intensive");
+                properties.remove("mode");
             }
             if let Some(required) = schema
                 .get_mut("required")
                 .and_then(|required| required.as_array_mut())
             {
-                required.retain(|value| value.as_str() != Some("intensive"));
+                required.retain(|value| value.as_str() != Some("mode"));
             }
         }
         ToolSpec::function(
@@ -145,7 +163,11 @@ impl ToolHandler for CreateGoalTool {
             return error(call.id, call.name, "thread context missing");
         };
         let options = CreateGoalOptions {
-            intensive: self.forge_intensive_enabled && args.intensive,
+            mode: if self.forge_modes_enabled {
+                args.mode.into()
+            } else {
+                ThreadGoalMode::Standard
+            },
         };
         match self
             .api
@@ -191,11 +213,6 @@ impl ToolHandler for UpdateGoalTool {
         let Some(thread_id) = ctx.thread_id.as_ref() else {
             return error(call.id, call.name, "thread context missing");
         };
-        if let Some(turn_id) = ctx.turn_id.as_ref() {
-            if let Err(err) = self.api.account_update_goal_tool(thread_id, turn_id).await {
-                return error(call.id, call.name, err.to_string());
-            }
-        }
         let status = match args.status {
             UpdateGoalStatusArg::Complete => ThreadGoalStatus::Complete,
             UpdateGoalStatusArg::Blocked => ThreadGoalStatus::Blocked,
@@ -249,6 +266,7 @@ fn error(tool_call_id: String, tool_name: String, content: impl Into<String>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_server::protocol::ThreadGoalMode;
     use crate::config::AgentConfig;
     use crate::exec_session::ExecSessionManager;
     use crate::policy::PolicyManager;
@@ -276,44 +294,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_goal_schema_exposes_intensive_only_when_forge_enabled() {
+    async fn create_goal_schema_exposes_mode_only_when_forge_enabled() {
         let (_dir, api, _ctx, _thread_id, _db) = fixture().await;
 
-        let hidden = CreateGoalTool::new_with_forge_intensive(api.clone(), false)
+        let hidden = CreateGoalTool::new_with_forge_modes(api.clone(), false)
             .spec()
             .to_internal_schema();
+        assert!(hidden["input_schema"]["properties"]
+            .as_object()
+            .unwrap()
+            .get("mode")
+            .is_none());
         assert!(hidden["input_schema"]["properties"]
             .as_object()
             .unwrap()
             .get("intensive")
             .is_none());
 
-        let visible = CreateGoalTool::new_with_forge_intensive(api, true)
+        let visible = CreateGoalTool::new_with_forge_modes(api, true)
             .spec()
             .to_internal_schema();
-        assert_eq!(
-            visible["input_schema"]["properties"]["intensive"]["type"],
-            "boolean"
-        );
+        let properties = visible["input_schema"]["properties"].as_object().unwrap();
+        assert!(properties.get("intensive").is_none());
+        assert!(properties.get("mode").is_some());
+        let schema_text = visible.to_string();
+        for mode in ["standard", "reviewed", "intensive"] {
+            assert!(
+                schema_text.contains(mode),
+                "create_goal schema should expose {mode} mode"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn create_goal_intensive_flag_is_persisted_only_when_forge_enabled() {
+    async fn create_goal_mode_is_persisted_only_when_forge_enabled() {
         let (_dir, api, ctx, thread_id, db) = fixture().await;
-        let tool = CreateGoalTool::new_with_forge_intensive(api.clone(), true);
+        let tool = CreateGoalTool::new_with_forge_modes(api.clone(), true);
 
         let outcome = tool
-            .handle(invocation("thread carefully", Some(true)), &ctx)
+            .handle(invocation("thread carefully", Some("intensive")), &ctx)
             .await;
 
         assert_eq!(outcome.model_result.status, ToolStatus::Success);
         let goal_id = outcome.model_result.meta.as_ref().unwrap()["goal"]["goal_id"]
             .as_str()
             .unwrap();
-        assert!(ForgeGoalModeStore::new(db.clone())
-            .is_intensive(&thread_id, goal_id)
-            .await
-            .unwrap());
+        assert_eq!(
+            ForgeGoalModeStore::new(db.clone())
+                .mode_for_goal(&thread_id, goal_id)
+                .await
+                .unwrap(),
+            ThreadGoalMode::Intensive
+        );
 
         let second_thread = ThreadId::new("thread_goal_plain");
         insert_thread(&db, &second_thread).await;
@@ -321,18 +353,21 @@ mod tests {
             thread_id: Some(second_thread.clone()),
             ..ctx
         };
-        let disabled_tool = CreateGoalTool::new_with_forge_intensive(api, false);
+        let disabled_tool = CreateGoalTool::new_with_forge_modes(api, false);
         let outcome = disabled_tool
-            .handle(invocation("standard goal", Some(true)), &plain_ctx)
+            .handle(invocation("standard goal", Some("intensive")), &plain_ctx)
             .await;
         assert_eq!(outcome.model_result.status, ToolStatus::Success);
         let goal_id = outcome.model_result.meta.as_ref().unwrap()["goal"]["goal_id"]
             .as_str()
             .unwrap();
-        assert!(!ForgeGoalModeStore::new(db)
-            .is_intensive(&second_thread, goal_id)
-            .await
-            .unwrap());
+        assert_eq!(
+            ForgeGoalModeStore::new(db)
+                .mode_for_goal(&second_thread, goal_id)
+                .await
+                .unwrap(),
+            ThreadGoalMode::Standard
+        );
     }
 
     async fn fixture() -> (
@@ -397,13 +432,13 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
         .unwrap();
     }
 
-    fn invocation(objective: &str, intensive: Option<bool>) -> ToolInvocation {
+    fn invocation(objective: &str, mode: Option<&str>) -> ToolInvocation {
         let mut arguments = serde_json::json!({
             "objective": objective,
             "token_budget": 100
         });
-        if let Some(intensive) = intensive {
-            arguments["intensive"] = serde_json::json!(intensive);
+        if let Some(mode) = mode {
+            arguments["mode"] = serde_json::json!(mode);
         }
         ToolInvocation {
             invocation_id: "inv_create_goal".to_string(),

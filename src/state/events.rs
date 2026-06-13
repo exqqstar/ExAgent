@@ -186,6 +186,11 @@ pub enum RuntimeEventKind {
     ThreadGoalUpdated {
         goal: crate::app_server::protocol::ThreadGoal,
     },
+    ThreadGoalModeUpdated {
+        thread_id: ThreadId,
+        goal_id: String,
+        mode: crate::app_server::protocol::ThreadGoalMode,
+    },
     ThreadGoalCleared {
         thread_id: ThreadId,
     },
@@ -381,6 +386,11 @@ mod tests {
 
         let events = vec![
             RuntimeEventKind::ThreadGoalUpdated { goal },
+            RuntimeEventKind::ThreadGoalModeUpdated {
+                thread_id: ThreadId::new("thread_goal_events"),
+                goal_id: "goal_1".to_string(),
+                mode: crate::app_server::protocol::ThreadGoalMode::Reviewed,
+            },
             RuntimeEventKind::ThreadGoalCleared {
                 thread_id: ThreadId::new("thread_goal_events"),
             },

@@ -137,6 +137,7 @@ describe("agentRecordsFromThreadView", () => {
     const thread: ThreadView = {
       id: ROOT,
       status: "idle",
+      goal_mode: "standard",
       active_turn: null,
       turns: [
         {

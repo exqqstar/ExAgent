@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Check, Pause, Pencil, Play, Target, Trash2, X } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import { Check, Gauge, Pause, Pencil, Play, ShieldCheck, Target, Trash2, X, Zap } from "lucide-react";
 import {
   clearThreadGoal,
   closeThreadGoalEditor,
@@ -11,7 +12,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import type { DraftThreadGoal, ThreadGoal, ThreadGoalStatus } from "@/types";
+import { cn } from "@/lib/utils";
+import type { DraftThreadGoal, ThreadGoal, ThreadGoalMode, ThreadGoalStatus } from "@/types";
 
 type WorkbenchState = ReturnType<typeof getWorkbenchState>;
 type GoalControlVariant = "dock" | "hero";
@@ -28,16 +30,19 @@ export function GoalControl({
   const [editing, setEditing] = useState(false);
   const [objective, setObjective] = useState("");
   const [tokenBudget, setTokenBudget] = useState("");
+  const [mode, setMode] = useState<ThreadGoalMode>("standard");
   const editorObjective = goal?.objective ?? draftGoal?.objective ?? state.composerValue.trim();
   const editorTokenBudget = goal?.token_budget ?? draftGoal?.token_budget ?? null;
+  const editorMode = goal ? state.currentGoalMode : draftGoal?.mode ?? state.currentGoalMode;
 
   useEffect(() => {
     if (state.goalEditorOpen) {
       setObjective(editorObjective);
       setTokenBudget(formatTokenBudget(editorTokenBudget));
+      setMode(editorMode);
       setEditing(true);
     }
-  }, [editorObjective, editorTokenBudget, state.goalEditorOpen]);
+  }, [editorMode, editorObjective, editorTokenBudget, state.goalEditorOpen]);
 
   useEffect(() => {
     if (state.goalEditorOpen) {
@@ -46,15 +51,26 @@ export function GoalControl({
     if (goal) {
       setObjective(goal.objective);
       setTokenBudget(formatTokenBudget(goal.token_budget ?? null));
+      setMode(state.currentGoalMode);
       setEditing(false);
       return;
     }
     if (draftGoal) {
       setObjective(draftGoal.objective);
       setTokenBudget(formatTokenBudget(draftGoal.token_budget));
+      setMode(draftGoal.mode);
       setEditing(false);
     }
-  }, [draftGoal?.objective, draftGoal?.token_budget, goal?.goal_id, goal?.objective, goal?.token_budget, state.goalEditorOpen]);
+  }, [
+    draftGoal?.mode,
+    draftGoal?.objective,
+    draftGoal?.token_budget,
+    goal?.goal_id,
+    goal?.objective,
+    goal?.token_budget,
+    state.currentGoalMode,
+    state.goalEditorOpen
+  ]);
 
   if (!state.activeProjectId || (!state.activeSessionId && !draftGoal && !state.goalEditorOpen && !editing)) {
     return null;
@@ -63,6 +79,7 @@ export function GoalControl({
   const openEditor = () => {
     setObjective(editorObjective);
     setTokenBudget(formatTokenBudget(editorTokenBudget));
+    setMode(editorMode);
     setEditing(true);
   };
 
@@ -85,7 +102,7 @@ export function GoalControl({
           event.preventDefault();
           const budget = parseTokenBudget(tokenBudget);
           setEditing(false);
-          void saveThreadGoal(objective, budget);
+          void saveThreadGoal(objective, budget, mode);
         }}
       >
         <div className="flex items-start gap-2">
@@ -98,33 +115,36 @@ export function GoalControl({
             aria-label="Goal objective"
           />
         </div>
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-          <Input
-            className="w-36"
-            inputMode="numeric"
-            min={1}
-            type="number"
-            value={tokenBudget}
-            onChange={(event) => setTokenBudget(event.target.value)}
-            placeholder="Token budget"
-            aria-label="Goal token budget"
-          />
-          <div className="flex items-center gap-1">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              aria-label="Cancel goal edit"
-              onClick={() => {
-                setEditing(false);
-                closeThreadGoalEditor();
-              }}
-            >
-              <X className="h-4 w-4" />
-            </Button>
-            <Button type="submit" size="icon" aria-label="Save goal" disabled={!objective.trim()}>
-              <Check className="h-4 w-4" />
-            </Button>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <GoalModeControl mode={mode} onChange={setMode} />
+          <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+            <Input
+              className="w-36"
+              inputMode="numeric"
+              min={1}
+              type="number"
+              value={tokenBudget}
+              onChange={(event) => setTokenBudget(event.target.value)}
+              placeholder="Token budget"
+              aria-label="Goal token budget"
+            />
+            <div className="flex items-center gap-1">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="Cancel goal edit"
+                onClick={() => {
+                  setEditing(false);
+                  closeThreadGoalEditor();
+                }}
+              >
+                <X className="h-4 w-4" />
+              </Button>
+              <Button type="submit" size="icon" aria-label="Save goal" disabled={!objective.trim()}>
+                <Check className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
         </div>
       </form>
@@ -137,6 +157,8 @@ export function GoalControl({
     return null;
   }
   const usageLabel = visibleGoal ? goalUsageLabel(visibleGoal) : draftGoalUsageLabel(draftGoal);
+  const visibleMode = visibleGoal ? state.currentGoalMode : draftGoal?.mode ?? "standard";
+  const modeBadge = goalModeBadge(visibleMode);
 
   return (
     <div className={variant === "hero" ? "mt-3 rounded-lg border border-border bg-surface-1 p-2" : "mb-2 rounded-lg border border-border bg-surface-1 p-2"}>
@@ -145,6 +167,7 @@ export function GoalControl({
         <Badge variant={visibleGoal ? goalStatusBadge(visibleGoal.status) : "neutral"}>
           {visibleGoal ? goalStatusLabel(visibleGoal.status) : "draft"}
         </Badge>
+        {modeBadge ? <Badge variant={modeBadge.variant}>{modeBadge.label}</Badge> : null}
         <div className="type-body-sm min-w-[160px] flex-1 truncate text-ink">{visibleObjective}</div>
         {usageLabel ? <div className="type-label-sm shrink-0 text-subtle">{usageLabel}</div> : null}
         <div className="ml-auto flex shrink-0 items-center gap-1">
@@ -165,6 +188,71 @@ export function GoalControl({
           </Button>
         </div>
       </div>
+    </div>
+  );
+}
+
+const goalModeOptions: Array<{
+  id: ThreadGoalMode;
+  label: string;
+  title: string;
+  icon: LucideIcon;
+}> = [
+  {
+    id: "standard",
+    label: "Standard",
+    title: "Standard goal mode",
+    icon: Gauge
+  },
+  {
+    id: "reviewed",
+    label: "Reviewed",
+    title: "Reviewer-gated goal mode",
+    icon: ShieldCheck
+  },
+  {
+    id: "intensive",
+    label: "Intensive",
+    title: "Intensive reviewer-gated goal mode",
+    icon: Zap
+  }
+];
+
+function GoalModeControl({
+  mode,
+  onChange
+}: {
+  mode: ThreadGoalMode;
+  onChange: (mode: ThreadGoalMode) => void;
+}) {
+  return (
+    <div
+      className="grid h-8 w-full max-w-[22rem] grid-cols-3 overflow-hidden rounded-md border border-border bg-surface-2 sm:w-[21rem]"
+      role="radiogroup"
+      aria-label="Goal mode"
+    >
+      {goalModeOptions.map((option) => {
+        const Icon = option.icon;
+        const selected = mode === option.id;
+        return (
+          <button
+            key={option.id}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            aria-label={`Goal mode ${option.label}`}
+            title={option.title}
+            className={cn(
+              "type-label-sm inline-flex h-full min-w-0 items-center justify-center gap-1.5 border-r border-border px-2 text-muted transition-colors last:border-r-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus",
+              selected ? "bg-surface-3 text-ink" : "hover:bg-surface-3 hover:text-ink"
+            )}
+            onClick={() => onChange(option.id)}
+          >
+            <Icon className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">{option.label}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -192,6 +280,17 @@ function goalUsageLabel(goal: ThreadGoal) {
 
 function draftGoalUsageLabel(goal: DraftThreadGoal | null) {
   return goal?.token_budget ? `0/${goal.token_budget} left` : "";
+}
+
+function goalModeBadge(mode: ThreadGoalMode): { label: string; variant: "info" | "primary" } | null {
+  switch (mode) {
+    case "reviewed":
+      return { label: "reviewed", variant: "info" };
+    case "intensive":
+      return { label: "intensive", variant: "primary" };
+    case "standard":
+      return null;
+  }
 }
 
 function goalStatusLabel(status: ThreadGoalStatus) {

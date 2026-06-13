@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::app_server::protocol::{
-    ThreadGoal, ThreadGoalReport, ThreadGoalReportOpenQuestion, ThreadGoalReviewRejectCategory,
-    ThreadGoalReviewStatus, ThreadGoalReviewSummary, ThreadGoalStatus,
+    ThreadGoal, ThreadGoalMode, ThreadGoalReport, ThreadGoalReportOpenQuestion,
+    ThreadGoalReviewRejectCategory, ThreadGoalReviewStatus, ThreadGoalReviewSummary,
+    ThreadGoalStatus,
 };
 use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::index_db::{
@@ -27,9 +28,17 @@ pub(crate) enum GoalTurnTrigger {
     GoalContinuation,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CreateGoalOptions {
-    pub(crate) intensive: bool,
+    pub(crate) mode: ThreadGoalMode,
+}
+
+impl Default for CreateGoalOptions {
+    fn default() -> Self {
+        Self {
+            mode: ThreadGoalMode::Standard,
+        }
+    }
 }
 
 pub(crate) enum GoalRuntimeEvent<'a> {
@@ -84,6 +93,11 @@ pub(crate) enum GoalRuntimeEffect {
     None,
     EmitUpdated(ThreadGoal),
     EmitCleared(ThreadId),
+    EmitModeUpdated {
+        thread_id: ThreadId,
+        goal_id: String,
+        mode: ThreadGoalMode,
+    },
     EmitUpdatedAndGoalReport {
         goal: ThreadGoal,
         report: ThreadGoalReport,
@@ -151,22 +165,6 @@ impl GoalToolApi {
         self.runtime
             .update_goal_status_from_tool(thread_id, status)
             .await
-    }
-
-    pub(crate) async fn account_update_goal_tool(
-        &self,
-        thread_id: &ThreadId,
-        turn_id: &TurnId,
-    ) -> anyhow::Result<()> {
-        let _ = self
-            .runtime
-            .apply(GoalRuntimeEvent::ToolCompletedGoal {
-                thread_id,
-                turn_id,
-                token_usage: TokenUsage::default(),
-            })
-            .await?;
-        Ok(())
     }
 }
 
@@ -243,17 +241,21 @@ impl GoalRuntime {
                 turn_id,
                 token_usage,
             } => {
-                self.account_turn_progress(thread_id, turn_id, token_usage, false, true)
-                    .await?;
-                if let Some(effect) = self
-                    .state
-                    .lock()
-                    .await
-                    .pending_status_effects
-                    .remove(thread_id)
-                {
-                    return Ok(effect);
-                }
+                let has_pending_status_effect = self.has_pending_status_effect(thread_id).await;
+                let accounting_mode = if has_pending_status_effect {
+                    GoalAccountingMode::AnyCurrentGoal
+                } else {
+                    GoalAccountingMode::ActiveOnly
+                };
+                self.account_turn_progress_with_mode(
+                    thread_id,
+                    turn_id,
+                    token_usage,
+                    false,
+                    true,
+                    accounting_mode,
+                )
+                .await?;
                 Ok(GoalRuntimeEffect::None)
             }
             GoalRuntimeEvent::TurnFinished {
@@ -334,7 +336,7 @@ impl GoalRuntime {
             .ok_or_else(|| anyhow::anyhow!("thread already has a goal"))?;
         let goal = thread_goal_from_record(goal);
         ForgeGoalModeStore::new(self.db.clone())
-            .replace_for_thread_goal(thread_id, &goal.goal_id, options.intensive)
+            .replace_for_thread_goal(thread_id, &goal.goal_id, options.mode)
             .await?;
         self.mark_active_goal(thread_id, Some(goal.goal_id.clone()))
             .await;
@@ -373,6 +375,7 @@ impl GoalRuntime {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn update_goal_status_effect(
         &self,
         thread_id: &ThreadId,
@@ -409,12 +412,31 @@ impl GoalRuntime {
         thread_id: &ThreadId,
         status: ThreadGoalStatus,
     ) -> anyhow::Result<ThreadGoal> {
-        let effect = self.update_goal_status_effect(thread_id, status).await?;
-        let goal = goal_from_effect(&effect).clone();
+        let status = status_record_from_protocol(status);
+        let goal = self
+            .db
+            .update_thread_goal(
+                thread_id,
+                GoalUpdate {
+                    objective: None,
+                    status: Some(status),
+                    token_budget: None,
+                    expected_goal_id: None,
+                },
+            )
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("thread has no current goal"))?;
+        let goal = thread_goal_from_record(goal);
+        self.mark_active_goal(
+            thread_id,
+            (goal.status == ThreadGoalStatus::Active).then_some(goal.goal_id.clone()),
+        )
+        .await;
         let mut state = self.state.lock().await;
-        state
-            .pending_status_effects
-            .insert(thread_id.clone(), effect);
+        state.pending_status_effects.insert(
+            thread_id.clone(),
+            GoalRuntimeEffect::EmitUpdated(goal.clone()),
+        );
         Ok(goal)
     }
 
@@ -494,6 +516,28 @@ impl GoalRuntime {
             token_usage,
             mark_autonomous_activity,
             suppress_budget_steering,
+            GoalAccountingMode::ActiveOnly,
+        )
+        .await
+    }
+
+    async fn account_turn_progress_with_mode(
+        &self,
+        thread_id: &ThreadId,
+        turn_id: &TurnId,
+        token_usage: TokenUsage,
+        mark_autonomous_activity: bool,
+        suppress_budget_steering: bool,
+        accounting_mode: GoalAccountingMode,
+    ) -> anyhow::Result<GoalRuntimeEffect> {
+        let _permit = self.accounting_lock.acquire().await?;
+        self.account_turn_progress_locked(
+            thread_id,
+            turn_id,
+            token_usage,
+            mark_autonomous_activity,
+            suppress_budget_steering,
+            accounting_mode,
         )
         .await
     }
@@ -505,6 +549,7 @@ impl GoalRuntime {
         token_usage: TokenUsage,
         mark_autonomous_activity: bool,
         suppress_budget_steering: bool,
+        accounting_mode: GoalAccountingMode,
     ) -> anyhow::Result<GoalRuntimeEffect> {
         let mut state = self.state.lock().await;
         let Some(snapshot) = state.turn_accounting.get_mut(thread_id) else {
@@ -527,7 +572,7 @@ impl GoalRuntime {
                 thread_id,
                 time_delta_seconds,
                 token_delta,
-                GoalAccountingMode::ActiveOnly,
+                accounting_mode,
                 Some(&goal_id),
             )
             .await?;
@@ -564,6 +609,15 @@ impl GoalRuntime {
         assistant_had_activity: bool,
     ) -> anyhow::Result<GoalRuntimeEffect> {
         let _permit = self.accounting_lock.acquire().await?;
+        let has_pending_status_effect = {
+            let state = self.state.lock().await;
+            state.pending_status_effects.contains_key(thread_id)
+        };
+        let accounting_mode = if has_pending_status_effect {
+            GoalAccountingMode::AnyCurrentGoal
+        } else {
+            GoalAccountingMode::ActiveOnly
+        };
         let _ = self
             .account_turn_progress_locked(
                 thread_id,
@@ -571,12 +625,21 @@ impl GoalRuntime {
                 token_usage,
                 assistant_had_activity,
                 false,
+                accounting_mode,
             )
             .await?;
-        let snapshot = {
+        let (snapshot, pending_status_effect) = {
             let mut state = self.state.lock().await;
-            state.turn_accounting.remove(thread_id)
+            (
+                state.turn_accounting.remove(thread_id),
+                state.pending_status_effects.remove(thread_id),
+            )
         };
+        if let Some(effect) = pending_status_effect {
+            return self
+                .refresh_pending_status_effect_after_accounting(thread_id, effect)
+                .await;
+        }
         let Some(snapshot) = snapshot else {
             return Ok(GoalRuntimeEffect::None);
         };
@@ -624,7 +687,14 @@ impl GoalRuntime {
                     .unwrap_or_default()
             };
             let _ = self
-                .account_turn_progress_locked(thread_id, turn_id, token_usage, false, true)
+                .account_turn_progress_locked(
+                    thread_id,
+                    turn_id,
+                    token_usage,
+                    false,
+                    true,
+                    GoalAccountingMode::ActiveOnly,
+                )
                 .await?;
             return Ok(GoalRuntimeEffect::None);
         }
@@ -940,6 +1010,27 @@ impl GoalRuntime {
         GoalRuntimeEffect::EmitUpdated(goal)
     }
 
+    async fn refresh_pending_status_effect_after_accounting(
+        &self,
+        thread_id: &ThreadId,
+        effect: GoalRuntimeEffect,
+    ) -> anyhow::Result<GoalRuntimeEffect> {
+        let GoalRuntimeEffect::EmitUpdated(goal) = effect else {
+            return Ok(effect);
+        };
+        if !is_final_report_status(goal.status) {
+            return Ok(GoalRuntimeEffect::EmitUpdated(goal));
+        }
+        let Some(current) = self.db.get_thread_goal(thread_id).await? else {
+            return Ok(GoalRuntimeEffect::EmitUpdated(goal));
+        };
+        if current.goal_id != goal.goal_id {
+            return Ok(GoalRuntimeEffect::EmitUpdated(goal));
+        }
+        let current = thread_goal_from_record(current);
+        Ok(self.goal_updated_effect(current, None).await)
+    }
+
     async fn report_for_final_status(&self, goal: &ThreadGoal) -> Option<ThreadGoalReport> {
         self.report_for_status(goal, false).await
     }
@@ -1092,6 +1183,11 @@ impl GoalRuntime {
         let state = self.state.lock().await;
         state.turn_accounting.contains_key(thread_id)
     }
+
+    async fn has_pending_status_effect(&self, thread_id: &ThreadId) -> bool {
+        let state = self.state.lock().await;
+        state.pending_status_effects.contains_key(thread_id)
+    }
 }
 
 fn mark_active_goal_locked(
@@ -1165,21 +1261,6 @@ fn status_record_from_protocol(status: ThreadGoalStatus) -> ThreadGoalStatusReco
         ThreadGoalStatus::UsageLimited => ThreadGoalStatusRecord::UsageLimited,
         ThreadGoalStatus::BudgetLimited => ThreadGoalStatusRecord::BudgetLimited,
         ThreadGoalStatus::Complete => ThreadGoalStatusRecord::Complete,
-    }
-}
-
-fn goal_from_effect(effect: &GoalRuntimeEffect) -> &ThreadGoal {
-    match effect {
-        GoalRuntimeEffect::EmitUpdated(goal)
-        | GoalRuntimeEffect::EmitUpdatedAndGoalReport { goal, .. }
-        | GoalRuntimeEffect::EmitUpdatedAndInjectPersistentContext { goal, .. }
-        | GoalRuntimeEffect::EmitUpdatedInjectContextAndGoalReport { goal, .. }
-        | GoalRuntimeEffect::EmitUpdatedAndContinuationSuppressed { goal, .. } => goal,
-        GoalRuntimeEffect::None
-        | GoalRuntimeEffect::EmitCleared(_)
-        | GoalRuntimeEffect::ScheduleContinuation => {
-            unreachable!("status update must produce an updated goal")
-        }
     }
 }
 
@@ -1341,7 +1422,9 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
                 &thread_id,
                 "finish intensive goal".to_string(),
                 None,
-                CreateGoalOptions { intensive: true },
+                CreateGoalOptions {
+                    mode: ThreadGoalMode::Intensive,
+                },
             )
             .await
             .unwrap();
@@ -1398,7 +1481,9 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
                 &thread_id,
                 "finish intensive goal".to_string(),
                 None,
-                CreateGoalOptions { intensive: true },
+                CreateGoalOptions {
+                    mode: ThreadGoalMode::Intensive,
+                },
             )
             .await
             .unwrap();

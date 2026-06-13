@@ -7,7 +7,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent
 } from "react";
-import { PanelRight, ShieldAlert, SidebarIcon } from "lucide-react";
+import { ArrowLeft, ArrowRight, PanelRight, ShieldAlert, SidebarIcon } from "lucide-react";
 import { AgentThreadViewer } from "@/components/AgentThreadViewer";
 import { ApprovalInbox } from "@/components/ApprovalInbox";
 import { Badge } from "@/components/ui/badge";
@@ -46,9 +46,23 @@ export function AppShell() {
   const [desktopSidebarCollapsed, setDesktopSidebarCollapsed] = useState(false);
   const [resizingDesktopSidebar, setResizingDesktopSidebar] = useState(false);
   const pendingApprovalCount = workbench.pendingApprovals.length;
+  const chromeSidebarWidth = desktopSidebarCollapsed ? 164 : desktopSidebarWidth;
   const approvalInboxLabel = `${t("approvals.inbox.title")}, ${pendingApprovalCount} ${t("approvals.inbox.pending")} ${
     pendingApprovalCount === 1 ? t("approvals.inbox.approvalSingular") : t("approvals.inbox.approvalPlural")
   }`;
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) {
+      return;
+    }
+    void import("@tauri-apps/api/window")
+      .then(async ({ getCurrentWindow }) => {
+        const window = getCurrentWindow();
+        await window.setTitle("");
+        await window.setTitleBarStyle("overlay");
+      })
+      .catch(() => undefined);
+  }, []);
 
   const resizeDesktopSidebar = useCallback((clientX: number) => {
     const shellLeft = shellRef.current?.getBoundingClientRect().left ?? 0;
@@ -88,6 +102,22 @@ export function AppShell() {
     document.addEventListener("keydown", closeCompareOnEscape);
     return () => document.removeEventListener("keydown", closeCompareOnEscape);
   }, [workbench.compareThreadId, workbench.closeCompareView]);
+
+  useEffect(() => {
+    function startPersonalSessionShortcut(event: KeyboardEvent) {
+      if (event.defaultPrevented || event.altKey || event.shiftKey) {
+        return;
+      }
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "n") {
+        return;
+      }
+      event.preventDefault();
+      void workbench.startPersonalSession();
+    }
+
+    document.addEventListener("keydown", startPersonalSessionShortcut);
+    return () => document.removeEventListener("keydown", startPersonalSessionShortcut);
+  }, [workbench.startPersonalSession]);
 
   useEffect(() => {
     if (!resizingDesktopSidebar) {
@@ -219,60 +249,55 @@ export function AppShell() {
 
   return (
     <TooltipProvider delayDuration={250}>
-      <div ref={shellRef} className="workspace-canvas relative flex h-screen min-h-[640px] overflow-hidden text-ink">
-        {!desktopSidebarCollapsed ? (
-          <aside
-            aria-label="Projects and sessions"
-            className="sidebar-surface relative hidden shrink-0 border-r border-border md:block"
-            style={{ width: `${desktopSidebarWidth}px` }}
+      <div ref={shellRef} className="workspace-canvas relative flex h-screen min-h-[640px] flex-col overflow-hidden text-ink">
+        <header className="window-chrome flex h-10 shrink-0 items-center">
+          <div
+            className="window-chrome-sidebar hidden h-full shrink-0 items-center md:flex"
+            style={{ width: `${chromeSidebarWidth}px` }}
           >
-            <Sidebar state={workbench} />
-            <div
-              aria-label="Resize project sidebar"
-              aria-orientation="vertical"
-              aria-valuemax={DESKTOP_SIDEBAR_MAX_WIDTH}
-              aria-valuemin={DESKTOP_SIDEBAR_MIN_WIDTH}
-              aria-valuenow={desktopSidebarWidth}
-              className={cn(
-                "absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize touch-none outline-none",
-                "before:absolute before:left-1/2 before:top-0 before:h-full before:w-px before:-translate-x-1/2 before:bg-transparent before:transition-colors",
-                "hover:before:bg-border-strong focus-visible:before:bg-focus",
-                resizingDesktopSidebar && "before:bg-focus"
-              )}
-              role="separator"
-              tabIndex={0}
-              onKeyDown={handleDesktopSidebarResizeKeyDown}
-              onMouseDown={startDesktopSidebarMouseResize}
-              onMouseMove={continueDesktopSidebarMouseResize}
-              onMouseUp={stopDesktopSidebarResize}
-              onPointerDown={startDesktopSidebarResize}
-              onPointerMove={continueDesktopSidebarResize}
-              onPointerUp={stopDesktopSidebarResize}
-              onPointerCancel={stopDesktopSidebarResize}
-            />
-          </aside>
-        ) : null}
+            <div className="traffic-light-space h-full shrink-0" data-tauri-drag-region="" />
+            <div className="flex h-full min-w-0 flex-1 items-center gap-1.5 pr-2">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="window-chrome-action"
+                    aria-label={desktopSidebarCollapsed ? "Show project sidebar" : "Hide project sidebar"}
+                    onClick={() => setDesktopSidebarCollapsed((collapsed) => !collapsed)}
+                  >
+                    <SidebarIcon className="h-4 w-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{desktopSidebarCollapsed ? "Show sidebar" : "Hide sidebar"}</TooltipContent>
+              </Tooltip>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="window-chrome-action"
+                aria-label="Back"
+                disabled
+              >
+                <ArrowLeft className="h-4 w-4" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="window-chrome-action"
+                aria-label="Forward"
+                disabled
+              >
+                <ArrowRight className="h-4 w-4" />
+              </Button>
+              <div className="h-full min-w-0 flex-1" data-tauri-drag-region="" />
+            </div>
+          </div>
 
-        <main className="flex min-w-0 flex-1 flex-col">
-          <header className="topbar-surface flex h-12 shrink-0 items-center justify-between border-b border-border px-3">
+          <div className="flex h-full min-w-0 flex-1 items-center gap-3 px-3 md:px-4">
             <div className="flex min-w-0 items-center gap-2">
-              {desktopSidebarCollapsed ? (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="hidden md:inline-flex"
-                      aria-label="Show project sidebar"
-                      onClick={() => setDesktopSidebarCollapsed(false)}
-                    >
-                      <SidebarIcon className="h-4 w-4" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Show sidebar</TooltipContent>
-                </Tooltip>
-              ) : null}
               <Sheet>
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -284,10 +309,7 @@ export function AppShell() {
                   </TooltipTrigger>
                   <TooltipContent>Open sidebar</TooltipContent>
                 </Tooltip>
-                <SheetContent
-                  side="left"
-                  className="sidebar-surface w-[280px] border-border p-0"
-                >
+                <SheetContent side="left" className="sidebar-surface w-[280px] border-border p-0">
                   <SheetHeader className="sr-only">
                     <SheetTitle>Projects and sessions</SheetTitle>
                   </SheetHeader>
@@ -295,21 +317,23 @@ export function AppShell() {
                 </SheetContent>
               </Sheet>
 
-              <div className="min-w-0">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span
-                    aria-hidden="true"
-                    className={cn("h-1.5 w-1.5 shrink-0 rounded-full", sessionStatusDotClass(activeStatus))}
-                  />
-                  <p className="type-label-md truncate text-ink">{activeSession?.title ?? "ExAgent"}</p>
-                </div>
+              <div className="window-session-title flex min-w-0 items-center gap-2" data-tauri-drag-region="">
+                <span
+                  aria-hidden="true"
+                  className={cn("h-1.5 w-1.5 shrink-0 rounded-full", sessionStatusDotClass(activeStatus))}
+                />
+                <p className="type-label-md min-w-0 truncate text-ink">{activeSession?.title ?? "New session"}</p>
               </div>
             </div>
 
+            <div className="h-full min-w-4 flex-1" data-tauri-drag-region="" />
+
             <div className="flex min-w-0 items-center gap-2">
               <div className="hidden min-w-0 items-center gap-2 sm:flex">
-                <span className="type-code-sm max-w-[180px] truncate text-muted">{runtimeModel}</span>
-                <span className="type-label-sm rounded border border-border bg-surface-2 px-1.5 py-1 text-muted">
+                <span className="type-code-sm max-w-[180px] truncate text-muted" data-tauri-drag-region="">
+                  {runtimeModel}
+                </span>
+                <span className="window-status-pill type-label-sm text-muted" data-tauri-drag-region="">
                   {activeStatus.replace("_", " ")}
                 </span>
               </div>
@@ -362,10 +386,47 @@ export function AppShell() {
                 </SheetContent>
               </Sheet>
             </div>
-          </header>
+          </div>
+        </header>
 
-          <ChatView state={workbench} />
-        </main>
+        <div className="workspace-body flex min-h-0 flex-1">
+          {!desktopSidebarCollapsed ? (
+            <aside
+              aria-label="Projects and sessions"
+              className="sidebar-surface relative hidden shrink-0 border-r border-border md:block"
+              style={{ width: `${desktopSidebarWidth}px` }}
+            >
+              <Sidebar state={workbench} />
+              <div
+                aria-label="Resize project sidebar"
+                aria-orientation="vertical"
+                aria-valuemax={DESKTOP_SIDEBAR_MAX_WIDTH}
+                aria-valuemin={DESKTOP_SIDEBAR_MIN_WIDTH}
+                aria-valuenow={desktopSidebarWidth}
+                className={cn(
+                  "absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize touch-none outline-none",
+                  "before:absolute before:left-1/2 before:top-0 before:h-full before:w-px before:-translate-x-1/2 before:bg-transparent before:transition-colors",
+                  "hover:before:bg-border-strong focus-visible:before:bg-focus",
+                  resizingDesktopSidebar && "before:bg-focus"
+                )}
+                role="separator"
+                tabIndex={0}
+                onKeyDown={handleDesktopSidebarResizeKeyDown}
+                onMouseDown={startDesktopSidebarMouseResize}
+                onMouseMove={continueDesktopSidebarMouseResize}
+                onMouseUp={stopDesktopSidebarResize}
+                onPointerDown={startDesktopSidebarResize}
+                onPointerMove={continueDesktopSidebarResize}
+                onPointerUp={stopDesktopSidebarResize}
+                onPointerCancel={stopDesktopSidebarResize}
+              />
+            </aside>
+          ) : null}
+
+          <main className="flex min-w-0 flex-1 flex-col">
+            <ChatView state={workbench} />
+          </main>
+        </div>
 
         <AgentThreadViewer
           agent={selectedAgent}

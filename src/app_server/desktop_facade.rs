@@ -11,7 +11,7 @@ use crate::app_server::protocol::{
     OpenQuestionResolveResponse, SubmitUserInputParams, SubmitUserInputResponse,
     ThreadCompactParams, ThreadCompactResponse, ThreadForkParams, ThreadForkResponse, ThreadGoal,
     ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse,
-    ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams,
+    ThreadGoalMode, ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams,
     ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
     ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
     TurnStartResponse,
@@ -365,6 +365,14 @@ impl DesktopFacade {
             .get_thread_goal(&thread.id)
             .await?
             .map(thread_goal_from_record);
+        thread.goal_mode = match thread.goal.as_ref() {
+            Some(goal) => {
+                crate::runtime::forge::goal_modes::ForgeGoalModeStore::new(self.index.clone())
+                    .mode_for_goal(&thread.id, &goal.goal_id)
+                    .await?
+            }
+            None => ThreadGoalMode::Standard,
+        };
         Ok(())
     }
 

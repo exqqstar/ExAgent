@@ -292,7 +292,10 @@ export interface ThreadView {
   model?: ModelRef | null;
   thinking_mode?: ThinkingMode | null;
   goal?: ThreadGoal | null;
+  goal_mode: ThreadGoalMode;
 }
+
+export type ThreadGoalMode = "standard" | "reviewed" | "intensive";
 
 export type ThreadGoalStatus =
   | "active"
@@ -324,7 +327,7 @@ export interface ThreadGoalReport {
   tokens_used: number;
   token_budget?: number | null;
   time_used_seconds: number;
-  changed_files: string[];
+  changed_files?: string[];
   pending_approvals_count: number;
   open_questions?: ThreadGoalReportOpenQuestion[];
   review_summary?: ThreadGoalReviewSummary | null;
@@ -348,14 +351,17 @@ export interface ThreadGoalReviewSummary {
 export interface DraftThreadGoal {
   objective: string;
   token_budget: number | null;
+  mode: ThreadGoalMode;
 }
 
 export interface ThreadGoalSetResponse {
   goal: ThreadGoal;
+  mode: ThreadGoalMode;
 }
 
 export interface ThreadGoalGetResponse {
   goal: ThreadGoal | null;
+  mode: ThreadGoalMode;
 }
 
 export interface ThreadGoalClearResponse {
@@ -551,6 +557,12 @@ export type BackendRuntimeEventKind =
       started_turn_id?: string | null;
     }
   | { type: "thread_goal_updated"; goal: ThreadGoal }
+  | {
+      type: "thread_goal_mode_updated";
+      thread_id: string;
+      goal_id: string;
+      mode: ThreadGoalMode;
+    }
   | { type: "thread_goal_cleared"; thread_id: string }
   | { type: "thread_goal_continuation_started"; goal_id: string }
   | { type: "thread_goal_continuation_suppressed"; goal_id: string; reason: string }

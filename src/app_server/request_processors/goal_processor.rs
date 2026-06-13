@@ -2,8 +2,8 @@ use anyhow::Result;
 
 use crate::app_server::protocol::{
     validate_thread_goal_objective, ThreadGoal, ThreadGoalClearParams, ThreadGoalClearResponse,
-    ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse,
-    ThreadGoalStatus,
+    ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalMode, ThreadGoalSetParams,
+    ThreadGoalSetResponse, ThreadGoalStatus,
 };
 use crate::app_server::services::AppServerServices;
 use crate::app_server::AppServerError;
@@ -32,6 +32,13 @@ pub(in crate::app_server) async fn thread_goal_set(
     if let Some(status) = params.status {
         validate_external_goal_status(status)?;
     }
+    let requested_mode = params.mode;
+    let mode_store = ForgeGoalModeStore::new(db.clone());
+    let previous_goal_id = current.as_ref().map(|goal| goal.goal_id.clone());
+    let previous_mode = match previous_goal_id.as_deref() {
+        Some(goal_id) => mode_store.mode_for_goal(&params.thread_id, goal_id).await?,
+        None => ThreadGoalMode::Standard,
+    };
 
     account_before_external_mutation(services, &params.thread_id).await?;
     let previous_goal = current.clone().map(thread_goal_from_record);
@@ -69,11 +76,24 @@ pub(in crate::app_server) async fn thread_goal_set(
     };
 
     let goal = thread_goal_from_record(goal);
-    if creating_new_goal {
-        ForgeGoalModeStore::new(db.clone())
-            .replace_for_thread_goal(&params.thread_id, &goal.goal_id, false)
+    let mode = if creating_new_goal {
+        let mode = requested_mode.unwrap_or_default();
+        mode_store
+            .replace_for_thread_goal(&params.thread_id, &goal.goal_id, mode)
             .await?;
-    }
+        mode
+    } else if let Some(mode) = requested_mode {
+        mode_store
+            .set_mode(&params.thread_id, &goal.goal_id, mode)
+            .await?;
+        mode
+    } else {
+        mode_store
+            .mode_for_goal(&params.thread_id, &goal.goal_id)
+            .await?
+    };
+    let mode_changed =
+        previous_goal_id.as_deref() != Some(goal.goal_id.as_str()) || previous_mode != mode;
     if let Some(runtime) = services.runtime_loader.runtime_for(&params.thread_id) {
         let effect = runtime
             .apply_goal_runtime_event(GoalRuntimeEvent::ExternalSet {
@@ -83,9 +103,20 @@ pub(in crate::app_server) async fn thread_goal_set(
             })
             .await?;
         runtime.enqueue_goal_runtime_effect(effect).await?;
+        if mode_changed {
+            runtime
+                .enqueue_goal_runtime_effect(
+                    crate::runtime::goal::runtime::GoalRuntimeEffect::EmitModeUpdated {
+                        thread_id: params.thread_id.clone(),
+                        goal_id: goal.goal_id.clone(),
+                        mode,
+                    },
+                )
+                .await?;
+        }
     }
 
-    Ok(ThreadGoalSetResponse { goal })
+    Ok(ThreadGoalSetResponse { goal, mode })
 }
 
 pub(in crate::app_server) async fn thread_goal_get(
@@ -93,12 +124,19 @@ pub(in crate::app_server) async fn thread_goal_get(
     params: ThreadGoalGetParams,
 ) -> Result<ThreadGoalGetResponse> {
     let db = goal_store(services)?;
-    Ok(ThreadGoalGetResponse {
-        goal: db
-            .get_thread_goal(&params.thread_id)
-            .await?
-            .map(thread_goal_from_record),
-    })
+    let goal = db
+        .get_thread_goal(&params.thread_id)
+        .await?
+        .map(thread_goal_from_record);
+    let mode = match goal.as_ref() {
+        Some(goal) => {
+            ForgeGoalModeStore::new(db.clone())
+                .mode_for_goal(&params.thread_id, &goal.goal_id)
+                .await?
+        }
+        None => ThreadGoalMode::Standard,
+    };
+    Ok(ThreadGoalGetResponse { goal, mode })
 }
 
 pub(in crate::app_server) async fn thread_goal_clear(
@@ -178,7 +216,7 @@ fn thread_goal_from_record(record: ThreadGoalRecord) -> ThreadGoal {
 mod tests {
     use std::sync::Arc;
 
-    use crate::app_server::protocol::{ThreadGoalClearParams, ThreadGoalSetParams};
+    use crate::app_server::protocol::{ThreadGoalClearParams, ThreadGoalMode, ThreadGoalSetParams};
     use crate::config::AgentConfig;
     use crate::index_db::{IndexDb, ProjectUpsert};
     use crate::resolver::EnvModelResolver;
@@ -230,6 +268,7 @@ mod tests {
                 objective: Some("external replacement".to_string()),
                 status: None,
                 token_budget: None,
+                mode: None,
             },
         )
         .await
@@ -241,6 +280,70 @@ mod tests {
             .is_intensive(&thread_id, &response.goal.goal_id)
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn externally_created_goal_persists_requested_mode() {
+        let thread_id = ThreadId::new("thread_goal_set_reviewed_mode");
+        let (_dir, services, db, _old_goal_id) = services_with_goal(&thread_id).await;
+        db.delete_thread_goal(&thread_id).await.unwrap();
+
+        let response = thread_goal_set(
+            &services,
+            ThreadGoalSetParams {
+                thread_id: thread_id.clone(),
+                workspace_root: None,
+                objective: Some("ship reviewed goal".to_string()),
+                status: None,
+                token_budget: Some(None),
+                mode: Some(ThreadGoalMode::Reviewed),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.mode, ThreadGoalMode::Reviewed);
+        assert_eq!(
+            ForgeGoalModeStore::new(db)
+                .mode_for_goal(&thread_id, &response.goal.goal_id)
+                .await
+                .unwrap(),
+            ThreadGoalMode::Reviewed
+        );
+    }
+
+    #[tokio::test]
+    async fn status_only_external_goal_update_preserves_mode() {
+        let thread_id = ThreadId::new("thread_goal_status_preserves_mode");
+        let (_dir, services, db, goal_id) = services_with_goal(&thread_id).await;
+        let store = ForgeGoalModeStore::new(db.clone());
+        store
+            .set_mode(&thread_id, &goal_id, ThreadGoalMode::Intensive)
+            .await
+            .unwrap();
+
+        let response = thread_goal_set(
+            &services,
+            ThreadGoalSetParams {
+                thread_id: thread_id.clone(),
+                workspace_root: None,
+                objective: None,
+                status: Some(ThreadGoalStatus::Paused),
+                token_budget: None,
+                mode: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.mode, ThreadGoalMode::Intensive);
+        assert_eq!(
+            store
+                .mode_for_goal(&thread_id, &response.goal.goal_id)
+                .await
+                .unwrap(),
+            ThreadGoalMode::Intensive
+        );
     }
 
     async fn services_with_goal(

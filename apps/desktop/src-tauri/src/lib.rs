@@ -23,6 +23,11 @@ pub fn run() {
                 settings.clone(),
             ))?;
             app.manage(DesktopState::new(facade, index, settings));
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_title("")?;
+                #[cfg(target_os = "macos")]
+                window.set_title_bar_style(tauri::TitleBarStyle::Overlay)?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -33,6 +38,7 @@ pub fn run() {
             commands::project_archive_conversations,
             commands::project_create_worktree,
             commands::project_list,
+            commands::project_personal_get_or_create,
             commands::project_pin,
             commands::project_reindex,
             commands::project_remove,

@@ -369,6 +369,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-desktop",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [
           {
@@ -423,6 +424,72 @@ describe("AppShell", () => {
     expect(screen.getByText("src/runtime/goal/runtime.rs")).toBeInTheDocument();
     expect(screen.getByText("apps/desktop/src/components/TranscriptList.tsx")).toBeInTheDocument();
     expect(screen.getByText("2 approvals waiting in Inbox")).toBeInTheDocument();
+  });
+
+  it("renders goal reports when empty changed files are omitted", async () => {
+    const report = {
+      goal_id: "goal-no-files",
+      objective: "List available tools",
+      final_status: "complete" as const,
+      turns_run: 1,
+      tokens_used: 0,
+      time_used_seconds: 9,
+      pending_approvals_count: 0,
+      summary: "The goal completed without file changes.",
+    };
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue({
+      thread: {
+        id: "session-goal-no-files",
+        status: "idle",
+        goal_mode: "standard",
+        active_turn: null,
+        turns: [
+          {
+            id: "turn-goal-no-files",
+            status: "completed",
+            items: [{ type: "goal_report", event_id: "evt-goal-no-files", report: report as any }],
+          },
+        ],
+      },
+    });
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "session-goal-no-files",
+      events: [],
+    });
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(null);
+    useWorkbenchStore.setState({
+      loading: false,
+      activeProjectId: "project-exagent",
+      activeSessionId: null,
+      projects: [
+        {
+          id: "project-exagent",
+          name: "ExAgent",
+          path: "/Users/enxiang/dev/ExAgent",
+          active: true,
+        },
+      ],
+      sessions: [
+        {
+          id: "session-goal-no-files",
+          projectId: "project-exagent",
+          title: "Goal no files",
+          updatedAt: "local preview",
+          status: "idle",
+        },
+      ],
+      transcript: [],
+      events: [],
+    });
+
+    render(<App />);
+    await act(async () => {
+      await useWorkbenchStore.getState().openSession("session-goal-no-files");
+    });
+
+    expect(await screen.findByRole("article", { name: "Goal report" })).toBeInTheDocument();
+    expect(screen.getByText("List available tools")).toBeInTheDocument();
+    expect(screen.getByText("The goal completed without file changes.")).toBeInTheDocument();
   });
 
   it("lists pending approvals grouped by goal or thread with expandable detail", async () => {
@@ -895,6 +962,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-beta",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [
           {
@@ -1005,6 +1073,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-token",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: []
       }
@@ -1505,6 +1574,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-fork",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [
           {
@@ -1618,6 +1688,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-live-fork",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [],
       },
@@ -1735,6 +1806,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-search-fork",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [],
       },
@@ -1799,6 +1871,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-active",
         status: "running",
+        goal_mode: "standard",
         active_turn: {
           id: "turn-active",
           status: "running",
@@ -1865,6 +1938,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-awaiting",
         status: "waiting_approval",
+        goal_mode: "standard",
         active_turn: {
           id: "turn-awaiting",
           status: "waiting_approval",
@@ -1993,6 +2067,7 @@ describe("AppShell", () => {
           thread: {
             id: "session-parent",
             status: "idle",
+            goal_mode: "standard",
             active_turn: null,
             turns: [
               {
@@ -2016,6 +2091,7 @@ describe("AppShell", () => {
         thread: {
           id: "session-child",
           status: "idle",
+          goal_mode: "standard",
           active_turn: null,
           turns: [
             {
@@ -2108,6 +2184,7 @@ describe("AppShell", () => {
           thread: {
             id: "session-parent",
             status: "waiting_approval",
+            goal_mode: "standard",
             active_turn: null,
             turns: [
               {
@@ -2136,6 +2213,7 @@ describe("AppShell", () => {
         thread: {
           id: "session-child",
           status: "idle",
+          goal_mode: "standard",
           active_turn: null,
           turns: [
             {
@@ -2238,6 +2316,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-beta-child",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [],
       },
@@ -2253,6 +2332,7 @@ describe("AppShell", () => {
           thread: {
             id: "session-beta-parent",
             status: "idle",
+            goal_mode: "standard",
             active_turn: null,
             turns: [
               {
@@ -2273,6 +2353,7 @@ describe("AppShell", () => {
         thread: {
           id: "session-beta-child",
           status: "idle",
+          goal_mode: "standard",
           active_turn: null,
           turns: [
             {
@@ -2345,6 +2426,7 @@ describe("AppShell", () => {
           thread: {
             id: "session-parent",
             status: "idle",
+            goal_mode: "standard",
             active_turn: null,
             turns: [
               {
@@ -2365,6 +2447,7 @@ describe("AppShell", () => {
         thread: {
           id: "session-child",
           status: "idle",
+          goal_mode: "standard",
           active_turn: null,
           turns: [
             {
@@ -2511,6 +2594,7 @@ describe("AppShell", () => {
         thread: {
           id: "session-parent",
           status: "idle",
+          goal_mode: "standard",
           active_turn: null,
           turns: [
             {
@@ -2530,6 +2614,7 @@ describe("AppShell", () => {
         thread: {
           id: "session-child",
           status: "idle",
+          goal_mode: "standard",
           active_turn: null,
           turns: [
             {
@@ -3746,6 +3831,7 @@ describe("AppShell", () => {
       .spyOn(exagentClient, "setThreadGoal")
       .mockResolvedValue({
         goal: threadGoal({ objective: "Ship goal mode from menu" }),
+        mode: "reviewed",
       });
     render(<App />);
 
@@ -3774,6 +3860,13 @@ describe("AppShell", () => {
     });
     expect(planModeItem).toHaveAttribute("aria-checked", "false");
     await user.click(screen.getByRole("menuitem", { name: /Goal/ }));
+    expect(
+      screen.getByRole("radio", { name: "Goal mode Standard" }),
+    ).toHaveAttribute("aria-checked", "true");
+    await user.click(screen.getByRole("radio", { name: "Goal mode Reviewed" }));
+    expect(
+      screen.getByRole("radio", { name: "Goal mode Reviewed" }),
+    ).toHaveAttribute("aria-checked", "true");
     await user.type(
       screen.getByLabelText("Goal objective"),
       "Ship goal mode from menu",
@@ -3788,9 +3881,11 @@ describe("AppShell", () => {
         status: "active",
         tokenBudget: null,
         clearTokenBudget: true,
+        mode: "reviewed",
       },
     );
     expect(screen.getByText("Ship goal mode from menu")).toBeInTheDocument();
+    expect(screen.getByText("reviewed")).toBeInTheDocument();
 
     await user.click(actionButton);
     expect(screen.getByRole("menuitem", { name: /Plugins/ })).toHaveAttribute(
@@ -4533,6 +4628,23 @@ describe("AppShell", () => {
     });
 
     expect(screen.getByText("Runtime event goal")).toBeInTheDocument();
+    expect(screen.queryByText("reviewed")).not.toBeInTheDocument();
+
+    act(() => {
+      useWorkbenchStore.getState().applyRuntimeEvent({
+        event_id: "goal-mode-updated-event",
+        thread_id: "session-desktop",
+        turn_id: null,
+        kind: {
+          type: "thread_goal_mode_updated",
+          thread_id: "session-desktop",
+          goal_id: "goal-desktop",
+          mode: "reviewed",
+        },
+      });
+    });
+
+    expect(screen.getByText("reviewed")).toBeInTheDocument();
 
     act(() => {
       useWorkbenchStore.getState().applyRuntimeEvent({
@@ -4547,6 +4659,71 @@ describe("AppShell", () => {
     });
 
     expect(screen.queryByText("Runtime event goal")).not.toBeInTheDocument();
+    expect(screen.queryByText("reviewed")).not.toBeInTheDocument();
+  });
+
+  it("clears the current goal when a completion report arrives", async () => {
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    act(() => {
+      useWorkbenchStore.getState().applyRuntimeEvent({
+        event_id: "goal-updated-before-report",
+        thread_id: "session-desktop",
+        turn_id: "turn-goal-complete",
+        kind: {
+          type: "thread_goal_updated",
+          goal: threadGoal({
+            goal_id: "goal-complete",
+            objective: "List all available tools",
+            status: "active",
+          }),
+        },
+      });
+      useWorkbenchStore.getState().applyRuntimeEvent({
+        event_id: "goal-mode-before-report",
+        thread_id: "session-desktop",
+        turn_id: "turn-goal-complete",
+        kind: {
+          type: "thread_goal_mode_updated",
+          thread_id: "session-desktop",
+          goal_id: "goal-complete",
+          mode: "intensive",
+        },
+      });
+    });
+
+    expect(screen.getByText("List all available tools")).toBeInTheDocument();
+    expect(screen.getByText("intensive")).toBeInTheDocument();
+
+    act(() => {
+      useWorkbenchStore.getState().applyRuntimeEvent({
+        event_id: "goal-complete-report",
+        thread_id: "session-desktop",
+        turn_id: "turn-goal-complete",
+        kind: {
+          type: "thread_goal_report",
+          report: {
+            goal_id: "goal-complete",
+            objective: "List all available tools",
+            final_status: "complete",
+            turns_run: 1,
+            tokens_used: 8755,
+            time_used_seconds: 9,
+            pending_approvals_count: 0,
+            summary: "Listed all available tools.",
+          },
+        },
+      });
+    });
+
+    expect(useWorkbenchStore.getState().currentGoal).toBeNull();
+    expect(useWorkbenchStore.getState().currentGoalMode).toBe("standard");
+    expect(screen.queryByText("intensive")).not.toBeInTheDocument();
+    expect(screen.getByRole("article", { name: "Goal report" })).toBeInTheDocument();
+    expect(screen.getByText("List all available tools")).toBeInTheDocument();
+    expect(screen.getByText("8,755 tokens")).toBeInTheDocument();
+    expect(screen.getByText("9s")).toBeInTheDocument();
   });
 
   it("lets a draft session save a goal and applies it when the first prompt creates a thread", async () => {
@@ -4596,11 +4773,13 @@ describe("AppShell", () => {
           objective: "Ship the draft goal",
           token_budget: 1200,
         }),
+        mode: "intensive",
       });
     vi.spyOn(exagentClient, "startThread").mockResolvedValue({
       thread: {
         id: "session-created",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [],
       },
@@ -4628,6 +4807,7 @@ describe("AppShell", () => {
     expect(goalItem).not.toHaveAttribute("aria-disabled", "true");
 
     await user.click(goalItem);
+    await user.click(screen.getByRole("radio", { name: "Goal mode Intensive" }));
     await user.type(screen.getByLabelText("Goal objective"), "Ship the draft goal");
     await user.type(screen.getByLabelText("Goal token budget"), "1200");
     await user.click(screen.getByRole("button", { name: "Save goal" }));
@@ -4638,7 +4818,9 @@ describe("AppShell", () => {
         "Ship the draft goal",
       );
     });
+    expect(useWorkbenchStore.getState().draftGoal?.mode).toBe("intensive");
     expect(await screen.findByText("Ship the draft goal")).toBeInTheDocument();
+    expect(screen.getByText("intensive")).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("Message ExAgent"), "Build it");
     await user.click(screen.getByRole("button", { name: "Send" }));
@@ -4648,6 +4830,7 @@ describe("AppShell", () => {
       status: "active",
       tokenBudget: 1200,
       clearTokenBudget: false,
+      mode: "intensive",
     });
     expect(setThreadGoal.mock.invocationCallOrder[0]).toBeLessThan(
       startTurn.mock.invocationCallOrder[0],
@@ -4975,6 +5158,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-archived",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [
           {
@@ -5927,6 +6111,7 @@ describe("AppShell", () => {
         thread: {
           id: "session-created",
           status: "idle",
+          goal_mode: "standard",
           active_turn: null,
           turns: [],
         },
@@ -6337,6 +6522,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-desktop",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [
           {
@@ -6393,6 +6579,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-desktop",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [
           {
@@ -6446,6 +6633,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-desktop",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [
           {
@@ -6502,6 +6690,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-desktop",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [
           {
@@ -6557,6 +6746,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-desktop",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [
           {
@@ -6681,6 +6871,7 @@ describe("AppShell", () => {
         thread: {
           id: "session-desktop",
           status: "running",
+          goal_mode: "standard",
           active_turn: null,
           turns: [],
         },
@@ -6728,6 +6919,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-slow-subscribe",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [
           {
@@ -6815,6 +7007,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-loading",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [
           {
@@ -6882,6 +7075,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-b",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [
           {
@@ -6898,6 +7092,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-a",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [
           {
@@ -6935,6 +7130,7 @@ describe("AppShell", () => {
           thread: {
             id: `session-${failure}`,
             status: "idle",
+            goal_mode: "standard",
             active_turn: null,
             turns: [],
           },
@@ -7073,6 +7269,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-desktop",
         status: "running",
+        goal_mode: "standard",
         active_turn: null,
         turns: [],
       },
@@ -7128,6 +7325,7 @@ describe("AppShell", () => {
       thread: {
         id: "session-desktop",
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [
           {

@@ -1519,6 +1519,7 @@ mod tests {
                 objective: Some("ship boundary continuation".into()),
                 status: Some(ThreadGoalStatus::Active),
                 token_budget: None,
+                mode: None,
             }))
             .await
             .expect("thread goal set");
@@ -1583,6 +1584,7 @@ mod tests {
                 objective: Some("old objective".into()),
                 status: Some(ThreadGoalStatus::Paused),
                 token_budget: None,
+                mode: None,
             }))
             .await
             .expect("create paused goal");
@@ -1594,6 +1596,7 @@ mod tests {
                 objective: Some("updated external objective".into()),
                 status: Some(ThreadGoalStatus::Paused),
                 token_budget: None,
+                mode: None,
             }))
             .await
             .expect("update paused goal");

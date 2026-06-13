@@ -7,10 +7,10 @@ use exagent::app_server::protocol::{
     OpenQuestionResolveParams, OpenQuestionResolveResponse, SubmitUserInputParams,
     SubmitUserInputResponse, ThreadCompactParams, ThreadCompactResponse, ThreadForkParams,
     ThreadForkResponse, ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams,
-    ThreadGoalGetResponse, ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus,
-    ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
-    ThreadStartResponse, TurnContextOverrides, TurnInterruptParams, TurnInterruptResponse,
-    TurnStartParams, TurnStartResponse,
+    ThreadGoalGetResponse, ThreadGoalMode, ThreadGoalSetParams, ThreadGoalSetResponse,
+    ThreadGoalStatus, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadStartResponse, TurnContextOverrides, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse,
 };
 use exagent::config::ThinkingMode;
 use exagent::events::{
@@ -329,6 +329,31 @@ pub async fn project_add(
 }
 
 #[tauri::command]
+pub async fn project_personal_get_or_create(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> CommandResult<ProjectRecord> {
+    let path = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("conversations");
+    tokio::fs::create_dir_all(&path)
+        .await
+        .map_err(|error| error.to_string())?;
+    state
+        .facade
+        .read()
+        .await
+        .add_project(NewProjectRequest {
+            name: "Personal".into(),
+            path,
+        })
+        .await
+        .map_err(error_string)
+}
+
+#[tauri::command]
 pub async fn project_list(state: State<'_, DesktopState>) -> CommandResult<Vec<ProjectRecord>> {
     state
         .facade
@@ -595,6 +620,7 @@ pub async fn thread_goal_set(
     status: Option<ThreadGoalStatus>,
     token_budget: Option<Option<i64>>,
     clear_token_budget: Option<bool>,
+    mode: Option<ThreadGoalMode>,
 ) -> CommandResult<ThreadGoalSetResponse> {
     let token_budget = if clear_token_budget.unwrap_or(false) {
         Some(None)
@@ -613,6 +639,7 @@ pub async fn thread_goal_set(
                 objective,
                 status,
                 token_budget,
+                mode,
             },
         )
         .await

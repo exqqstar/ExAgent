@@ -87,10 +87,16 @@ impl ThreadSession {
         goal_id: String,
         interrupt: Option<RuntimeInterrupt>,
     ) -> Result<ThreadOpResult> {
+        let turn_id_for_error = turn_id.clone();
         self.set_status(ThreadRuntimeStatus::Running);
         let result = self
             .handle_goal_continuation_inner(turn_id, goal_id, interrupt)
             .await;
+        if let Err(err) = &result {
+            if !is_turn_interrupted_error(err) {
+                let _ = self.record_runtime_error_for_turn_from_live(&turn_id_for_error, err);
+            }
+        }
         self.set_status(ThreadRuntimeStatus::Idle);
         result
     }
@@ -571,6 +577,20 @@ impl ThreadSession {
             },
         )?;
         Ok(())
+    }
+
+    fn record_runtime_error_for_turn_from_live(
+        &mut self,
+        turn_id: &TurnId,
+        err: &anyhow::Error,
+    ) -> Result<()> {
+        let snapshot = self
+            .live_state
+            .read()
+            .map_err(|_| anyhow::anyhow!("thread session live state rwlock poisoned"))?
+            .snapshot
+            .clone();
+        self.record_runtime_error(&snapshot, turn_id, err)
     }
 
     pub(crate) fn record_runtime_error_without_turn(&mut self, message: String) -> Result<()> {
@@ -1055,6 +1075,13 @@ impl ThreadSession {
             result.replacement_history,
         )
     }
+}
+
+fn is_turn_interrupted_error(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<ThreadRuntimeError>(),
+        Some(ThreadRuntimeError::TurnInterrupted { .. })
+    )
 }
 
 fn send_start_ack_error(start_tx: Option<oneshot::Sender<Result<TurnId>>>, err: &anyhow::Error) {
@@ -1823,6 +1850,22 @@ async fn apply_goal_effect(
                 snapshot,
                 turn_id,
                 RuntimeEventKind::ThreadGoalCleared { thread_id },
+            )?;
+            Ok(())
+        }
+        GoalRuntimeEffect::EmitModeUpdated {
+            thread_id,
+            goal_id,
+            mode,
+        } => {
+            recorder.record(
+                snapshot,
+                turn_id,
+                RuntimeEventKind::ThreadGoalModeUpdated {
+                    thread_id,
+                    goal_id,
+                    mode,
+                },
             )?;
             Ok(())
         }

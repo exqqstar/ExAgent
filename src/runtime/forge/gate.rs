@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
 
+use crate::runtime::forge::goal_modes::ForgeGoalModeStore;
 use crate::runtime::forge::open_questions::{OpenQuestion, OpenQuestionStore};
 use crate::runtime::forge::review::ReviewStore;
 use crate::runtime::tool_hooks::{ToolHooks, ToolInvocationContext};
@@ -13,13 +14,16 @@ use crate::workspace_checkpoint::workspace_content_hash;
 pub(crate) struct ForgeGateHooks {
     review_store: ReviewStore,
     question_store: OpenQuestionStore,
+    mode_store: ForgeGoalModeStore,
 }
 
 impl ForgeGateHooks {
     pub(crate) fn new(review_store: ReviewStore, question_store: OpenQuestionStore) -> Self {
+        let mode_store = ForgeGoalModeStore::new(review_store.db());
         Self {
             review_store,
             question_store,
+            mode_store,
         }
     }
 }
@@ -54,6 +58,13 @@ impl ToolHooks for ForgeGateHooks {
         let Some(goal) = self.review_store.db().get_thread_goal(thread_id).await? else {
             return Ok(Vec::new());
         };
+        let mode = self
+            .mode_store
+            .mode_for_goal(thread_id, &goal.goal_id)
+            .await?;
+        if !mode.is_review_gated() {
+            return Ok(Vec::new());
+        }
         let open_questions = self
             .question_store
             .unresolved_for_goal(&goal.goal_id)
@@ -154,7 +165,9 @@ fn is_complete_goal_update(ctx: &ToolInvocationContext) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_server::protocol::ThreadGoalMode;
     use crate::index_db::{IndexDb, ProjectUpsert, ThreadGoalStatusRecord};
+    use crate::runtime::forge::goal_modes::ForgeGoalModeStore;
     use crate::runtime::forge::open_questions::OpenQuestionStore;
     use crate::runtime::forge::review::{ReviewStore, ReviewVerdict};
     use crate::runtime::tool_hooks::{ToolHooks, ToolInvocationContext};
@@ -214,6 +227,11 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
         )
         .await
         .unwrap();
+        let goal = db.get_thread_goal(&thread_id).await.unwrap().unwrap();
+        ForgeGoalModeStore::new(db.clone())
+            .set_mode(&thread_id, &goal.goal_id, ThreadGoalMode::Reviewed)
+            .await
+            .unwrap();
         (dir, workspace, db, review_store, question_store)
     }
 
@@ -227,6 +245,30 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
             workspace_root,
             capabilities: ToolCapabilities::mutating(false),
         }
+    }
+
+    #[tokio::test]
+    async fn standard_goal_completion_is_not_gated() {
+        let (_dir, workspace, db, review_store, question_store) = fixture().await;
+        let hooks = ForgeGateHooks::new(review_store.clone(), question_store);
+        let thread_id = ThreadId::new("thread_gate");
+        let goal = db.get_thread_goal(&thread_id).await.unwrap().unwrap();
+        ForgeGoalModeStore::new(db.clone())
+            .set_mode(&thread_id, &goal.goal_id, ThreadGoalMode::Standard)
+            .await
+            .unwrap();
+
+        let effects = hooks
+            .before_handler_execution(&complete_ctx(workspace))
+            .await
+            .unwrap();
+
+        assert!(effects.is_empty());
+        assert!(review_store
+            .latest_ticket(&goal.goal_id)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

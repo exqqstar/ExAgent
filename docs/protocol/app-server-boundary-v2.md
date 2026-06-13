@@ -109,6 +109,10 @@ derived from `rollout.jsonl` plus an empty `RuntimeOverlay`, so historical
 approval requests or old persistent-command tool results do not become current
 actionable UI state.
 
+`ThreadView.goal` is the active goal projection when a goal exists.
+`ThreadView.goal_mode` is always present and defaults to `standard` when there
+is no active goal or no explicit sidecar row.
+
 When rollout `response_item` records contain `turn_id`, `ThreadView` uses that
 field to place user and assistant messages under the matching runtime turn.
 Older rollout files without `turn_id` remain readable and are projected by
@@ -168,6 +172,75 @@ Fork errors:
 - `fork point turn id <id> was not found in parent history`: `at_turn_id` is not
   present in the parent's response history.
 - Persistence errors: rollout or fork-edge storage could not be read or written.
+
+## Thread Goals And Modes
+
+Goals can be created, updated, read, and cleared through the generic
+`POST /thread/op` route with `type = thread_goal_set`,
+`thread_goal_get`, or `thread_goal_clear`.
+
+Goal mode is a per-goal sidecar value. It is not stored on `ThreadGoal` and it
+does not add goal status variants. The supported wire values are:
+
+- `standard`: previous goal behavior.
+- `reviewed`: Forge reviewer-gated completion when Forge gates are enabled.
+- `intensive`: reviewer-gated completion plus the intensive goal prompt mode
+  when Forge gates are enabled.
+
+Creating or updating a goal can include `mode`:
+
+```json
+{
+  "type": "thread_goal_set",
+  "thread_id": "session_...",
+  "workspace_root": ".",
+  "objective": "Ship the goal mode UI",
+  "status": "active",
+  "token_budget": 1200,
+  "mode": "reviewed"
+}
+```
+
+The response returns both the goal and the resolved mode:
+
+```json
+{
+  "type": "thread_goal_set",
+  "goal": {
+    "thread_id": "session_...",
+    "goal_id": "goal_...",
+    "objective": "Ship the goal mode UI",
+    "status": "active",
+    "token_budget": 1200,
+    "tokens_used": 0,
+    "time_used_seconds": 0,
+    "continuation_suppressed": false,
+    "continuation_suppressed_after_turn_id": null,
+    "created_at_ms": 1710000000000,
+    "updated_at_ms": 1710000000000
+  },
+  "mode": "reviewed"
+}
+```
+
+Omitting `mode` on a status-only update preserves the existing sidecar value.
+Creating a new goal without `mode` uses `standard`. Clearing a goal clears the
+sidecar row, so the next `thread_goal_get` response returns
+`{ "goal": null, "mode": "standard" }`.
+
+When a loaded runtime observes a goal mode change, clients may receive:
+
+```json
+{
+  "type": "thread_goal_mode_updated",
+  "thread_id": "session_...",
+  "goal_id": "goal_...",
+  "mode": "reviewed"
+}
+```
+
+Clients should update the current thread's visible goal mode from this event and
+reset it to `standard` on `thread_goal_cleared`.
 
 ## Agent Tree
 
@@ -509,6 +582,13 @@ Current event kinds are:
 - `approval_decision`
 - `compaction_written`
 - `token_count`
+- `thread_goal_updated`
+- `thread_goal_mode_updated`
+- `thread_goal_cleared`
+- `thread_goal_continuation_started`
+- `thread_goal_continuation_suppressed`
+- `thread_goal_turn_started`
+- `thread_goal_report`
 - `runtime_error`
 
 The LLM adapter does not currently stream token deltas. A full assistant message

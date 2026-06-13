@@ -757,11 +757,55 @@ fn build_request_tools(tools: &[ToolSpec]) -> Result<Vec<ChatRequestTool>> {
                 function: ChatRequestFunction {
                     name: tool.name.clone(),
                     description: tool.description.clone(),
-                    parameters: input_schema.clone(),
+                    parameters: normalize_tool_schema_refs(input_schema),
                 },
             }),
         })
         .collect()
+}
+
+fn normalize_tool_schema_refs(schema: &Value) -> Value {
+    let mut schema = schema.clone();
+    rewrite_json_schema_refs(&mut schema);
+    schema
+}
+
+fn rewrite_json_schema_refs(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if let Some(definitions) = map.remove("definitions") {
+                merge_defs(map, definitions);
+            }
+            if let Some(Value::String(reference)) = map.get_mut("$ref") {
+                if let Some(path) = reference.strip_prefix("#/definitions/") {
+                    *reference = format!("#/$defs/{path}");
+                }
+            }
+            for child in map.values_mut() {
+                rewrite_json_schema_refs(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                rewrite_json_schema_refs(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn merge_defs(map: &mut Map<String, Value>, definitions: Value) {
+    match (map.get_mut("$defs"), definitions) {
+        (Some(Value::Object(existing)), Value::Object(definitions)) => {
+            for (key, value) in definitions {
+                existing.entry(key).or_insert(value);
+            }
+        }
+        (Some(_), _) => {}
+        (None, definitions) => {
+            map.insert("$defs".to_string(), definitions);
+        }
+    }
 }
 
 fn build_request_messages(
@@ -923,7 +967,7 @@ fn openai_image_detail(detail: ImageDetail) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::config::ThinkingMode;
-    use crate::tools::ToolSpec;
+    use crate::tools::{ask_user::AskUserTool, ToolHandler, ToolSpec};
     use crate::types::{ConversationContentPart, ImageDetail, UserInput};
 
     #[test]
@@ -1001,6 +1045,33 @@ mod tests {
         assert_eq!(
             value["tools"][0]["function"]["parameters"]["properties"]["path"]["type"],
             "string"
+        );
+    }
+
+    #[test]
+    fn chat_completion_request_rewrites_tool_schema_refs_to_defs() {
+        let tools = vec![AskUserTool.spec()];
+
+        let request = build_chat_completion_request(
+            "moonshot-tools".to_string(),
+            &[],
+            &tools,
+            &LlmRequestOptions::default(),
+            &default_openai_compatible_reasoning_capabilities(),
+        )
+        .unwrap();
+
+        let value = serde_json::to_value(request).unwrap();
+        let parameters = &value["tools"][0]["function"]["parameters"];
+        assert!(parameters.get("$defs").is_some());
+        assert!(parameters.get("definitions").is_none());
+        assert_eq!(
+            parameters["properties"]["questions"]["items"]["$ref"],
+            "#/$defs/QuestionPrompt"
+        );
+        assert_eq!(
+            parameters["$defs"]["QuestionPrompt"]["properties"]["options"]["items"]["$ref"],
+            "#/$defs/QuestionOption"
         );
     }
 

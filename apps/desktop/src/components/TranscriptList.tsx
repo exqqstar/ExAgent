@@ -401,6 +401,7 @@ function GoalReportCard({ message }: { message: TranscriptMessage }) {
     return null;
   }
   const approvalsLabel = `${report.pending_approvals_count} ${report.pending_approvals_count === 1 ? "approval" : "approvals"} waiting in Inbox`;
+  const changedFiles = report.changed_files ?? [];
   const openQuestions = report.open_questions ?? [];
   const reviewSummary = report.review_summary ?? null;
 
@@ -423,14 +424,14 @@ function GoalReportCard({ message }: { message: TranscriptMessage }) {
         <GoalReportMetric label="Tokens" value={tokenUsageValue(report.tokens_used, report.token_budget)} />
         <GoalReportMetric label="Time" value={durationValue(report.time_used_seconds)} />
       </div>
-      {report.changed_files.length > 0 ? (
+      {changedFiles.length > 0 ? (
         <div className="mt-3">
           <div className="flex items-center gap-2 text-muted">
             <FileText className="h-4 w-4" />
             <span className="type-label-sm">Changed files</span>
           </div>
           <ul className="mt-2 space-y-1">
-            {report.changed_files.map((file) => (
+            {changedFiles.map((file) => (
               <li key={file} className="type-code-sm break-all rounded border border-border bg-surface-2 px-2 py-1 text-muted">
                 {file}
               </li>

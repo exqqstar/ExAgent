@@ -32,6 +32,7 @@ import type {
   ThreadForkResponse,
   ThreadGoalClearResponse,
   ThreadGoalGetResponse,
+  ThreadGoalMode,
   ThreadGoalSetResponse,
   ThreadGoalStatus,
   ThreadStartResponse,
@@ -405,6 +406,16 @@ let mockRuntimeSettings: RuntimeSettingsResponse = {
 let mockThreadSequence = 1;
 const mockThreadReads = new Map<string, ThreadReadResponse>();
 
+function mockPersonalProject(): ProjectRecord {
+  return {
+    id: "project-personal",
+    name: "Personal",
+    path: "/Users/enxiang/Library/Application Support/ExAgent/conversations",
+    archived_at: null,
+    pinned: false
+  };
+}
+
 function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -556,6 +567,7 @@ function mockThreadRead(threadId: string): ThreadReadResponse {
       thread: {
         id: threadId,
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: [
           {
@@ -598,6 +610,7 @@ function mockThreadRead(threadId: string): ThreadReadResponse {
     thread: {
       id: threadId,
       status: "idle",
+      goal_mode: "standard",
       active_turn: null,
       turns: []
     }
@@ -827,6 +840,17 @@ export async function listProjects(): Promise<ProjectRecord[]> {
   return invokeCommand<ProjectRecord[]>("project_list");
 }
 
+export async function getOrCreatePersonalProject(): Promise<ProjectRecord> {
+  if (!isTauriRuntime()) {
+    const personal = mockPersonalProject();
+    if (!mockSnapshot.projects.some((project) => project.id === personal.id)) {
+      mockSnapshot.projects = [personal, ...mockSnapshot.projects];
+    }
+    return personal;
+  }
+  return invokeCommand<ProjectRecord>("project_personal_get_or_create");
+}
+
 export async function renameProject(projectId: string, name: string): Promise<ProjectRecord> {
   if (!isTauriRuntime()) {
     mockSnapshot.projects = mockSnapshot.projects.map((project) =>
@@ -965,6 +989,7 @@ export async function startThread(projectId: string): Promise<ThreadStartRespons
       thread: {
         id,
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: []
       }
@@ -1030,6 +1055,7 @@ export async function forkThread(
       thread: {
         id,
         status: "idle",
+        goal_mode: "standard",
         active_turn: null,
         turns: forkPointIndex >= 0 ? parentRead.thread.turns.slice(0, forkPointIndex + 1) : []
       }
@@ -1068,10 +1094,11 @@ export async function setThreadGoal(
     status?: ThreadGoalStatus | null;
     tokenBudget?: number | null;
     clearTokenBudget?: boolean;
+    mode?: ThreadGoalMode;
   }
 ): Promise<ThreadGoalSetResponse> {
   if (!isTauriRuntime()) {
-    throw new Error("Goal mode is available in the desktop runtime.");
+    throw new Error("Thread goals are available in the desktop runtime.");
   }
 
   const tokenBudget = input.clearTokenBudget ? null : input.tokenBudget;
@@ -1081,13 +1108,14 @@ export async function setThreadGoal(
     objective: input.objective ?? null,
     status: input.status ?? null,
     tokenBudget: input.clearTokenBudget || input.tokenBudget !== undefined ? tokenBudget : undefined,
-    clearTokenBudget: input.clearTokenBudget || undefined
+    clearTokenBudget: input.clearTokenBudget || undefined,
+    mode: input.mode
   });
 }
 
 export async function getThreadGoal(projectId: string, threadId: string): Promise<ThreadGoalGetResponse> {
   if (!isTauriRuntime()) {
-    return { goal: null };
+    return { goal: null, mode: "standard" };
   }
 
   return invokeCommand<ThreadGoalGetResponse>("thread_goal_get", { projectId, threadId });
@@ -1701,6 +1729,7 @@ export const exagentClient = {
   archiveThread,
   createProjectWorktree,
   getWorkbenchSnapshot,
+  getOrCreatePersonalProject,
   getProviderSettings,
   getRuntimeSettings,
   scanSkillCatalog,

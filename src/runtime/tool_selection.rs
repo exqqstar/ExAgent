@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::app_server::protocol::ThreadGoalMode;
 use crate::config::{AgentConfig, PermissionProfile};
 use crate::mcp::manager::McpRuntimeManager;
 use crate::registry::ToolRegistry;
@@ -51,6 +52,7 @@ pub(crate) struct ToolSelectionInput<'a> {
     pub(crate) subagent_control: Option<Arc<AgentControl>>,
     pub(crate) goal_api: Option<Arc<GoalToolApi>>,
     pub(crate) forge_review_store: Option<ReviewStore>,
+    pub(crate) active_goal_mode: ThreadGoalMode,
     pub(crate) agent_tool_policy: AgentToolPolicy,
 }
 
@@ -90,7 +92,7 @@ async fn assemble_tool_registry(input: &ToolSelectionInput<'_>) -> Result<ToolRe
 
     if let Some(goal_api) = input.goal_api.clone() {
         registry.register_handler(GetGoalTool::new(goal_api.clone()));
-        registry.register_handler(CreateGoalTool::new_with_forge_intensive(
+        registry.register_handler(CreateGoalTool::new_with_forge_modes(
             goal_api.clone(),
             input.config.forge_review_gate_enabled,
         ));
@@ -100,9 +102,13 @@ async fn assemble_tool_registry(input: &ToolSelectionInput<'_>) -> Result<ToolRe
     if input.config.forge_review_gate_enabled {
         if let Some(review_store) = input.forge_review_store.clone() {
             registry.register_handler(SubmitReviewTool::new(review_store.clone()));
-            registry.register_handler(DeferQuestionTool::new(
-                crate::runtime::forge::open_questions::OpenQuestionStore::new(review_store.db()),
-            ));
+            if input.active_goal_mode.is_review_gated() {
+                registry.register_handler(DeferQuestionTool::new(
+                    crate::runtime::forge::open_questions::OpenQuestionStore::new(
+                        review_store.db(),
+                    ),
+                ));
+            }
         }
     }
 
@@ -380,6 +386,7 @@ mod tests {
             subagent_control: None,
             goal_api: None,
             forge_review_store: None,
+            active_goal_mode: ThreadGoalMode::Standard,
             agent_tool_policy: AgentToolPolicy::all(),
         })
         .await
@@ -411,6 +418,7 @@ mod tests {
             subagent_control: Some(subagent_control()),
             goal_api: None,
             forge_review_store: None,
+            active_goal_mode: ThreadGoalMode::Standard,
             agent_tool_policy: AgentToolPolicy::all(),
         })
         .await
@@ -442,6 +450,7 @@ mod tests {
             subagent_control: Some(subagent_control()),
             goal_api: None,
             forge_review_store: None,
+            active_goal_mode: ThreadGoalMode::Standard,
             agent_tool_policy: AgentToolPolicy::read_only_basic_collaboration(),
         })
         .await
@@ -487,6 +496,7 @@ mod tests {
             subagent_control: None,
             goal_api: None,
             forge_review_store: Some(review_store.clone()),
+            active_goal_mode: ThreadGoalMode::Reviewed,
             agent_tool_policy: profile_for_type(Some(AgentType::Reviewer)).tool_policy,
         })
         .await
@@ -495,6 +505,22 @@ mod tests {
         assert!(visible_tool_names(&reviewer).contains(&"submit_review"));
         assert!(!visible_tool_names(&reviewer).contains(&"defer_question"));
 
+        let standard_worker = build_tool_selection(ToolSelectionInput {
+            base_registry: registry(),
+            config: &config,
+            mcp_runtime: mcp_runtime.clone(),
+            subagent_control: None,
+            goal_api: None,
+            forge_review_store: Some(review_store.clone()),
+            active_goal_mode: ThreadGoalMode::Standard,
+            agent_tool_policy: profile_for_type(Some(AgentType::Worker)).tool_policy,
+        })
+        .await
+        .expect("standard worker selection");
+
+        assert!(!visible_tool_names(&standard_worker).contains(&"submit_review"));
+        assert!(!visible_tool_names(&standard_worker).contains(&"defer_question"));
+
         let worker = build_tool_selection(ToolSelectionInput {
             base_registry: registry(),
             config: &config,
@@ -502,6 +528,7 @@ mod tests {
             subagent_control: None,
             goal_api: None,
             forge_review_store: Some(review_store),
+            active_goal_mode: ThreadGoalMode::Reviewed,
             agent_tool_policy: profile_for_type(Some(AgentType::Worker)).tool_policy,
         })
         .await
@@ -532,6 +559,7 @@ mod tests {
             subagent_control: None,
             goal_api: None,
             forge_review_store: Some(review_store.clone()),
+            active_goal_mode: ThreadGoalMode::Reviewed,
             agent_tool_policy: profile_for_type(Some(AgentType::Reviewer)).tool_policy,
         })
         .await
@@ -546,6 +574,7 @@ mod tests {
             subagent_control: None,
             goal_api: None,
             forge_review_store: Some(review_store),
+            active_goal_mode: ThreadGoalMode::Reviewed,
             agent_tool_policy: profile_for_type(Some(AgentType::Worker)).tool_policy,
         })
         .await
@@ -571,6 +600,7 @@ mod tests {
             subagent_control: None,
             goal_api: None,
             forge_review_store: None,
+            active_goal_mode: ThreadGoalMode::Standard,
             agent_tool_policy: AgentToolPolicy::all(),
         })
         .await
@@ -588,6 +618,7 @@ mod tests {
             subagent_control: None,
             goal_api: None,
             forge_review_store: None,
+            active_goal_mode: ThreadGoalMode::Standard,
             agent_tool_policy: AgentToolPolicy::read_only_basic_collaboration(),
         })
         .await
@@ -605,6 +636,7 @@ mod tests {
             subagent_control: None,
             goal_api: None,
             forge_review_store: None,
+            active_goal_mode: ThreadGoalMode::Standard,
             agent_tool_policy: AgentToolPolicy::all(),
         })
         .await

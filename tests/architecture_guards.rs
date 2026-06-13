@@ -62,6 +62,66 @@ fn agent_does_not_parse_tool_meta() {
 }
 
 #[test]
+fn thread_goal_shape_stays_codex_thin() {
+    let source =
+        std::fs::read_to_string("src/app_server/protocol.rs").expect("read protocol source");
+    let status_body = source
+        .split("pub enum ThreadGoalStatus {")
+        .nth(1)
+        .and_then(|tail| tail.split_once("}\n\n#[derive"))
+        .map(|(body, _)| body)
+        .expect("ThreadGoalStatus enum body");
+    let variants = status_body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.trim_end_matches(','))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        variants,
+        vec![
+            "Active",
+            "Paused",
+            "Blocked",
+            "UsageLimited",
+            "BudgetLimited",
+            "Complete"
+        ],
+        "Forge must not add goal status variants"
+    );
+
+    let goal_body = source
+        .split("pub struct ThreadGoal {")
+        .nth(1)
+        .and_then(|tail| tail.split_once("}\n\n#[derive"))
+        .map(|(body, _)| body)
+        .expect("ThreadGoal struct body");
+    let fields = goal_body
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("pub "))
+        .filter_map(|line| line.split_once(':').map(|(name, _)| name))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fields,
+        vec![
+            "thread_id",
+            "goal_id",
+            "objective",
+            "status",
+            "token_budget",
+            "tokens_used",
+            "time_used_seconds",
+            "continuation_suppressed",
+            "continuation_suppressed_after_turn_id",
+            "created_at_ms",
+            "updated_at_ms"
+        ],
+        "Forge state must stay outside ThreadGoal"
+    );
+}
+
+#[test]
 fn turn_loop_does_not_sample_from_session_snapshot_conversation() {
     let source =
         std::fs::read_to_string("src/runtime/thread_session/turn.rs").expect("read turn loop");

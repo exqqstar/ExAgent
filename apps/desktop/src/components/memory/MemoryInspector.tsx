@@ -174,39 +174,54 @@ export function MemoryInspector({ projectId }: { projectId: string | null }) {
     <TooltipProvider delayDuration={250}>
       <div className="flex h-full min-h-0 flex-col">
       <div className="border-b border-border px-4 py-3">
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex items-start justify-between gap-3 pr-10">
           <div className="min-w-0">
             <h2 className="type-title-lg truncate text-ink">Memory</h2>
             <p className="type-body-sm truncate text-muted">{projectId ? projectId : "No project selected"}</p>
           </div>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button type="button" variant="ghost" size="icon" aria-label="Refresh memory" onClick={() => void loadMemory()} disabled={loading}>
-                <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Refresh</TooltipContent>
-          </Tooltip>
+          <div className="flex shrink-0 items-center gap-1">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Refresh memory"
+                  onClick={() => void loadMemory()}
+                  disabled={loading}
+                >
+                  <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Refresh</TooltipContent>
+            </Tooltip>
+          </div>
         </div>
 
-        <div className="mt-3 flex items-center gap-2">
-          <Button
-            type="button"
-            size="sm"
-            variant={scope === "project" ? "secondary" : "ghost"}
-            onClick={() => setScope("project")}
-          >
-            Project
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant={scope === "global" ? "secondary" : "ghost"}
-            onClick={() => setScope("global")}
-          >
-            Global
-          </Button>
-          <Badge variant="neutral">Global: human-promote-only</Badge>
+        <div className="mt-4 flex h-8 items-center gap-2">
+          <div className="inline-flex h-8 items-center rounded-md border border-border bg-surface-2 p-0.5">
+            <Button
+              type="button"
+              size="sm"
+              variant={scope === "project" ? "secondary" : "ghost"}
+              className="h-7 px-3"
+              onClick={() => setScope("project")}
+            >
+              Project
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={scope === "global" ? "secondary" : "ghost"}
+              className="h-7 px-3"
+              onClick={() => setScope("global")}
+            >
+              Global
+            </Button>
+          </div>
+          <Badge variant="neutral" className="h-7 px-2">
+            Global: human-promote-only
+          </Badge>
         </div>
       </div>
 

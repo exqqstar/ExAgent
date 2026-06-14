@@ -1,6 +1,6 @@
 use sqlx::{Executor, SqlitePool};
 
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 pub async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
     pool.execute("PRAGMA foreign_keys = ON").await?;
@@ -218,6 +218,121 @@ ADD COLUMN reject_category TEXT CHECK(reject_category IS NULL OR reject_category
     .await?;
     pool.execute(
         "CREATE INDEX IF NOT EXISTS idx_forge_goal_modes_thread ON forge_goal_modes(thread_id)",
+    )
+    .await?;
+    pool.execute(
+        r#"
+CREATE TABLE IF NOT EXISTS memory_observations (
+  id TEXT PRIMARY KEY NOT NULL,
+  scope TEXT NOT NULL CHECK(scope IN ('global','project','thread')),
+  project_id TEXT,
+  thread_id TEXT NOT NULL,
+  turn_id TEXT,
+  event_id TEXT,
+  source_tool_call_id TEXT,
+  kind TEXT NOT NULL,
+  title TEXT NOT NULL,
+  narrative TEXT NOT NULL,
+  files_json TEXT NOT NULL,
+  code_refs_json TEXT NOT NULL,
+  concepts_json TEXT NOT NULL,
+  importance INTEGER NOT NULL,
+  confidence REAL NOT NULL,
+  auto_inject_eligible INTEGER NOT NULL,
+  suspicious_injection INTEGER NOT NULL DEFAULT 0,
+  privacy_flags_json TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL
+)
+        "#,
+    )
+    .await?;
+    pool.execute(
+        r#"
+CREATE TABLE IF NOT EXISTS memory_entries (
+  id TEXT PRIMARY KEY NOT NULL,
+  scope TEXT NOT NULL CHECK(scope IN ('global','project','thread')),
+  project_id TEXT,
+  thread_id TEXT,
+  kind TEXT NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  files_json TEXT NOT NULL,
+  code_refs_json TEXT NOT NULL,
+  concepts_json TEXT NOT NULL,
+  source_observation_ids_json TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  strength INTEGER NOT NULL,
+  pinned INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('candidate','active','superseded','rejected','archived','deleted')),
+  inactive_reason TEXT,
+  supersedes_id TEXT,
+  suspicious_injection INTEGER NOT NULL DEFAULT 0,
+  privacy_flags_json TEXT NOT NULL DEFAULT '{}',
+  created_by TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  last_used_at_ms INTEGER,
+  use_count INTEGER NOT NULL
+)
+        "#,
+    )
+    .await?;
+    pool.execute(
+        r#"
+CREATE TABLE IF NOT EXISTS memory_projection_cursors (
+  thread_id TEXT PRIMARY KEY NOT NULL,
+  rollout_path TEXT NOT NULL,
+  last_event_index INTEGER NOT NULL,
+  last_projected_at_ms INTEGER NOT NULL
+)
+        "#,
+    )
+    .await?;
+    pool.execute(
+        r#"
+CREATE TABLE IF NOT EXISTS memory_audit_events (
+  id TEXT PRIMARY KEY NOT NULL,
+  memory_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  detail_json TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL
+)
+        "#,
+    )
+    .await?;
+    pool.execute(
+        r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_entries_fts USING fts5(
+  id UNINDEXED, scope UNINDEXED, project_id UNINDEXED, thread_id UNINDEXED,
+  title, content, files, concepts, tokenize='unicode61'
+)
+        "#,
+    )
+    .await?;
+    pool.execute(
+        r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_observations_fts USING fts5(
+  id UNINDEXED, scope UNINDEXED, project_id UNINDEXED, thread_id UNINDEXED,
+  title, narrative, files, concepts, tokenize='unicode61'
+)
+        "#,
+    )
+    .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_entries_scope_project_status ON memory_entries(scope, project_id, status, updated_at_ms)",
+    )
+    .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_entries_thread ON memory_entries(thread_id, status)",
+    )
+    .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_observations_thread_turn ON memory_observations(thread_id, turn_id)",
+    )
+    .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_observations_project_kind ON memory_observations(project_id, kind, created_at_ms)",
     )
     .await?;
     pool.execute(&*format!("PRAGMA user_version = {SCHEMA_VERSION}"))

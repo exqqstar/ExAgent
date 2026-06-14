@@ -203,6 +203,7 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
             agent_tool_policy: profile_for_type(Some(AgentType::Worker)).tool_policy,
             inbox: None,
             goal_api: None,
+            memory_api: None,
         };
         (dir, store, ctx, goal_id)
     }

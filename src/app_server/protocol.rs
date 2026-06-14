@@ -38,6 +38,13 @@ pub enum BoundaryCapability {
     SubmitUserInput,
     EventsSubscribe,
     EventsReplay,
+    MemorySearch,
+    MemorySave,
+    MemoryUpdate,
+    MemoryForget,
+    MemoryAudit,
+    MemoryListCandidates,
+    MemoryPromote,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -740,6 +747,206 @@ pub struct SubmitUserInputResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemorySearchParams {
+    pub workspace_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    pub query: String,
+    pub include_observations: bool,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemorySearchResponse {
+    pub hits: Vec<MemoryHitView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryHitView {
+    pub id: String,
+    pub source: String,
+    pub scope: String,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    pub files: Vec<String>,
+    pub concepts: Vec<String>,
+    #[serde(default)]
+    pub source_observation_ids: Vec<String>,
+    pub confidence: f64,
+    pub stale: bool,
+    pub quarantined: bool,
+    pub rank: f64,
+    pub pinned: bool,
+    pub status: Option<String>,
+    pub use_count: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemorySaveParams {
+    pub workspace_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    pub input: MemorySaveInputView,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemorySaveInputView {
+    pub kind: String,
+    pub title: String,
+    pub content: String,
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub concepts: Vec<String>,
+    #[serde(default)]
+    pub source_observation_ids: Vec<String>,
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemorySaveResponse {
+    pub entry: MemoryEntryView,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryUpdateParams {
+    pub workspace_root: Option<String>,
+    pub entry_id: String,
+    pub action: MemoryUpdateAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concepts: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_observation_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryUpdateAction {
+    Pin,
+    Unpin,
+    Reject,
+    Supersede,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryUpdateResponse {
+    pub entry: MemoryEntryView,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryForgetParams {
+    pub workspace_root: Option<String>,
+    pub entry_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryForgetResponse {
+    pub entry_id: String,
+    pub forgotten: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryAuditParams {
+    pub workspace_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryAuditResponse {
+    pub events: Vec<MemoryAuditEventView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryAuditEventView {
+    pub id: String,
+    pub memory_id: String,
+    pub action: String,
+    pub actor: String,
+    pub created_at_ms: i64,
+    pub details: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryListCandidatesParams {
+    pub workspace_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryListCandidatesResponse {
+    pub candidates: Vec<MemoryEntryView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryPromoteParams {
+    pub workspace_root: Option<String>,
+    pub entry_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub allow_quarantined_override: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryPromoteResponse {
+    pub entry: MemoryEntryView,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryEntryView {
+    pub id: String,
+    pub scope: String,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    pub files: Vec<String>,
+    pub concepts: Vec<String>,
+    #[serde(default)]
+    pub source_observation_ids: Vec<String>,
+    pub confidence: f64,
+    pub pinned: bool,
+    pub status: String,
+    pub stale: bool,
+    pub quarantined: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inactive_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantine_reason: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BoundaryOp {
     Initialize(InitializeParams),
@@ -760,6 +967,13 @@ pub enum BoundaryOp {
     ApprovalDecision(ApprovalDecisionParams),
     SubmitUserInput(SubmitUserInputParams),
     EventsReplay(EventsReplayParams),
+    MemorySearch(MemorySearchParams),
+    MemorySave(MemorySaveParams),
+    MemoryUpdate(MemoryUpdateParams),
+    MemoryForget(MemoryForgetParams),
+    MemoryAudit(MemoryAuditParams),
+    MemoryListCandidates(MemoryListCandidatesParams),
+    MemoryPromote(MemoryPromoteParams),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -783,6 +997,13 @@ pub enum BoundaryOpResponse {
     ApprovalDecisionSubmitted(ApprovalDecisionResponse),
     UserInputSubmitted(SubmitUserInputResponse),
     EventsReplayed(EventsReplayResponse),
+    MemorySearched(MemorySearchResponse),
+    MemorySaved(MemorySaveResponse),
+    MemoryUpdated(MemoryUpdateResponse),
+    MemoryForgotten(MemoryForgetResponse),
+    MemoryAudit(MemoryAuditResponse),
+    MemoryCandidatesListed(MemoryListCandidatesResponse),
+    MemoryPromoted(MemoryPromoteResponse),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

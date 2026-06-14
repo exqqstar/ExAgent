@@ -243,6 +243,7 @@ mod tests {
             agent_tool_policy: profile_for_type(Some(AgentType::Reviewer)).tool_policy,
             inbox: None,
             goal_api: None,
+            memory_api: None,
         };
         (dir, workspace, store, ctx)
     }

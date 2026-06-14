@@ -7,11 +7,15 @@ use tokio::sync::broadcast;
 use crate::app_server::protocol::{
     ApprovalDecisionParams, ApprovalDecisionResponse, ApprovalsListParams, ApprovalsListResponse,
     BoundaryOp, BoundaryOpResponse, CheckpointRestoreParams, CheckpointRestoreResponse,
-    EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, OpenQuestionResolveParams,
-    OpenQuestionResolveResponse, SubmitUserInputParams, SubmitUserInputResponse,
-    ThreadCompactParams, ThreadCompactResponse, ThreadForkParams, ThreadForkResponse, ThreadGoal,
-    ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse,
-    ThreadGoalMode, ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams,
+    EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, MemoryAuditParams,
+    MemoryAuditResponse, MemoryForgetParams, MemoryForgetResponse, MemoryListCandidatesParams,
+    MemoryListCandidatesResponse, MemoryPromoteParams, MemoryPromoteResponse, MemorySaveParams,
+    MemorySaveResponse, MemorySearchParams, MemorySearchResponse, MemoryUpdateParams,
+    MemoryUpdateResponse, OpenQuestionResolveParams, OpenQuestionResolveResponse,
+    SubmitUserInputParams, SubmitUserInputResponse, ThreadCompactParams, ThreadCompactResponse,
+    ThreadForkParams, ThreadForkResponse, ThreadGoal, ThreadGoalClearParams,
+    ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalMode,
+    ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams,
     ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
     ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
     TurnStartResponse,
@@ -459,6 +463,135 @@ impl DesktopFacade {
             workspace_root: Some(project.path.display().to_string()),
             ..params
         })
+    }
+
+    pub async fn memory_search(
+        &self,
+        project_id: &str,
+        scope: Option<String>,
+        query: &str,
+        include_observations: bool,
+        limit: usize,
+    ) -> Result<MemorySearchResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        match self
+            .service
+            .submit_boundary_op(BoundaryOp::MemorySearch(MemorySearchParams {
+                workspace_root: Some(project.path.display().to_string()),
+                scope,
+                query: query.to_string(),
+                include_observations,
+                limit,
+            }))
+            .await?
+        {
+            BoundaryOpResponse::MemorySearched(response) => Ok(response),
+            _ => Err(anyhow!("memory search returned unexpected response")),
+        }
+    }
+
+    pub async fn memory_save(
+        &self,
+        project_id: &str,
+        mut params: MemorySaveParams,
+    ) -> Result<MemorySaveResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        params.workspace_root = Some(project.path.display().to_string());
+        match self
+            .service
+            .submit_boundary_op(BoundaryOp::MemorySave(params))
+            .await?
+        {
+            BoundaryOpResponse::MemorySaved(response) => Ok(response),
+            _ => Err(anyhow!("memory save returned unexpected response")),
+        }
+    }
+
+    pub async fn memory_update(
+        &self,
+        project_id: &str,
+        mut params: MemoryUpdateParams,
+    ) -> Result<MemoryUpdateResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        params.workspace_root = Some(project.path.display().to_string());
+        match self
+            .service
+            .submit_boundary_op(BoundaryOp::MemoryUpdate(params))
+            .await?
+        {
+            BoundaryOpResponse::MemoryUpdated(response) => Ok(response),
+            _ => Err(anyhow!("memory update returned unexpected response")),
+        }
+    }
+
+    pub async fn memory_forget(
+        &self,
+        project_id: &str,
+        mut params: MemoryForgetParams,
+    ) -> Result<MemoryForgetResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        params.workspace_root = Some(project.path.display().to_string());
+        match self
+            .service
+            .submit_boundary_op(BoundaryOp::MemoryForget(params))
+            .await?
+        {
+            BoundaryOpResponse::MemoryForgotten(response) => Ok(response),
+            _ => Err(anyhow!("memory forget returned unexpected response")),
+        }
+    }
+
+    pub async fn memory_audit(
+        &self,
+        project_id: &str,
+        mut params: MemoryAuditParams,
+    ) -> Result<MemoryAuditResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        params.workspace_root = Some(project.path.display().to_string());
+        match self
+            .service
+            .submit_boundary_op(BoundaryOp::MemoryAudit(params))
+            .await?
+        {
+            BoundaryOpResponse::MemoryAudit(response) => Ok(response),
+            _ => Err(anyhow!("memory audit returned unexpected response")),
+        }
+    }
+
+    pub async fn memory_list_candidates(
+        &self,
+        project_id: &str,
+        mut params: MemoryListCandidatesParams,
+    ) -> Result<MemoryListCandidatesResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        params.workspace_root = Some(project.path.display().to_string());
+        match self
+            .service
+            .submit_boundary_op(BoundaryOp::MemoryListCandidates(params))
+            .await?
+        {
+            BoundaryOpResponse::MemoryCandidatesListed(response) => Ok(response),
+            _ => Err(anyhow!(
+                "memory list candidates returned unexpected response"
+            )),
+        }
+    }
+
+    pub async fn memory_promote(
+        &self,
+        project_id: &str,
+        mut params: MemoryPromoteParams,
+    ) -> Result<MemoryPromoteResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        params.workspace_root = Some(project.path.display().to_string());
+        match self
+            .service
+            .submit_boundary_op(BoundaryOp::MemoryPromote(params))
+            .await?
+        {
+            BoundaryOpResponse::MemoryPromoted(response) => Ok(response),
+            _ => Err(anyhow!("memory promote returned unexpected response")),
+        }
     }
 
     pub async fn rename_thread(

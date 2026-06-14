@@ -416,6 +416,13 @@ async fn initialize_boundary_advertises_v2_protocol_surface() {
             BoundaryCapability::ApprovalDecision,
             BoundaryCapability::SubmitUserInput,
             BoundaryCapability::EventsReplay,
+            BoundaryCapability::MemorySearch,
+            BoundaryCapability::MemorySave,
+            BoundaryCapability::MemoryUpdate,
+            BoundaryCapability::MemoryForget,
+            BoundaryCapability::MemoryAudit,
+            BoundaryCapability::MemoryListCandidates,
+            BoundaryCapability::MemoryPromote,
         ]
     );
     assert_eq!(

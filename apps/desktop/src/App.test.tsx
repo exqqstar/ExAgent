@@ -299,6 +299,19 @@ describe("AppShell", () => {
     expect(screen.getByLabelText("Prompt composer")).toBeInTheDocument();
   });
 
+  it("opens the memory inspector from the window chrome", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await user.click(screen.getByRole("button", { name: "Open memory" }));
+
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toBeInTheDocument();
+    expect(within(dialog).getAllByRole("heading", { name: "Memory" })).toHaveLength(2);
+    expect(within(dialog).getByText("No pending candidates.")).toBeInTheDocument();
+  });
+
   it("resizes and collapses the desktop project sidebar", async () => {
     render(<App />);
 

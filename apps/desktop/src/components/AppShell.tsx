@@ -7,7 +7,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent
 } from "react";
-import { ArrowLeft, ArrowRight, PanelRight, ShieldAlert, SidebarIcon } from "lucide-react";
+import { ArrowLeft, ArrowRight, Database, PanelRight, ShieldAlert, SidebarIcon } from "lucide-react";
 import { AgentThreadViewer } from "@/components/AgentThreadViewer";
 import { ApprovalInbox } from "@/components/ApprovalInbox";
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +16,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTr
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ChatView } from "@/components/ChatView";
 import { Inspector } from "@/components/Inspector";
+import { MemoryInspector } from "@/components/memory/MemoryInspector";
 import { Sidebar } from "@/components/Sidebar";
 import { loadWorkbench, useWorkbenchStore } from "@/stores/workbenchStore";
 import type { AgentNode } from "@/types";
@@ -45,6 +46,7 @@ export function AppShell() {
   const [desktopSidebarWidth, setDesktopSidebarWidth] = useState(DESKTOP_SIDEBAR_DEFAULT_WIDTH);
   const [desktopSidebarCollapsed, setDesktopSidebarCollapsed] = useState(false);
   const [resizingDesktopSidebar, setResizingDesktopSidebar] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
   const pendingApprovalCount = workbench.pendingApprovals.length;
   const chromeSidebarWidth = desktopSidebarCollapsed ? 164 : desktopSidebarWidth;
   const approvalInboxLabel = `${t("approvals.inbox.title")}, ${pendingApprovalCount} ${t("approvals.inbox.pending")} ${
@@ -367,6 +369,29 @@ export function AppShell() {
                   </SheetContent>
                 </Sheet>
               ) : null}
+              <Sheet open={memoryOpen} onOpenChange={setMemoryOpen}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      aria-label="Open memory"
+                      onClick={() => setMemoryOpen(true)}
+                    >
+                      <Database className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Memory</TooltipContent>
+                </Tooltip>
+                <SheetContent side="right" className="w-[min(680px,calc(100vw-24px))] p-0">
+                  <SheetHeader className="sr-only">
+                    <SheetTitle>Memory</SheetTitle>
+                    <SheetDescription>Project memory governance</SheetDescription>
+                  </SheetHeader>
+                  <MemoryInspector projectId={workbench.activeProjectId} />
+                </SheetContent>
+              </Sheet>
               <Sheet>
                 <Tooltip>
                   <TooltipTrigger asChild>

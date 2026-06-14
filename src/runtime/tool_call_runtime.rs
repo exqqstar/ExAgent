@@ -8,6 +8,7 @@ use crate::policy::PolicyManager;
 use crate::registry::ToolContext;
 use crate::runtime::agent_profile::AgentToolPolicy;
 use crate::runtime::goal::GoalToolApi;
+use crate::runtime::memory::MemoryToolApi;
 use crate::runtime::thread_session::ThreadEventRecorder;
 use crate::runtime::thread_session::ThreadInbox;
 use crate::runtime::tool_hooks::{NoopToolHooks, ToolHooks};
@@ -29,6 +30,7 @@ pub(crate) struct ToolCallRuntime {
     turn_id: TurnId,
     inbox: Option<Arc<ThreadInbox>>,
     goal_api: Option<Arc<GoalToolApi>>,
+    memory_api: Option<Arc<MemoryToolApi>>,
 }
 
 impl ToolCallRuntime {
@@ -56,6 +58,7 @@ impl ToolCallRuntime {
             turn_id,
             inbox: None,
             goal_api: None,
+            memory_api: None,
         }
     }
 
@@ -71,6 +74,11 @@ impl ToolCallRuntime {
 
     pub(crate) fn with_goal_api(mut self, goal_api: Option<Arc<GoalToolApi>>) -> Self {
         self.goal_api = goal_api;
+        self
+    }
+
+    pub(crate) fn with_memory_api(mut self, memory_api: Option<Arc<MemoryToolApi>>) -> Self {
+        self.memory_api = memory_api;
         self
     }
 
@@ -111,6 +119,7 @@ impl ToolCallRuntime {
             agent_tool_policy: self.agent_tool_policy.clone(),
             inbox: self.inbox.clone(),
             goal_api: self.goal_api.clone(),
+            memory_api: self.memory_api.clone(),
         }
     }
 }

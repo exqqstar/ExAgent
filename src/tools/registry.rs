@@ -6,6 +6,7 @@ use crate::exec_session::{ExecOutputEventSink, ExecSessionManager};
 use crate::policy::PolicyManager;
 use crate::runtime::agent_profile::AgentToolPolicy;
 use crate::runtime::goal::GoalToolApi;
+use crate::runtime::memory::MemoryToolApi;
 use crate::runtime::thread_session::ThreadInbox;
 use crate::tools::{ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
 use crate::types::{ThreadId, ToolCall, ToolResult, ToolStatus, TurnId};
@@ -22,6 +23,7 @@ pub struct ToolContext {
     pub agent_tool_policy: AgentToolPolicy,
     pub inbox: Option<Arc<ThreadInbox>>,
     pub goal_api: Option<Arc<GoalToolApi>>,
+    pub memory_api: Option<Arc<MemoryToolApi>>,
 }
 
 #[derive(Clone)]

@@ -283,6 +283,7 @@ fn tool_context(policy_mode: PolicyMode) -> (tempfile::TempDir, ToolContext) {
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
         inbox: None,
         goal_api: None,
+        memory_api: None,
     };
     (dir, ctx)
 }

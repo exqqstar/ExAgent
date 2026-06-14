@@ -882,6 +882,7 @@ mod tests {
             agent_tool_policy: AgentToolPolicy::all(),
             inbox: None,
             goal_api: None,
+            memory_api: None,
         };
 
         let result = registry

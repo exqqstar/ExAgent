@@ -333,6 +333,7 @@ fn tool_context() -> ToolContext {
         agent_tool_policy: exagent::runtime::agent_profile::AgentToolPolicy::all(),
         inbox: None,
         goal_api: None,
+        memory_api: None,
     }
 }
 

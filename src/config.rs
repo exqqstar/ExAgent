@@ -115,6 +115,15 @@ pub struct AgentConfig {
     pub mcp_servers: Vec<McpServerConfig>,
     pub web_search: Option<WebSearchConfig>,
     pub forge_review_gate_enabled: bool,
+    pub memory_enabled: bool,
+    pub memory_auto_inject_enabled: bool,
+    pub memory_frozen_inject_enabled: bool,
+    pub memory_projection_background_enabled: bool,
+    pub memory_auto_context_max_chars: usize,
+    pub memory_frozen_context_max_chars: usize,
+    pub memory_tool_context_max_chars: usize,
+    pub memory_auto_max_hits: usize,
+    pub memory_tool_max_hits: usize,
 }
 
 impl AgentConfig {
@@ -168,6 +177,35 @@ impl Default for AgentConfig {
             web_search: web_search_config_from_env(),
             forge_review_gate_enabled: parse_optional_bool_env("EXAGENT_FORGE_REVIEW_GATE_ENABLED")
                 .unwrap_or(false),
+            memory_enabled: parse_optional_bool_env("EXAGENT_MEMORY_ENABLED").unwrap_or(true),
+            memory_auto_inject_enabled: parse_optional_bool_env(
+                "EXAGENT_MEMORY_AUTO_INJECT_ENABLED",
+            )
+            .unwrap_or(true),
+            memory_frozen_inject_enabled: parse_optional_bool_env(
+                "EXAGENT_MEMORY_FROZEN_INJECT_ENABLED",
+            )
+            .unwrap_or(true),
+            memory_projection_background_enabled: parse_optional_bool_env(
+                "EXAGENT_MEMORY_PROJECTION_BACKGROUND_ENABLED",
+            )
+            .unwrap_or(true),
+            memory_auto_context_max_chars: parse_optional_usize_env(
+                "EXAGENT_MEMORY_AUTO_CONTEXT_MAX_CHARS",
+            )
+            .unwrap_or(2 * 1024),
+            memory_frozen_context_max_chars: parse_optional_usize_env(
+                "EXAGENT_MEMORY_FROZEN_CONTEXT_MAX_CHARS",
+            )
+            .unwrap_or(1 * 1024),
+            memory_tool_context_max_chars: parse_optional_usize_env(
+                "EXAGENT_MEMORY_TOOL_CONTEXT_MAX_CHARS",
+            )
+            .unwrap_or(12 * 1024),
+            memory_auto_max_hits: parse_optional_usize_env("EXAGENT_MEMORY_AUTO_MAX_HITS")
+                .unwrap_or(4),
+            memory_tool_max_hits: parse_optional_usize_env("EXAGENT_MEMORY_TOOL_MAX_HITS")
+                .unwrap_or(20),
         }
     }
 }

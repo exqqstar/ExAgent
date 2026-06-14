@@ -14,6 +14,7 @@ use crate::types::{
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ContextManager {
     items: Vec<ConversationMessage>,
+    stable_internal_context: BTreeMap<String, ConversationMessage>,
     ephemeral_internal_context: BTreeMap<String, ConversationMessage>,
     history_version: u64,
     reference_turn_context: Option<TurnContextItem>,
@@ -144,6 +145,20 @@ impl ContextManager {
         self.ephemeral_internal_context.insert(source, message);
     }
 
+    pub(crate) fn upsert_stable_internal_context(
+        &mut self,
+        source: impl Into<String>,
+        mut message: ConversationMessage,
+    ) {
+        let source = source.into();
+        message.internal_source = Some(source.clone());
+        self.stable_internal_context.insert(source, message);
+    }
+
+    pub(crate) fn clear_stable_internal_context(&mut self, source: &str) {
+        self.stable_internal_context.remove(source);
+    }
+
     pub(crate) fn clear_ephemeral_internal_context(&mut self, source: &str) {
         self.ephemeral_internal_context.remove(source);
     }
@@ -218,7 +233,12 @@ impl ContextManager {
         &self,
         input_modalities: &[InputModality],
     ) -> Vec<ConversationMessage> {
-        let mut items = self.items.clone();
+        let mut items = self
+            .stable_internal_context
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        items.extend(self.items.clone());
         items.extend(self.ephemeral_internal_context.values().cloned());
         strip_images_when_unsupported(&mut items, input_modalities);
         items
@@ -1004,6 +1024,49 @@ mod tests {
 
         manager.clear_ephemeral_internal_context("goal_snapshot");
         assert_eq!(manager.for_prompt(all_input_modalities()).len(), 1);
+    }
+
+    #[test]
+    fn stable_internal_context_is_prompt_only_and_precedes_history() {
+        let mut manager = ContextManager::new();
+        manager.record_items([ConversationMessage::user("visible")]);
+        manager.upsert_stable_internal_context(
+            "00_frozen_memory",
+            ConversationMessage::injected_user_context("00_frozen_memory", "stable"),
+        );
+        manager.upsert_ephemeral_internal_context(
+            "goal_snapshot",
+            ConversationMessage::injected_user_context("goal_snapshot", "ephemeral"),
+        );
+
+        let prompt = manager.for_prompt(all_input_modalities());
+        assert_eq!(prompt.len(), 3);
+        assert_eq!(prompt[0].content, "stable");
+        assert_eq!(
+            prompt[0].internal_source.as_deref(),
+            Some("00_frozen_memory")
+        );
+        assert_eq!(prompt[1].content, "visible");
+        assert_eq!(prompt[2].content, "ephemeral");
+
+        assert_eq!(manager.raw_items().len(), 1);
+        assert_eq!(manager.for_compaction(all_input_modalities()).len(), 1);
+        assert_eq!(
+            manager.for_compaction(all_input_modalities())[0].content,
+            "visible"
+        );
+
+        let mut snapshot = crate::session::ThreadSnapshot::new_thread(
+            ThreadId::new("thread_context"),
+            PathBuf::from("/workspace"),
+            PathBuf::from("/workspace"),
+        );
+        manager.sync_snapshot(&mut snapshot);
+        assert_eq!(snapshot.conversation.len(), 1);
+        assert_eq!(snapshot.conversation[0].content, "visible");
+
+        manager.clear_stable_internal_context("00_frozen_memory");
+        assert_eq!(manager.for_prompt(all_input_modalities()).len(), 2);
     }
 
     #[test]

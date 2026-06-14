@@ -17,6 +17,7 @@ use crate::runtime::forge::gate::ForgeGateHooks;
 use crate::runtime::forge::goal_modes::ForgeGoalModeStore;
 use crate::runtime::forge::review::ReviewStore;
 use crate::runtime::goal::GoalToolApi;
+use crate::runtime::memory::MemoryToolApi;
 use crate::runtime::subagent::AgentControl;
 use crate::runtime::thread_session::ThreadInbox;
 use crate::runtime::tool_call_runtime::ToolCallRuntime;
@@ -35,6 +36,7 @@ pub struct Agent {
     tool_hooks: Arc<dyn ToolHooks>,
     subagent_control: Option<Arc<AgentControl>>,
     goal_api: Option<Arc<GoalToolApi>>,
+    memory_api: Option<Arc<MemoryToolApi>>,
     forge_review_store: Option<ReviewStore>,
 }
 
@@ -113,6 +115,7 @@ impl Agent {
             tool_hooks: Arc::new(NoopToolHooks),
             subagent_control: None,
             goal_api: None,
+            memory_api: None,
             forge_review_store: None,
         }
     }
@@ -127,6 +130,11 @@ impl Agent {
 
     pub(crate) fn with_goal_api(mut self, goal_api: Option<Arc<GoalToolApi>>) -> Self {
         self.goal_api = goal_api;
+        self
+    }
+
+    pub(crate) fn with_memory_api(mut self, memory_api: Option<Arc<MemoryToolApi>>) -> Self {
+        self.memory_api = memory_api;
         self
     }
 
@@ -186,6 +194,7 @@ impl Agent {
             mcp_runtime: self.mcp_runtime.clone(),
             subagent_control: self.subagent_control.clone(),
             goal_api: self.goal_api.clone(),
+            memory_api: self.memory_api.clone(),
             forge_review_store: self.forge_review_store.clone(),
             active_goal_mode,
             agent_tool_policy: agent_tool_policy.clone(),
@@ -217,6 +226,7 @@ impl Agent {
             runtime = runtime.with_inbox(inbox);
         }
         runtime = runtime.with_goal_api(self.goal_api.clone());
+        runtime = runtime.with_memory_api(self.memory_api.clone());
         Ok(runtime)
     }
 
@@ -369,6 +379,7 @@ mod tests {
             tool_hooks: Arc::new(NoopToolHooks),
             subagent_control: None,
             goal_api: None,
+            memory_api: None,
             forge_review_store: None,
         }
     }

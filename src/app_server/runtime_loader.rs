@@ -10,6 +10,7 @@ use crate::app_server::AppServerError;
 use crate::config::AgentConfig;
 use crate::policy::PolicyManager;
 use crate::runtime::goal::runtime::GoalRuntime;
+use crate::runtime::memory::MemoryRuntime;
 use crate::runtime::subagent::AgentControl;
 use crate::runtime::thread_runtime::{
     AgentFactory, ThreadRuntime, ThreadRuntimeOptions, WorkspaceRuntimeOpGate,
@@ -24,6 +25,9 @@ pub(in crate::app_server) trait RuntimeSpawner {
         None
     }
     fn goal_store(&self) -> Option<crate::index_db::IndexDb> {
+        None
+    }
+    fn memory_runtime(&self) -> Option<Arc<MemoryRuntime>> {
         None
     }
     fn forge_review_store(&self) -> Option<crate::runtime::forge::review::ReviewStore> {
@@ -188,6 +192,9 @@ impl RuntimeLoader {
         }
         if let Some(goal_store) = spawner.goal_store() {
             options = options.with_goal_runtime(Arc::new(GoalRuntime::new(goal_store)));
+        }
+        if let Some(memory_runtime) = spawner.memory_runtime() {
+            options = options.with_memory_runtime(memory_runtime);
         }
         if let Some(review_store) = spawner.forge_review_store() {
             options = options.with_forge_review_store(review_store);

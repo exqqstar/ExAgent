@@ -17,6 +17,8 @@ use crate::runtime::context::{
 use crate::runtime::goal::runtime::{
     GoalRuntime, GoalRuntimeEffect, GoalRuntimeEvent, GoalTurnTrigger,
 };
+use crate::runtime::memory::context::{format_auto_memory_context, format_frozen_memory_block};
+use crate::runtime::memory::MemoryProjectionRequest;
 use crate::runtime::project_docs::{load_project_docs, ProjectDocConfig};
 use crate::runtime::skills::{
     load_skill_body, load_skills, render_available_skills, resolve_explicit_skill_mentions,
@@ -27,7 +29,9 @@ use crate::runtime::thread_runtime::{
 };
 use crate::runtime::tool_orchestrator::ToolExecutionOutcome;
 use crate::runtime::turn_mode::TurnMode;
-use crate::session::{ApprovalId, ApprovalStatus, CompactionSummary, ThreadSnapshot};
+use crate::session::{ApprovalId, ApprovalStatus, CompactionSummary, ThreadSnapshot, ThreadSource};
+use crate::state::memory::query::should_auto_recall;
+use crate::state::memory::{MemoryRecallMode, MemoryScope, MemorySearchQuery};
 use crate::state::rollout::{CompactedItem, RolloutItem};
 use crate::tools::ToolSpec;
 use crate::types::{
@@ -291,6 +295,7 @@ impl ThreadSession {
             Some(&turn_id),
             RuntimeEventKind::TurnCompleted,
         )?;
+        self.enqueue_memory_projection_after_turn_completed(&snapshot);
         Ok(ThreadOpResult::UserInput {
             turn_id,
             final_turn,
@@ -515,6 +520,7 @@ impl ThreadSession {
             Some(&turn_id),
             RuntimeEventKind::TurnCompleted,
         )?;
+        self.enqueue_memory_projection_after_turn_completed(&snapshot);
 
         Ok(ThreadOpResult::UserInput {
             turn_id,
@@ -537,11 +543,36 @@ impl ThreadSession {
         let goal_api = self.goal_runtime.as_ref().map(|runtime| {
             std::sync::Arc::new(crate::runtime::goal::GoalToolApi::new(runtime.clone()))
         });
+        let memory_api = self.memory_runtime.as_ref().map(|runtime| {
+            std::sync::Arc::new(crate::runtime::memory::MemoryToolApi::new(runtime.clone()))
+        });
         self.agent = (self.agent_factory)(config)?
             .with_subagent_control(self.subagent_control.clone())
             .with_goal_api(goal_api)
+            .with_memory_api(memory_api)
             .with_forge_review_store(self.forge_review_store.clone());
         Ok(())
+    }
+
+    fn enqueue_memory_projection_after_turn_completed(&self, snapshot: &ThreadSnapshot) {
+        if !self.base_config.memory_enabled
+            || !self.base_config.memory_projection_background_enabled
+            || matches!(snapshot.thread_source, ThreadSource::Subagent)
+        {
+            return;
+        }
+        let Some(memory_runtime) = self.memory_runtime.as_ref() else {
+            return;
+        };
+
+        memory_runtime.enqueue_projection(MemoryProjectionRequest {
+            workspace_root: snapshot.workspace_root.clone(),
+            // App-server loading is synchronous; None is intentional and lets
+            // the memory worker resolve project registration asynchronously.
+            project_id: self.project_id.clone(),
+            thread_id: snapshot.thread_id.clone(),
+            rollout_path: self.rollout_store.path().to_path_buf(),
+        });
     }
 
     fn record_turn_started(
@@ -674,9 +705,10 @@ impl ThreadSession {
             turn_mode,
         );
         let turn_context = prompt_context.turn_context.clone();
-        let context_messages = self.context_manager.apply_context_updates(prompt_context);
         let user_message = ConversationMessage::user_parts(input.to_vec());
         let prompt = user_message.content.clone();
+        self.ensure_frozen_memory_context(snapshot).await?;
+        let context_messages = self.context_manager.apply_context_updates(prompt_context);
         refresh_file_backed_contexts(
             &turn_config,
             &snapshot.workspace_root,
@@ -684,6 +716,8 @@ impl ThreadSession {
             &prompt,
             &mut self.context_manager,
         );
+        self.refresh_dynamic_memory_context(snapshot, &prompt)
+            .await?;
         if !matches!(turn_mode, TurnMode::Plan) {
             if let Some(goal_runtime) = self.goal_runtime.as_ref() {
                 if let Some(goal) = goal_runtime
@@ -746,6 +780,149 @@ impl ThreadSession {
         self.rollout_store.append_items_blocking(&rollout_items)?;
         self.publish_snapshot(snapshot)?;
         Ok(())
+    }
+
+    async fn ensure_frozen_memory_context(&mut self, snapshot: &ThreadSnapshot) -> Result<()> {
+        if self.frozen_memory_initialized {
+            return Ok(());
+        }
+        self.frozen_memory_initialized = true;
+        self.context_manager
+            .clear_stable_internal_context("00_frozen_memory");
+
+        if !self.base_config.memory_enabled || !self.base_config.memory_frozen_inject_enabled {
+            return Ok(());
+        }
+        let Some(memory_runtime) = self.memory_runtime.as_ref().cloned() else {
+            return Ok(());
+        };
+
+        let project_id = match self.resolve_memory_project_id(snapshot).await {
+            Ok(project_id) => project_id,
+            Err(error) => {
+                tracing::warn!(
+                    thread_id = snapshot.thread_id.as_str(),
+                    workspace_root = %snapshot.workspace_root.display(),
+                    error = ?error,
+                    "failed to resolve project memory for frozen context; continuing without memory"
+                );
+                return Ok(());
+            }
+        };
+        let hits = match memory_runtime
+            .db()
+            .frozen_memory_for_scope(
+                project_id.as_deref(),
+                Some(&snapshot.thread_id),
+                self.base_config.memory_frozen_context_max_chars,
+            )
+            .await
+        {
+            Ok(hits) => hits,
+            Err(error) => {
+                tracing::warn!(
+                    thread_id = snapshot.thread_id.as_str(),
+                    project_id = project_id.as_deref(),
+                    error = ?error,
+                    "failed to load frozen memory context; continuing without memory"
+                );
+                return Ok(());
+            }
+        };
+        let content =
+            format_frozen_memory_block(&hits, self.base_config.memory_frozen_context_max_chars);
+        if !content.is_empty() {
+            self.context_manager.upsert_stable_internal_context(
+                "00_frozen_memory",
+                ConversationMessage::injected_user_context("00_frozen_memory", content),
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn refresh_dynamic_memory_context(
+        &mut self,
+        snapshot: &ThreadSnapshot,
+        prompt: &str,
+    ) -> Result<()> {
+        if !self.base_config.memory_enabled
+            || !self.base_config.memory_auto_inject_enabled
+            || !should_auto_recall(prompt)
+        {
+            self.context_manager
+                .clear_ephemeral_internal_context("00_memory_recall");
+            return Ok(());
+        }
+        let Some(memory_runtime) = self.memory_runtime.as_ref().cloned() else {
+            self.context_manager
+                .clear_ephemeral_internal_context("00_memory_recall");
+            return Ok(());
+        };
+
+        self.context_manager
+            .clear_ephemeral_internal_context("00_memory_recall");
+        let project_id = match self.resolve_memory_project_id(snapshot).await {
+            Ok(project_id) => project_id,
+            Err(error) => {
+                tracing::warn!(
+                    thread_id = snapshot.thread_id.as_str(),
+                    workspace_root = %snapshot.workspace_root.display(),
+                    error = ?error,
+                    "failed to resolve project memory for auto recall; continuing without memory"
+                );
+                return Ok(());
+            }
+        };
+        let hits = match memory_runtime
+            .db()
+            .search_memory(MemorySearchQuery {
+                scope: MemoryScope::Project,
+                project_id,
+                thread_id: Some(snapshot.thread_id.clone()),
+                query: prompt.to_string(),
+                mode: MemoryRecallMode::AutoInject,
+                limit: self.base_config.memory_auto_max_hits,
+                include_entries: true,
+                include_observations: true,
+            })
+            .await
+        {
+            Ok(hits) => hits,
+            Err(error) => {
+                tracing::warn!(
+                    thread_id = snapshot.thread_id.as_str(),
+                    error = ?error,
+                    "failed to load auto memory context; continuing without memory"
+                );
+                return Ok(());
+            }
+        };
+        let content =
+            format_auto_memory_context(&hits, self.base_config.memory_auto_context_max_chars);
+        if !content.is_empty() {
+            self.context_manager.upsert_ephemeral_internal_context(
+                "00_memory_recall",
+                ConversationMessage::injected_user_context("00_memory_recall", content),
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn resolve_memory_project_id(
+        &mut self,
+        snapshot: &ThreadSnapshot,
+    ) -> Result<Option<String>> {
+        let Some(memory_runtime) = self.memory_runtime.as_ref().cloned() else {
+            self.project_id = None;
+            return Ok(None);
+        };
+        let project_id = memory_runtime
+            .resolve_project_id_cached(&snapshot.workspace_root)
+            .await?;
+        self.project_id = project_id.clone();
+        Ok(project_id)
     }
 
     fn record_turn_interrupted(
@@ -2174,12 +2351,14 @@ mod tests {
     use crate::registry::{ToolContext, ToolRegistry};
     use crate::resolved::{ResolvedCredential, ResolvedModelConfig};
     use crate::runtime::agent_profile::AgentType;
+    use crate::runtime::memory::MemoryRuntime;
     use crate::runtime::thread_runtime::{
         AgentFactory, ThreadOpResult, ThreadRuntimeStatus, ThreadTurnContext,
     };
     use crate::runtime::thread_session::{RuntimeInterrupt, ThreadSession, ThreadSessionOptions};
     use crate::runtime::turn_mode::TurnMode;
     use crate::session::{ThreadLineage, ThreadSnapshot};
+    use crate::state::index_db::IndexDb;
     use crate::state::rollout::{RolloutItem, RolloutStore};
     use crate::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
     use crate::types::{
@@ -2267,6 +2446,64 @@ mod tests {
     fn read_rollout_items(config: &AgentConfig, thread_id: &ThreadId) -> Vec<RolloutItem> {
         let rollout_paths = crate::state::rollout::rollout_paths(&config.workspace_root, thread_id);
         RolloutStore::read_items_blocking(&rollout_paths.rollout_path).expect("read rollout items")
+    }
+
+    #[tokio::test]
+    async fn memory_context_refresh_is_best_effort_when_project_resolution_fails() {
+        let dir = tempdir().unwrap();
+        let db_dir = tempdir().unwrap();
+        let thread_id = ThreadId::new("thread_memory_context_best_effort");
+        let config = AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        };
+        write_rollout_meta(&config, &thread_id);
+        let memory_runtime = MemoryRuntime::new(
+            IndexDb::open(db_dir.path().join("index.sqlite"))
+                .await
+                .unwrap(),
+        );
+        let agent_factory: AgentFactory = Arc::new(|config| {
+            Ok(Agent::new(
+                config,
+                Box::new(MockLlm::new(vec![])),
+                ToolRegistry::new(),
+            ))
+        });
+        let mut session = ThreadSession::new(
+            ThreadSessionOptions::new(thread_id.clone(), config.clone(), agent_factory)
+                .with_memory_runtime(Some(memory_runtime)),
+        )
+        .expect("create thread session");
+        let missing_workspace = dir.path().join("missing-workspace");
+        let snapshot =
+            ThreadSnapshot::new_thread(thread_id, missing_workspace.clone(), missing_workspace);
+        session.context_manager.upsert_ephemeral_internal_context(
+            "00_memory_recall",
+            ConversationMessage::injected_user_context(
+                "00_memory_recall",
+                "stale memory context must be cleared on recall failure",
+            ),
+        );
+
+        session
+            .ensure_frozen_memory_context(&snapshot)
+            .await
+            .expect("frozen memory injection is best-effort");
+        session
+            .refresh_dynamic_memory_context(&snapshot, "remember durable routing policy")
+            .await
+            .expect("dynamic memory injection is best-effort");
+
+        let prompt = session
+            .context_manager
+            .for_prompt(&config.model.capabilities.input_modalities);
+        assert!(!prompt.iter().any(|message| {
+            message
+                .content
+                .contains("stale memory context must be cleared on recall failure")
+        }));
     }
 
     #[test]

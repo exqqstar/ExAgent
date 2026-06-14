@@ -46,6 +46,7 @@ async fn registry_execute_denies_tool_blocked_by_agent_policy() {
         agent_tool_policy: AgentToolPolicy::read_only_basic_collaboration(),
         inbox: None,
         goal_api: None,
+        memory_api: None,
     };
 
     let result = registry

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::session::{ThreadLineage, ThreadSnapshot, ThreadSource, TurnContextItem};
@@ -312,6 +312,35 @@ impl RolloutStore {
             items.push(item);
         }
         Ok(items)
+    }
+
+    pub async fn read_items_from_index(
+        path: &std::path::Path,
+        start_index: usize,
+    ) -> std::io::Result<(Vec<RolloutItem>, usize)> {
+        let file = match tokio::fs::File::open(path).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Vec::new(), 0));
+            }
+            Err(error) => return Err(error),
+        };
+
+        let reader = BufReader::new(file);
+        let mut lines = reader.lines();
+        let mut items = Vec::new();
+        let mut item_index = 0;
+        while let Some(line) = lines.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if item_index >= start_index {
+                let item = serde_json::from_str(&line).map_err(std::io::Error::other)?;
+                items.push(item);
+            }
+            item_index += 1;
+        }
+        Ok((items, item_index))
     }
 
     pub fn read_items_blocking(path: &std::path::Path) -> std::io::Result<Vec<RolloutItem>> {

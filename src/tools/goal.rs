@@ -399,6 +399,7 @@ mod tests {
             agent_tool_policy: AgentToolPolicy::all(),
             inbox: None,
             goal_api: Some(api.clone()),
+            memory_api: None,
         };
         (dir, api, ctx, thread_id, db)
     }

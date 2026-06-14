@@ -18,7 +18,8 @@ use crate::app_server::protocol::{
 };
 use crate::app_server::request_processors::{
     agent_processor, approvals_processor, checkpoint_processor, compaction_processor,
-    events_processor, fork_processor, goal_processor, thread_processor, turn_processor,
+    events_processor, fork_processor, goal_processor, memory_processor, thread_processor,
+    turn_processor,
 };
 use crate::app_server::services::AppServerServices;
 use crate::config::AgentConfig;
@@ -219,6 +220,13 @@ impl ThreadManager {
                 BoundaryCapability::ApprovalDecision,
                 BoundaryCapability::SubmitUserInput,
                 BoundaryCapability::EventsReplay,
+                BoundaryCapability::MemorySearch,
+                BoundaryCapability::MemorySave,
+                BoundaryCapability::MemoryUpdate,
+                BoundaryCapability::MemoryForget,
+                BoundaryCapability::MemoryAudit,
+                BoundaryCapability::MemoryListCandidates,
+                BoundaryCapability::MemoryPromote,
             ],
             supported_streams: vec![BoundaryCapability::EventsSubscribe],
             supported_permission_profiles: crate::config::PermissionProfile::supported_profiles(),
@@ -386,6 +394,41 @@ impl ThreadManager {
             BoundaryOp::EventsReplay(params) => self
                 .events_replay(params)
                 .map(BoundaryOpResponse::EventsReplayed),
+            BoundaryOp::MemorySearch(params) => {
+                memory_processor::memory_search(self.services.as_ref(), params)
+                    .await
+                    .map(BoundaryOpResponse::MemorySearched)
+            }
+            BoundaryOp::MemorySave(params) => {
+                memory_processor::memory_save(self.services.as_ref(), params)
+                    .await
+                    .map(BoundaryOpResponse::MemorySaved)
+            }
+            BoundaryOp::MemoryUpdate(params) => {
+                memory_processor::memory_update(self.services.as_ref(), params)
+                    .await
+                    .map(BoundaryOpResponse::MemoryUpdated)
+            }
+            BoundaryOp::MemoryForget(params) => {
+                memory_processor::memory_forget(self.services.as_ref(), params)
+                    .await
+                    .map(BoundaryOpResponse::MemoryForgotten)
+            }
+            BoundaryOp::MemoryAudit(params) => {
+                memory_processor::memory_audit(self.services.as_ref(), params)
+                    .await
+                    .map(BoundaryOpResponse::MemoryAudit)
+            }
+            BoundaryOp::MemoryListCandidates(params) => {
+                memory_processor::memory_list_candidates(self.services.as_ref(), params)
+                    .await
+                    .map(BoundaryOpResponse::MemoryCandidatesListed)
+            }
+            BoundaryOp::MemoryPromote(params) => {
+                memory_processor::memory_promote(self.services.as_ref(), params)
+                    .await
+                    .map(BoundaryOpResponse::MemoryPromoted)
+            }
         }
     }
 

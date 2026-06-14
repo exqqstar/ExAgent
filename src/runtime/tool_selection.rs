@@ -9,6 +9,7 @@ use crate::registry::ToolRegistry;
 use crate::runtime::agent_profile::AgentToolPolicy;
 use crate::runtime::forge::review::ReviewStore;
 use crate::runtime::goal::GoalToolApi;
+use crate::runtime::memory::MemoryToolApi;
 use crate::runtime::subagent::AgentControl;
 use crate::runtime::tool_resolver::ToolResolver;
 use crate::tools::close_agent::CloseAgentTool;
@@ -16,6 +17,11 @@ use crate::tools::defer_question::DeferQuestionTool;
 use crate::tools::followup_task::FollowupTaskTool;
 use crate::tools::goal::{CreateGoalTool, GetGoalTool, UpdateGoalTool};
 use crate::tools::list_agents::ListAgentsTool;
+use crate::tools::memory_forget::MemoryForgetTool;
+use crate::tools::memory_list::MemoryListTool;
+use crate::tools::memory_recall::MemoryRecallTool;
+use crate::tools::memory_save::MemorySaveTool;
+use crate::tools::memory_update::MemoryUpdateTool;
 use crate::tools::send_message::SendMessageTool;
 use crate::tools::spawn_agent::SpawnAgentTool;
 use crate::tools::submit_review::SubmitReviewTool;
@@ -51,6 +57,7 @@ pub(crate) struct ToolSelectionInput<'a> {
     pub(crate) mcp_runtime: Arc<McpRuntimeManager>,
     pub(crate) subagent_control: Option<Arc<AgentControl>>,
     pub(crate) goal_api: Option<Arc<GoalToolApi>>,
+    pub(crate) memory_api: Option<Arc<MemoryToolApi>>,
     pub(crate) forge_review_store: Option<ReviewStore>,
     pub(crate) active_goal_mode: ThreadGoalMode,
     pub(crate) agent_tool_policy: AgentToolPolicy,
@@ -97,6 +104,14 @@ async fn assemble_tool_registry(input: &ToolSelectionInput<'_>) -> Result<ToolRe
             input.config.forge_review_gate_enabled,
         ));
         registry.register_handler(UpdateGoalTool::new(goal_api));
+    }
+
+    if input.config.memory_enabled && input.memory_api.is_some() {
+        registry.register_handler(MemoryRecallTool);
+        registry.register_handler(MemorySaveTool);
+        registry.register_handler(MemoryUpdateTool);
+        registry.register_handler(MemoryForgetTool);
+        registry.register_handler(MemoryListTool);
     }
 
     if input.config.forge_review_gate_enabled {
@@ -385,6 +400,7 @@ mod tests {
             mcp_runtime,
             subagent_control: None,
             goal_api: None,
+            memory_api: None,
             forge_review_store: None,
             active_goal_mode: ThreadGoalMode::Standard,
             agent_tool_policy: AgentToolPolicy::all(),
@@ -417,6 +433,7 @@ mod tests {
             mcp_runtime: mcp_runtime.clone(),
             subagent_control: Some(subagent_control()),
             goal_api: None,
+            memory_api: None,
             forge_review_store: None,
             active_goal_mode: ThreadGoalMode::Standard,
             agent_tool_policy: AgentToolPolicy::all(),
@@ -449,6 +466,7 @@ mod tests {
             mcp_runtime,
             subagent_control: Some(subagent_control()),
             goal_api: None,
+            memory_api: None,
             forge_review_store: None,
             active_goal_mode: ThreadGoalMode::Standard,
             agent_tool_policy: AgentToolPolicy::read_only_basic_collaboration(),
@@ -495,6 +513,7 @@ mod tests {
             mcp_runtime: mcp_runtime.clone(),
             subagent_control: None,
             goal_api: None,
+            memory_api: None,
             forge_review_store: Some(review_store.clone()),
             active_goal_mode: ThreadGoalMode::Reviewed,
             agent_tool_policy: profile_for_type(Some(AgentType::Reviewer)).tool_policy,
@@ -511,6 +530,7 @@ mod tests {
             mcp_runtime: mcp_runtime.clone(),
             subagent_control: None,
             goal_api: None,
+            memory_api: None,
             forge_review_store: Some(review_store.clone()),
             active_goal_mode: ThreadGoalMode::Standard,
             agent_tool_policy: profile_for_type(Some(AgentType::Worker)).tool_policy,
@@ -527,6 +547,7 @@ mod tests {
             mcp_runtime,
             subagent_control: None,
             goal_api: None,
+            memory_api: None,
             forge_review_store: Some(review_store),
             active_goal_mode: ThreadGoalMode::Reviewed,
             agent_tool_policy: profile_for_type(Some(AgentType::Worker)).tool_policy,
@@ -558,6 +579,7 @@ mod tests {
             mcp_runtime: mcp_runtime.clone(),
             subagent_control: None,
             goal_api: None,
+            memory_api: None,
             forge_review_store: Some(review_store.clone()),
             active_goal_mode: ThreadGoalMode::Reviewed,
             agent_tool_policy: profile_for_type(Some(AgentType::Reviewer)).tool_policy,
@@ -573,6 +595,7 @@ mod tests {
             mcp_runtime,
             subagent_control: None,
             goal_api: None,
+            memory_api: None,
             forge_review_store: Some(review_store),
             active_goal_mode: ThreadGoalMode::Reviewed,
             agent_tool_policy: profile_for_type(Some(AgentType::Worker)).tool_policy,
@@ -581,6 +604,77 @@ mod tests {
         .expect("worker selection");
 
         assert!(!visible_tool_names(&worker).contains(&"defer_question"));
+    }
+
+    #[tokio::test]
+    async fn build_selection_registers_memory_tools_only_when_enabled_with_api() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::index_db::IndexDb::open(dir.path().join("index.sqlite"))
+            .await
+            .unwrap();
+        let memory_api = Arc::new(crate::runtime::memory::MemoryToolApi::new(
+            crate::runtime::memory::MemoryRuntime::new(db),
+        ));
+        let mut config = AgentConfig::default();
+        config.model.capabilities.supports_tools = true;
+        let mcp_runtime = Arc::new(McpRuntimeManager::new(
+            config.mcp_servers.clone(),
+            config.workspace_root.clone(),
+        ));
+
+        let without_api = build_tool_selection(ToolSelectionInput {
+            base_registry: registry(),
+            config: &config,
+            mcp_runtime: mcp_runtime.clone(),
+            subagent_control: None,
+            goal_api: None,
+            memory_api: None,
+            forge_review_store: None,
+            active_goal_mode: ThreadGoalMode::Standard,
+            agent_tool_policy: AgentToolPolicy::all(),
+        })
+        .await
+        .expect("selection without memory api");
+        assert!(!visible_tool_names(&without_api).contains(&"memory_save"));
+
+        let with_api = build_tool_selection(ToolSelectionInput {
+            base_registry: registry(),
+            config: &config,
+            mcp_runtime: mcp_runtime.clone(),
+            subagent_control: None,
+            goal_api: None,
+            memory_api: Some(memory_api.clone()),
+            forge_review_store: None,
+            active_goal_mode: ThreadGoalMode::Standard,
+            agent_tool_policy: AgentToolPolicy::all(),
+        })
+        .await
+        .expect("selection with memory api");
+        for tool_name in [
+            "memory_recall",
+            "memory_save",
+            "memory_update",
+            "memory_forget",
+            "memory_list",
+        ] {
+            assert!(visible_tool_names(&with_api).contains(&tool_name));
+        }
+
+        config.memory_enabled = false;
+        let disabled = build_tool_selection(ToolSelectionInput {
+            base_registry: registry(),
+            config: &config,
+            mcp_runtime,
+            subagent_control: None,
+            goal_api: None,
+            memory_api: Some(memory_api),
+            forge_review_store: None,
+            active_goal_mode: ThreadGoalMode::Standard,
+            agent_tool_policy: AgentToolPolicy::all(),
+        })
+        .await
+        .expect("selection with memory disabled");
+        assert!(!visible_tool_names(&disabled).contains(&"memory_save"));
     }
 
     #[tokio::test]
@@ -599,6 +693,7 @@ mod tests {
             mcp_runtime: mcp_runtime.clone(),
             subagent_control: None,
             goal_api: None,
+            memory_api: None,
             forge_review_store: None,
             active_goal_mode: ThreadGoalMode::Standard,
             agent_tool_policy: AgentToolPolicy::all(),
@@ -617,6 +712,7 @@ mod tests {
             mcp_runtime: mcp_runtime.clone(),
             subagent_control: None,
             goal_api: None,
+            memory_api: None,
             forge_review_store: None,
             active_goal_mode: ThreadGoalMode::Standard,
             agent_tool_policy: AgentToolPolicy::read_only_basic_collaboration(),
@@ -635,6 +731,7 @@ mod tests {
             mcp_runtime,
             subagent_control: None,
             goal_api: None,
+            memory_api: None,
             forge_review_store: None,
             active_goal_mode: ThreadGoalMode::Standard,
             agent_tool_policy: AgentToolPolicy::all(),

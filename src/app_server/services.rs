@@ -19,6 +19,7 @@ use crate::registry::ToolRegistry;
 #[cfg(test)]
 use crate::resolver::EnvModelResolver;
 use crate::resolver::ModelResolver;
+use crate::runtime::memory::MemoryRuntime;
 use crate::runtime::subagent::{
     message_preview, AgentControl, CloseAgentResponse, CloseAgentsRequest,
     DeliverInterAgentMessageRequest, SendMessageResponse, SpawnAgentResponse,
@@ -44,6 +45,7 @@ pub(in crate::app_server) struct AppServerServices {
     pub(in crate::app_server) runtime_loader: RuntimeLoader,
     pub(in crate::app_server) subagent_lifecycle: Arc<dyn SubagentLifecycle>,
     pub(in crate::app_server) goal_store: Option<crate::index_db::IndexDb>,
+    pub(in crate::app_server) memory_runtime: Option<Arc<MemoryRuntime>>,
     #[cfg(test)]
     pub(in crate::app_server) mcp_client_factory: Option<Arc<dyn McpClientFactory>>,
 }
@@ -80,6 +82,7 @@ impl AppServerServices {
             policy.clone(),
             model_resolver.clone(),
             None,
+            None,
         );
         Self {
             base_config,
@@ -91,6 +94,7 @@ impl AppServerServices {
             runtime_loader,
             subagent_lifecycle,
             goal_store: None,
+            memory_runtime: None,
             #[cfg(test)]
             mcp_client_factory: None,
         }
@@ -125,6 +129,7 @@ impl AppServerServices {
             policy.clone(),
             model_resolver.clone(),
             None,
+            None,
         );
         Self {
             base_config,
@@ -136,6 +141,7 @@ impl AppServerServices {
             runtime_loader,
             subagent_lifecycle,
             goal_store: None,
+            memory_runtime: None,
             #[cfg(test)]
             mcp_client_factory: None,
         }
@@ -171,6 +177,7 @@ impl AppServerServices {
             policy.clone(),
             model_resolver.clone(),
             None,
+            None,
         );
         Self {
             base_config,
@@ -182,6 +189,7 @@ impl AppServerServices {
             runtime_loader,
             subagent_lifecycle,
             goal_store: None,
+            memory_runtime: None,
             mcp_client_factory: Some(mcp_client_factory),
         }
     }
@@ -201,7 +209,9 @@ impl AppServerServices {
         mut self,
         goal_store: crate::index_db::IndexDb,
     ) -> Self {
+        let memory_runtime = MemoryRuntime::new(goal_store.clone());
         self.goal_store = Some(goal_store);
+        self.memory_runtime = Some(memory_runtime);
         let agent_factory = self.runtime_agent_factory();
         self.subagent_lifecycle = new_subagent_lifecycle(
             self.runtime_loader.clone(),
@@ -209,6 +219,7 @@ impl AppServerServices {
             self.policy.clone(),
             self.model_resolver.clone(),
             self.goal_store.clone(),
+            self.memory_runtime.clone(),
         );
         self
     }
@@ -220,6 +231,7 @@ fn new_subagent_lifecycle(
     policy: Arc<PolicyManager>,
     model_resolver: Arc<dyn ModelResolver>,
     goal_store: Option<crate::index_db::IndexDb>,
+    memory_runtime: Option<Arc<MemoryRuntime>>,
 ) -> Arc<dyn SubagentLifecycle> {
     let lifecycle: Arc<AppServerSubagentLifecycle> =
         Arc::<AppServerSubagentLifecycle>::new_cyclic(move |self_ref| {
@@ -230,6 +242,7 @@ fn new_subagent_lifecycle(
                 policy: policy.clone(),
                 model_resolver: model_resolver.clone(),
                 goal_store: goal_store.clone(),
+                memory_runtime: memory_runtime.clone(),
                 self_lifecycle,
             }
         });
@@ -286,6 +299,10 @@ impl RuntimeSpawner for AppServerServices {
         self.goal_store.clone()
     }
 
+    fn memory_runtime(&self) -> Option<Arc<MemoryRuntime>> {
+        self.memory_runtime.clone()
+    }
+
     fn forge_review_store(&self) -> Option<crate::runtime::forge::review::ReviewStore> {
         self.goal_store
             .clone()
@@ -311,6 +328,7 @@ struct AppServerSubagentLifecycle {
     policy: Arc<PolicyManager>,
     model_resolver: Arc<dyn ModelResolver>,
     goal_store: Option<crate::index_db::IndexDb>,
+    memory_runtime: Option<Arc<MemoryRuntime>>,
     self_lifecycle: Weak<dyn SubagentLifecycle>,
 }
 
@@ -329,6 +347,10 @@ impl RuntimeSpawner for AppServerSubagentLifecycle {
 
     fn goal_store(&self) -> Option<crate::index_db::IndexDb> {
         self.goal_store.clone()
+    }
+
+    fn memory_runtime(&self) -> Option<Arc<MemoryRuntime>> {
+        self.memory_runtime.clone()
     }
 
     fn forge_review_store(&self) -> Option<crate::runtime::forge::review::ReviewStore> {

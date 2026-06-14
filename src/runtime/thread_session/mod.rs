@@ -19,6 +19,7 @@ use crate::policy::PolicyManager;
 use crate::runtime::context::ContextManager;
 use crate::runtime::forge::review::ReviewStore;
 use crate::runtime::goal::{runtime::GoalRuntime, GoalToolApi};
+use crate::runtime::memory::{MemoryRuntime, MemoryToolApi};
 use crate::runtime::subagent::{
     parent_agent_path, terminal_completion_content, AgentControl, AgentTurnTerminalStatus,
     SendMessageRequest,
@@ -51,6 +52,8 @@ pub struct ThreadSessionOptions {
     live_event_buffer_cap: usize,
     subagent_control: Option<Arc<AgentControl>>,
     goal_runtime: Option<Arc<GoalRuntime>>,
+    memory_runtime: Option<Arc<MemoryRuntime>>,
+    project_id: Option<String>,
     forge_review_store: Option<ReviewStore>,
 }
 
@@ -68,6 +71,8 @@ impl ThreadSessionOptions {
             live_event_buffer_cap: DEFAULT_LIVE_EVENT_BUFFER_CAP,
             subagent_control: None,
             goal_runtime: None,
+            memory_runtime: None,
+            project_id: None,
             forge_review_store: None,
         }
     }
@@ -102,6 +107,14 @@ impl ThreadSessionOptions {
         self
     }
 
+    pub(crate) fn with_memory_runtime(
+        mut self,
+        memory_runtime: Option<Arc<MemoryRuntime>>,
+    ) -> Self {
+        self.memory_runtime = memory_runtime;
+        self
+    }
+
     pub(crate) fn with_forge_review_store(mut self, store: Option<ReviewStore>) -> Self {
         self.forge_review_store = store;
         self
@@ -123,6 +136,9 @@ pub struct ThreadSession {
     subagent_control: Option<Arc<AgentControl>>,
     next_turn_index_seed: u64,
     goal_runtime: Option<Arc<GoalRuntime>>,
+    memory_runtime: Option<Arc<MemoryRuntime>>,
+    project_id: Option<String>,
+    frozen_memory_initialized: bool,
     forge_review_store: Option<ReviewStore>,
 }
 
@@ -184,6 +200,8 @@ impl ThreadSession {
             live_event_buffer_cap,
             subagent_control,
             goal_runtime,
+            memory_runtime,
+            project_id,
             forge_review_store,
         } = options;
         let rollout_paths = rollout_paths(&config.workspace_root, &thread_id);
@@ -214,10 +232,14 @@ impl ThreadSession {
         let goal_api = goal_runtime
             .as_ref()
             .map(|runtime| Arc::new(GoalToolApi::new(runtime.clone())));
+        let memory_api = memory_runtime
+            .as_ref()
+            .map(|runtime| Arc::new(MemoryToolApi::new(runtime.clone())));
         let session_subagent_control = subagent_control.clone();
         let agent = agent_factory(runtime_config.clone())?
             .with_subagent_control(subagent_control)
             .with_goal_api(goal_api)
+            .with_memory_api(memory_api)
             .with_forge_review_store(forge_review_store.clone());
         let inbox = Arc::new(ThreadInbox::new(thread_id.clone()));
         let live_state = Arc::new(RwLock::new(ThreadSessionLiveState {
@@ -261,6 +283,9 @@ impl ThreadSession {
             subagent_control: session_subagent_control,
             next_turn_index_seed,
             goal_runtime,
+            memory_runtime,
+            project_id,
+            frozen_memory_initialized: false,
             forge_review_store,
         })
     }

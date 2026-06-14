@@ -137,6 +137,7 @@ mod tests {
             agent_tool_policy: crate::runtime::agent_profile::AgentToolPolicy::all(),
             inbox,
             goal_api: None,
+            memory_api: None,
         }
     }
 

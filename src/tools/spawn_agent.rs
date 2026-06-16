@@ -18,6 +18,32 @@ use crate::tools::{
 };
 use crate::types::{ToolResult, ToolStatus};
 
+/// Model-facing description for `spawn_agent`. The when-to-delegate gate lives
+/// here, in the tool itself, rather than in a per-turn injected message: this
+/// guidance is only visible when the tool is, and the default posture is to do
+/// the work yourself rather than delegate.
+const SPAWN_AGENT_DESCRIPTION: &str = "Spawn a subagent thread for a well-scoped task. \
+The subagent runs on its own thread and its final answer is returned to you when it finishes.
+
+Default to doing the work yourself. Spawning is the exception, not the reflex. Before spawning, \
+form a quick plan and decide what you should do locally right now; do that step yourself.
+
+When to spawn:
+- The user explicitly asked for subagents, delegation, or parallel work; or
+- A concrete, bounded sidecar task can run in parallel without blocking your immediate next step.
+
+When NOT to spawn (do it yourself instead):
+- The request is small, read-only, a lookup, or something you can already answer directly. \
+\"Describe the tools\", \"what can you do\", and similar questions are never reasons to spawn.
+- The task is the immediate blocking step on the critical path — doing it locally keeps things moving.
+- Needing more depth, thoroughness, research, or detail is not by itself a reason to spawn.
+
+Rules:
+- Do not duplicate work between yourself and a subagent, and do not re-spawn the same task.
+- Give each subagent a concrete, self-contained task it can finish and report back on. Spawned \
+worker agents execute and report; they cannot spawn their own subagents, so do not design tasks \
+that assume further delegation.";
+
 #[derive(Clone)]
 pub struct SpawnAgentTool {
     control: Arc<AgentControl>,
@@ -43,7 +69,7 @@ impl ToolHandler for SpawnAgentTool {
             .collect::<Vec<_>>();
         ToolSpec::function(
             "spawn_agent",
-            "Start a subagent thread for a focused task.",
+            SPAWN_AGENT_DESCRIPTION,
             json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -285,6 +311,16 @@ mod tests {
             !description.to_lowercase().contains("locked"),
             "schema guidance must not advertise unenforced locking"
         );
+    }
+
+    #[test]
+    fn spawn_agent_description_carries_when_to_delegate_gate() {
+        // The when-to-spawn guidance must live in the tool description (it used
+        // to be injected as a per-turn prompt message). See ADR-0041.
+        let description = SPAWN_AGENT_DESCRIPTION;
+        assert!(description.contains("Default to doing the work yourself"));
+        assert!(description.contains("When NOT to spawn"));
+        assert!(description.contains("cannot spawn their own subagents"));
     }
 
     #[test]

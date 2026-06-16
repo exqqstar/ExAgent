@@ -68,7 +68,27 @@ mod tests {
 
         assert_eq!(profile.id, AgentType::Worker);
         assert_eq!(profile.display_name, "Worker");
-        assert_eq!(profile.tool_policy, AgentToolPolicy::all());
+        assert_eq!(
+            profile.tool_policy,
+            AgentToolPolicy::full_workspace_basic_collaboration()
+        );
+    }
+
+    #[test]
+    fn worker_can_act_and_communicate_but_cannot_orchestrate() {
+        let worker = profile_for_type(Some(AgentType::Worker));
+
+        // Full workspace: a worker still executes real work itself.
+        assert!(worker.tool_policy.allows("write_file"));
+        assert!(worker.tool_policy.allows("run_command"));
+        // Communication with the rest of the tree stays available.
+        assert!(worker.tool_policy.allows("list_agents"));
+        assert!(worker.tool_policy.allows("send_message"));
+        assert!(worker.tool_policy.allows("wait_agent"));
+        // Orchestration is reserved for the root agent; workers cannot recurse.
+        assert!(!worker.tool_policy.allows("spawn_agent"));
+        assert!(!worker.tool_policy.allows("close_agent"));
+        assert!(!worker.tool_policy.allows("followup_task"));
     }
 
     #[test]

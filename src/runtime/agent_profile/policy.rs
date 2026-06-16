@@ -36,6 +36,19 @@ impl AgentToolPolicy {
         }
     }
 
+    /// Full workspace access (write/exec) but only basic collaboration: the
+    /// agent can communicate with the rest of the tree (`list_agents`,
+    /// `send_message`, `wait_agent`) but cannot orchestrate it (`spawn_agent`,
+    /// `close_agent`, `followup_task`). This is the spawned-worker policy:
+    /// orchestration stays with the root agent so subagents cannot recurse.
+    pub fn full_workspace_basic_collaboration() -> Self {
+        Self {
+            workspace: WorkspaceToolCapability::Full,
+            collaboration: CollaborationToolCapability::Basic,
+            agent_type: Some(AgentType::Worker),
+        }
+    }
+
     pub fn for_agent_type(mut self, agent_type: AgentType) -> Self {
         self.agent_type = Some(agent_type);
         self

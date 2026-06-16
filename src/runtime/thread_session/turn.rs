@@ -1354,7 +1354,6 @@ async fn run_session_turn(
         let prompt = prompt_for_sampling(
             context_manager,
             &turn_config.model.capabilities.input_modalities,
-            tool_specs,
         );
         let completion = match stream_assistant_turn(
             agent,
@@ -1389,7 +1388,6 @@ async fn run_session_turn(
                 let prompt = prompt_for_sampling(
                     context_manager,
                     &turn_config.model.capabilities.input_modalities,
-                    tool_specs,
                 );
                 stream_assistant_turn(
                     agent,
@@ -1495,60 +1493,12 @@ async fn run_session_turn(
 fn prompt_for_sampling(
     context_manager: &ContextManager,
     input_modalities: &[InputModality],
-    tool_specs: &[ToolSpec],
 ) -> Vec<ConversationMessage> {
-    let mut prompt = context_manager.for_prompt(input_modalities);
-    let Some(guidance) = subagent_tool_guidance_message(tool_specs) else {
-        return prompt;
-    };
-    let insert_index = prompt
-        .iter()
-        .rposition(|message| matches!(message.role, MessageRole::User) && !message.injected)
-        .unwrap_or(prompt.len());
-    prompt.insert(insert_index, guidance);
-    prompt
-}
-
-fn subagent_tool_guidance_message(tool_specs: &[ToolSpec]) -> Option<ConversationMessage> {
-    let has_tool = |name: &str| tool_specs.iter().any(|spec| spec.name == name);
-    let available = [
-        "spawn_agent",
-        "list_agents",
-        "send_message",
-        "wait_agent",
-        "followup_task",
-        "close_agent",
-    ]
-    .into_iter()
-    .filter(|name| has_tool(name))
-    .collect::<Vec<_>>();
-
-    if available.is_empty() {
-        return None;
-    }
-
-    let mut content = format!(
-        "Subagent collaboration tools are available in this turn: {}.",
-        available.join(", ")
-    );
-    if has_tool("spawn_agent") {
-        content.push_str(" Use spawn_agent to start a native subagent thread for a focused task.");
-    }
-    if has_tool("wait_agent") {
-        content.push_str(
-            " Use wait_agent when you need to wait for subagent mailbox activity or completion messages.",
-        );
-    }
-    if has_tool("send_message") {
-        content.push_str(
-            " Use send_message for direct inter-agent communication within the current agent tree.",
-        );
-    }
-    if has_tool("list_agents") {
-        content.push_str(" Use list_agents to inspect the current agent tree.");
-    }
-
-    Some(ConversationMessage::injected_system(content))
+    // Subagent collaboration guidance lives in the tool descriptions
+    // themselves (see `spawn_agent`), not in a per-turn injected message.
+    // Tool-level guidance is only visible when the tool is, so a worker that
+    // cannot spawn never sees spawn guidance, and the prompt stays cacheable.
+    context_manager.for_prompt(input_modalities)
 }
 
 async fn drain_inbox_into_turn_context(

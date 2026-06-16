@@ -108,15 +108,17 @@ Assign clear file/module ownership and verification expectations. Remind the\n\
 worker that other agents or the user may be editing the same workspace."
                     .to_string(),
             instructions:
-                "You are a worker agent. Execute the scoped task given by the parent.\n\n\
+                "You are a worker agent. Execute the scoped task given by the parent yourself.\n\n\
 Keep changes narrow, follow local patterns, and verify the behavior you\n\
-changed. Do not broaden scope without reporting the reason."
+changed. Do not broaden scope without reporting the reason. You cannot spawn\n\
+your own subagents; do the work directly and report back to the parent. You can\n\
+still message the parent or sibling agents if you need information."
                     .to_string(),
             response_guidance:
                 "Return changed files, verification run, result, and remaining caveats.".to_string(),
             default_fork_turns: ForkTurns::None,
             default_thinking_mode: None,
-            tool_policy: AgentToolPolicy::all(),
+            tool_policy: AgentToolPolicy::full_workspace_basic_collaboration(),
         },
     }
 }

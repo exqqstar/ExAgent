@@ -282,27 +282,23 @@ async fn desktop_facade_root_turn_exposes_subagent_tools() {
     assert!(names.contains(&"send_message".to_string()));
     assert!(names.contains(&"wait_agent".to_string()));
 
+    // Subagent collaboration guidance now lives in the spawn_agent tool
+    // description, not in a per-turn injected prompt message. Confirm the old
+    // per-turn guidance is gone while the collaboration tools stay visible.
     let prompts = observed_prompts.lock().unwrap();
     let prompt = prompts
         .first()
         .expect("observed prompt")
         .join("\n--- message ---\n");
-    assert!(prompt.contains("Subagent collaboration tools are available"));
-    assert!(prompt.contains("spawn_agent"));
-    assert!(prompt.contains("wait_agent"));
-    let guidance_index = prompts
-        .first()
-        .expect("observed prompt")
-        .iter()
-        .position(|message| message.contains("Subagent collaboration tools are available"))
-        .expect("guidance message");
-    let user_index = prompts
-        .first()
-        .expect("observed prompt")
-        .iter()
-        .position(|message| message.contains("record visible tools"))
-        .expect("user message");
-    assert!(guidance_index < user_index);
+    assert!(!prompt.contains("Subagent collaboration tools are available"));
+    assert!(
+        prompts
+            .first()
+            .expect("observed prompt")
+            .iter()
+            .any(|message| message.contains("record visible tools")),
+        "user prompt should be present",
+    );
 }
 
 #[tokio::test]
@@ -359,27 +355,23 @@ async fn desktop_facade_settings_constructor_exposes_subagent_tools() {
     assert!(names.contains(&"send_message".to_string()));
     assert!(names.contains(&"wait_agent".to_string()));
 
+    // Subagent collaboration guidance now lives in the spawn_agent tool
+    // description, not in a per-turn injected prompt message. Confirm the old
+    // per-turn guidance is gone while the collaboration tools stay visible.
     let prompts = observed_prompts.lock().unwrap();
     let prompt = prompts
         .first()
         .expect("observed prompt")
         .join("\n--- message ---\n");
-    assert!(prompt.contains("Subagent collaboration tools are available"));
-    assert!(prompt.contains("spawn_agent"));
-    assert!(prompt.contains("wait_agent"));
-    let guidance_index = prompts
-        .first()
-        .expect("observed prompt")
-        .iter()
-        .position(|message| message.contains("Subagent collaboration tools are available"))
-        .expect("guidance message");
-    let user_index = prompts
-        .first()
-        .expect("observed prompt")
-        .iter()
-        .position(|message| message.contains("record visible tools"))
-        .expect("user message");
-    assert!(guidance_index < user_index);
+    assert!(!prompt.contains("Subagent collaboration tools are available"));
+    assert!(
+        prompts
+            .first()
+            .expect("observed prompt")
+            .iter()
+            .any(|message| message.contains("record visible tools")),
+        "user prompt should be present",
+    );
 }
 
 #[tokio::test]

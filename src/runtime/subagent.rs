@@ -13,7 +13,10 @@ use crate::state::fork_history::ForkTurns;
 use crate::types::{ConversationMessage, ThreadId, TurnId};
 
 const ROOT_AGENT_PATH: &str = "/root";
-const MAX_SUBAGENT_DEPTH: u32 = 8;
+// Backstop only. By policy, only the root agent can spawn (worker subagents use
+// basic collaboration and have no spawn_agent tool), so realized depth is 1.
+// This cap is a defense-in-depth limit, not the primary control; see ADR-0041.
+const MAX_SUBAGENT_DEPTH: u32 = 2;
 const INTER_AGENT_COMMUNICATION_TYPE: &str = "inter_agent_communication";
 
 #[derive(Debug, Clone)]

@@ -27,7 +27,7 @@ globset = "0.4"
 htmd = "0.5"
 ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
-lru = "0.12"
+lru = "0.18"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rmcp = { version = "1.7.0", default-features = false, features = ["base64", "client", "schemars", "server", "transport-child-process"] }

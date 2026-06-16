@@ -28,8 +28,6 @@ struct MemoryUpdateArgs {
     files: Vec<String>,
     #[serde(default)]
     concepts: Vec<String>,
-    #[serde(default)]
-    source_observation_ids: Vec<String>,
     pinned: Option<bool>,
 }
 
@@ -65,7 +63,7 @@ impl ToolHandler for MemoryUpdateTool {
 
     async fn handle(&self, invocation: ToolInvocation, ctx: &ToolContext) -> ToolOutcome {
         let call = invocation.call;
-        let args: MemoryUpdateArgs = match serde_json::from_value(call.arguments) {
+        let args: MemoryUpdateArgs = match serde_json::from_value(call.arguments.clone()) {
             Ok(args) => args,
             Err(err) => return error(call.id, call.name, err.to_string()),
         };
@@ -88,7 +86,6 @@ impl ToolHandler for MemoryUpdateTool {
                     || args.content.is_some()
                     || !args.files.is_empty()
                     || !args.concepts.is_empty()
-                    || !args.source_observation_ids.is_empty()
                     || args.pinned.is_some()
                 {
                     return error(
@@ -157,7 +154,7 @@ impl ToolHandler for MemoryUpdateTool {
                     content,
                     files: args.files,
                     concepts: args.concepts,
-                    source_observation_ids: args.source_observation_ids,
+                    source_refs: crate::tools::memory_common::source_refs_for_tool_call(ctx, &call),
                     pinned: args.pinned.unwrap_or(false),
                 };
                 match api

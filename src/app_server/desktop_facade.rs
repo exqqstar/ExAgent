@@ -8,17 +8,17 @@ use crate::app_server::protocol::{
     ApprovalDecisionParams, ApprovalDecisionResponse, ApprovalsListParams, ApprovalsListResponse,
     BoundaryOp, BoundaryOpResponse, CheckpointRestoreParams, CheckpointRestoreResponse,
     EventsReplayParams, EventsReplayResponse, EventsSubscribeParams, MemoryAuditParams,
-    MemoryAuditResponse, MemoryForgetParams, MemoryForgetResponse, MemoryListCandidatesParams,
-    MemoryListCandidatesResponse, MemoryPromoteParams, MemoryPromoteResponse, MemorySaveParams,
-    MemorySaveResponse, MemorySearchParams, MemorySearchResponse, MemoryUpdateParams,
-    MemoryUpdateResponse, OpenQuestionResolveParams, OpenQuestionResolveResponse,
-    SubmitUserInputParams, SubmitUserInputResponse, ThreadCompactParams, ThreadCompactResponse,
-    ThreadForkParams, ThreadForkResponse, ThreadGoal, ThreadGoalClearParams,
-    ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalMode,
-    ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams,
-    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
-    ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse,
+    MemoryAuditResponse, MemoryForgetParams, MemoryForgetResponse, MemoryListArchivedParams,
+    MemoryListArchivedResponse, MemoryListCandidatesParams, MemoryListCandidatesResponse,
+    MemoryPromoteParams, MemoryPromoteResponse, MemorySaveParams, MemorySaveResponse,
+    MemorySearchParams, MemorySearchResponse, MemoryUpdateParams, MemoryUpdateResponse,
+    OpenQuestionResolveParams, OpenQuestionResolveResponse, SubmitUserInputParams,
+    SubmitUserInputResponse, ThreadCompactParams, ThreadCompactResponse, ThreadForkParams,
+    ThreadForkResponse, ThreadGoal, ThreadGoalClearParams, ThreadGoalClearResponse,
+    ThreadGoalGetParams, ThreadGoalGetResponse, ThreadGoalMode, ThreadGoalSetParams,
+    ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams, ThreadReadResponse,
+    ThreadResumeParams, ThreadResumeResponse, ThreadStartParams, ThreadStartResponse,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
 };
 use crate::app_server::AppServerService;
 use crate::events::RuntimeEvent;
@@ -470,7 +470,6 @@ impl DesktopFacade {
         project_id: &str,
         scope: Option<String>,
         query: &str,
-        include_observations: bool,
         limit: usize,
     ) -> Result<MemorySearchResponse> {
         let project = self.index.project_by_id(project_id).await?;
@@ -480,7 +479,6 @@ impl DesktopFacade {
                 workspace_root: Some(project.path.display().to_string()),
                 scope,
                 query: query.to_string(),
-                include_observations,
                 limit,
             }))
             .await?
@@ -574,6 +572,23 @@ impl DesktopFacade {
             _ => Err(anyhow!(
                 "memory list candidates returned unexpected response"
             )),
+        }
+    }
+
+    pub async fn memory_list_archived(
+        &self,
+        project_id: &str,
+        mut params: MemoryListArchivedParams,
+    ) -> Result<MemoryListArchivedResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        params.workspace_root = Some(project.path.display().to_string());
+        match self
+            .service
+            .submit_boundary_op(BoundaryOp::MemoryListArchived(params))
+            .await?
+        {
+            BoundaryOpResponse::MemoryArchivedListed(response) => Ok(response),
+            _ => Err(anyhow!("memory list archived returned unexpected response")),
         }
     }
 

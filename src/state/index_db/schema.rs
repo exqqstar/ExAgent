@@ -256,11 +256,12 @@ CREATE TABLE IF NOT EXISTS memory_entries (
   kind TEXT NOT NULL,
   title TEXT NOT NULL,
   content TEXT NOT NULL,
-  files_json TEXT NOT NULL,
-  code_refs_json TEXT NOT NULL,
-  concepts_json TEXT NOT NULL,
-  source_observation_ids_json TEXT NOT NULL,
-  confidence REAL NOT NULL,
+	  files_json TEXT NOT NULL,
+	  code_refs_json TEXT NOT NULL,
+	  concepts_json TEXT NOT NULL,
+	  source_observation_ids_json TEXT NOT NULL,
+	  source_refs_json TEXT NOT NULL DEFAULT '[]',
+	  confidence REAL NOT NULL,
   strength INTEGER NOT NULL,
   pinned INTEGER NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('candidate','active','superseded','rejected','archived','deleted')),
@@ -274,7 +275,14 @@ CREATE TABLE IF NOT EXISTS memory_entries (
   last_used_at_ms INTEGER,
   use_count INTEGER NOT NULL
 )
-        "#,
+	        "#,
+	    )
+	    .await?;
+    add_column_if_missing(
+        pool,
+        "memory_entries",
+        "source_refs_json",
+        "ALTER TABLE memory_entries ADD COLUMN source_refs_json TEXT NOT NULL DEFAULT '[]'",
     )
     .await?;
     pool.execute(

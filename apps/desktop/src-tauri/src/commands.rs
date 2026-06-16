@@ -5,16 +5,17 @@ use exagent::app_server::protocol::{
     ApprovalDecisionStatus, ApprovalsListParams, ApprovalsListResponse, CheckpointRestoreParams,
     CheckpointRestoreResponse, EventsReplayParams, EventsReplayResponse, EventsSubscribeParams,
     MemoryAuditParams, MemoryAuditResponse, MemoryForgetParams, MemoryForgetResponse,
-    MemoryListCandidatesParams, MemoryListCandidatesResponse, MemoryPromoteParams,
-    MemoryPromoteResponse, MemorySaveInputView, MemorySaveParams, MemorySaveResponse,
-    MemorySearchResponse, MemoryUpdateAction, MemoryUpdateParams, MemoryUpdateResponse,
-    OpenQuestionResolveParams, OpenQuestionResolveResponse, SubmitUserInputParams,
-    SubmitUserInputResponse, ThreadCompactParams, ThreadCompactResponse, ThreadForkParams,
-    ThreadForkResponse, ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams,
-    ThreadGoalGetResponse, ThreadGoalMode, ThreadGoalSetParams, ThreadGoalSetResponse,
-    ThreadGoalStatus, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadStartResponse, TurnContextOverrides, TurnInterruptParams,
-    TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    MemoryListArchivedParams, MemoryListArchivedResponse, MemoryListCandidatesParams,
+    MemoryListCandidatesResponse, MemoryPromoteParams, MemoryPromoteResponse, MemorySaveInputView,
+    MemorySaveParams, MemorySaveResponse, MemorySearchResponse, MemoryUpdateAction,
+    MemoryUpdateParams, MemoryUpdateResponse, OpenQuestionResolveParams,
+    OpenQuestionResolveResponse, SubmitUserInputParams, SubmitUserInputResponse,
+    ThreadCompactParams, ThreadCompactResponse, ThreadForkParams, ThreadForkResponse,
+    ThreadGoalClearParams, ThreadGoalClearResponse, ThreadGoalGetParams, ThreadGoalGetResponse,
+    ThreadGoalMode, ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartResponse,
+    TurnContextOverrides, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
+    TurnStartResponse,
 };
 use exagent::config::ThinkingMode;
 use exagent::events::{
@@ -1024,14 +1025,13 @@ pub async fn memory_search(
     project_id: String,
     scope: Option<String>,
     query: String,
-    include_observations: bool,
     limit: usize,
 ) -> CommandResult<MemorySearchResponse> {
     state
         .facade
         .read()
         .await
-        .memory_search(&project_id, scope, &query, include_observations, limit)
+        .memory_search(&project_id, scope, &query, limit)
         .await
         .map_err(error_string)
 }
@@ -1071,7 +1071,6 @@ pub async fn memory_update(
     content: Option<String>,
     files: Option<Vec<String>>,
     concepts: Option<Vec<String>>,
-    source_observation_ids: Option<Vec<String>>,
     pinned: Option<bool>,
 ) -> CommandResult<MemoryUpdateResponse> {
     state
@@ -1090,7 +1089,6 @@ pub async fn memory_update(
                 content,
                 files,
                 concepts,
-                source_observation_ids,
                 pinned,
             },
         )
@@ -1161,6 +1159,31 @@ pub async fn memory_list_candidates(
         .memory_list_candidates(
             &project_id,
             MemoryListCandidatesParams {
+                workspace_root: None,
+                scope,
+                query,
+                limit,
+            },
+        )
+        .await
+        .map_err(error_string)
+}
+
+#[tauri::command]
+pub async fn memory_list_archived(
+    state: State<'_, DesktopState>,
+    project_id: String,
+    scope: Option<String>,
+    query: Option<String>,
+    limit: Option<usize>,
+) -> CommandResult<MemoryListArchivedResponse> {
+    state
+        .facade
+        .read()
+        .await
+        .memory_list_archived(
+            &project_id,
+            MemoryListArchivedParams {
                 workspace_root: None,
                 scope,
                 query,

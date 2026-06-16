@@ -18,7 +18,6 @@ use crate::runtime::goal::runtime::{
     GoalRuntime, GoalRuntimeEffect, GoalRuntimeEvent, GoalTurnTrigger,
 };
 use crate::runtime::memory::context::{format_auto_memory_context, format_frozen_memory_block};
-use crate::runtime::memory::MemoryProjectionRequest;
 use crate::runtime::project_docs::{load_project_docs, ProjectDocConfig};
 use crate::runtime::skills::{
     load_skill_body, load_skills, render_available_skills, resolve_explicit_skill_mentions,
@@ -29,7 +28,7 @@ use crate::runtime::thread_runtime::{
 };
 use crate::runtime::tool_orchestrator::ToolExecutionOutcome;
 use crate::runtime::turn_mode::TurnMode;
-use crate::session::{ApprovalId, ApprovalStatus, CompactionSummary, ThreadSnapshot, ThreadSource};
+use crate::session::{ApprovalId, ApprovalStatus, CompactionSummary, ThreadSnapshot};
 use crate::state::memory::query::should_auto_recall;
 use crate::state::memory::{MemoryRecallMode, MemoryScope, MemorySearchQuery};
 use crate::state::rollout::{CompactedItem, RolloutItem};
@@ -295,7 +294,6 @@ impl ThreadSession {
             Some(&turn_id),
             RuntimeEventKind::TurnCompleted,
         )?;
-        self.enqueue_memory_projection_after_turn_completed(&snapshot);
         Ok(ThreadOpResult::UserInput {
             turn_id,
             final_turn,
@@ -520,7 +518,6 @@ impl ThreadSession {
             Some(&turn_id),
             RuntimeEventKind::TurnCompleted,
         )?;
-        self.enqueue_memory_projection_after_turn_completed(&snapshot);
 
         Ok(ThreadOpResult::UserInput {
             turn_id,
@@ -552,27 +549,6 @@ impl ThreadSession {
             .with_memory_api(memory_api)
             .with_forge_review_store(self.forge_review_store.clone());
         Ok(())
-    }
-
-    fn enqueue_memory_projection_after_turn_completed(&self, snapshot: &ThreadSnapshot) {
-        if !self.base_config.memory_enabled
-            || !self.base_config.memory_projection_background_enabled
-            || matches!(snapshot.thread_source, ThreadSource::Subagent)
-        {
-            return;
-        }
-        let Some(memory_runtime) = self.memory_runtime.as_ref() else {
-            return;
-        };
-
-        memory_runtime.enqueue_projection(MemoryProjectionRequest {
-            workspace_root: snapshot.workspace_root.clone(),
-            // App-server loading is synchronous; None is intentional and lets
-            // the memory worker resolve project registration asynchronously.
-            project_id: self.project_id.clone(),
-            thread_id: snapshot.thread_id.clone(),
-            rollout_path: self.rollout_store.path().to_path_buf(),
-        });
     }
 
     fn record_turn_started(
@@ -884,7 +860,6 @@ impl ThreadSession {
                 mode: MemoryRecallMode::AutoInject,
                 limit: self.base_config.memory_auto_max_hits,
                 include_entries: true,
-                include_observations: true,
             })
             .await
         {

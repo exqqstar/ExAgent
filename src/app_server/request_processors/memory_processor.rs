@@ -6,10 +6,11 @@ use sqlx::Row;
 use crate::app_server::override_policy::OverridePolicy;
 use crate::app_server::protocol::{
     MemoryAuditEventView, MemoryAuditParams, MemoryAuditResponse, MemoryEntryView,
-    MemoryForgetParams, MemoryForgetResponse, MemoryHitView, MemoryListCandidatesParams,
-    MemoryListCandidatesResponse, MemoryPromoteParams, MemoryPromoteResponse, MemorySaveInputView,
-    MemorySaveParams, MemorySaveResponse, MemorySearchParams, MemorySearchResponse,
-    MemoryUpdateAction, MemoryUpdateParams, MemoryUpdateResponse,
+    MemoryForgetParams, MemoryForgetResponse, MemoryHitView, MemoryListArchivedParams,
+    MemoryListArchivedResponse, MemoryListCandidatesParams, MemoryListCandidatesResponse,
+    MemoryPromoteParams, MemoryPromoteResponse, MemorySaveInputView, MemorySaveParams,
+    MemorySaveResponse, MemorySearchParams, MemorySearchResponse, MemoryUpdateAction,
+    MemoryUpdateParams, MemoryUpdateResponse,
 };
 use crate::app_server::services::AppServerServices;
 use crate::state::memory::{
@@ -40,7 +41,6 @@ pub(in crate::app_server) async fn memory_search(
         mode: MemoryRecallMode::DesktopInspect,
         limit: clamp_limit(params.limit),
         include_entries: true,
-        include_observations: params.include_observations,
     };
     let hits = if query.query.trim().is_empty() {
         context.db.inspect_memory_for_scope(&query).await?
@@ -136,6 +136,62 @@ pub(in crate::app_server) async fn memory_update(
                     .set_memory_entry_pinned_with_scope(
                         &params.entry_id,
                         false,
+                        DESKTOP_MEMORY_ACTOR,
+                        context.project_id.as_deref(),
+                        None,
+                    )
+                    .await?
+            }
+        }
+        MemoryUpdateAction::Archive => {
+            reject_edit_fields_for_state_action(&params)?;
+            ensure_entry_has_status_in_scope(
+                context.db,
+                &params.entry_id,
+                context.scope,
+                context.project_id.as_deref(),
+                None,
+                "active",
+            )
+            .await?;
+            if context.scope == MemoryScope::Global {
+                context
+                    .db
+                    .archive_memory_entry(&params.entry_id, DESKTOP_MEMORY_ACTOR)
+                    .await?
+            } else {
+                context
+                    .db
+                    .archive_memory_entry_with_scope(
+                        &params.entry_id,
+                        DESKTOP_MEMORY_ACTOR,
+                        context.project_id.as_deref(),
+                        None,
+                    )
+                    .await?
+            }
+        }
+        MemoryUpdateAction::Unarchive => {
+            reject_edit_fields_for_state_action(&params)?;
+            ensure_entry_has_status_in_scope(
+                context.db,
+                &params.entry_id,
+                context.scope,
+                context.project_id.as_deref(),
+                None,
+                "archived",
+            )
+            .await?;
+            if context.scope == MemoryScope::Global {
+                context
+                    .db
+                    .unarchive_memory_entry(&params.entry_id, DESKTOP_MEMORY_ACTOR)
+                    .await?
+            } else {
+                context
+                    .db
+                    .unarchive_memory_entry_with_scope(
+                        &params.entry_id,
                         DESKTOP_MEMORY_ACTOR,
                         context.project_id.as_deref(),
                         None,
@@ -328,12 +384,34 @@ pub(in crate::app_server) async fn memory_list_candidates(
             mode: MemoryRecallMode::DesktopInspect,
             limit: clamp_limit(params.limit.unwrap_or(DEFAULT_MEMORY_LIMIT)),
             include_entries: true,
-            include_observations: false,
         })
         .await?;
 
     Ok(MemoryListCandidatesResponse {
         candidates: candidates.into_iter().map(memory_entry_view).collect(),
+    })
+}
+
+pub(in crate::app_server) async fn memory_list_archived(
+    services: &AppServerServices,
+    params: MemoryListArchivedParams,
+) -> Result<MemoryListArchivedResponse> {
+    let context = memory_context(services, params.workspace_root, params.scope).await?;
+    let archived = context
+        .db
+        .list_archived_memory_entries(&MemorySearchQuery {
+            scope: context.scope,
+            project_id: context.project_id,
+            thread_id: None,
+            query: params.query.unwrap_or_default(),
+            mode: MemoryRecallMode::DesktopInspect,
+            limit: clamp_limit(params.limit.unwrap_or(DEFAULT_MEMORY_LIMIT)),
+            include_entries: true,
+        })
+        .await?;
+
+    Ok(MemoryListArchivedResponse {
+        archived: archived.into_iter().map(memory_entry_view).collect(),
     })
 }
 
@@ -406,7 +484,7 @@ fn memory_save_input(input: MemorySaveInputView, scope: MemoryScope) -> Result<M
         content: input.content,
         files: input.files,
         concepts: input.concepts,
-        source_observation_ids: input.source_observation_ids,
+        source_refs: vec![],
         pinned: input.pinned,
     })
 }
@@ -430,7 +508,7 @@ fn memory_update_input(params: &MemoryUpdateParams, scope: MemoryScope) -> Resul
             .context("memory_update supersede/edit requires content")?,
         files: params.files.clone().unwrap_or_default(),
         concepts: params.concepts.clone().unwrap_or_default(),
-        source_observation_ids: params.source_observation_ids.clone().unwrap_or_default(),
+        source_refs: vec![],
         pinned: params.pinned.unwrap_or(false),
     })
 }
@@ -441,7 +519,6 @@ fn reject_edit_fields_for_state_action(params: &MemoryUpdateParams) -> Result<()
         || params.content.is_some()
         || params.files.is_some()
         || params.concepts.is_some()
-        || params.source_observation_ids.is_some()
         || params.pinned.is_some()
     {
         bail!("memory_update state action does not accept edit fields");
@@ -567,7 +644,6 @@ fn memory_hit_view(hit: MemorySearchHit) -> MemoryHitView {
         body: hit.body,
         files: hit.files,
         concepts: hit.concepts,
-        source_observation_ids: hit.source_observation_ids,
         confidence: hit.confidence,
         stale: hit.stale,
         quarantined: hit.quarantined,
@@ -589,7 +665,6 @@ fn memory_entry_view(entry: MemoryEntryRecord) -> MemoryEntryView {
         body: entry.content,
         files: entry.files,
         concepts: entry.concepts,
-        source_observation_ids: entry.source_observation_ids,
         confidence: entry.confidence,
         pinned: entry.pinned,
         status: entry.status.as_str().to_string(),

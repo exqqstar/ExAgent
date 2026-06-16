@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::types::{ThreadId, TurnId};
+use crate::types::{EventId, ThreadId, TurnId};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -24,14 +24,12 @@ impl MemoryScope {
 #[serde(rename_all = "snake_case")]
 pub enum MemorySourceKind {
     Entry,
-    Observation,
 }
 
 impl MemorySourceKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Entry => "entry",
-            Self::Observation => "observation",
         }
     }
 }
@@ -51,49 +49,6 @@ impl MemoryRecallMode {
             Self::ToolPull => "tool_pull",
             Self::DesktopInspect => "desktop_inspect",
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryObservationKind {
-    UserRule,
-    FileRead,
-    FileWrite,
-    FileEdit,
-    Search,
-    CommandRun,
-    RuntimeError,
-    GoalReport,
-    Review,
-    OpenQuestion,
-    Subagent,
-    Other,
-}
-
-impl MemoryObservationKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::UserRule => "user_rule",
-            Self::FileRead => "file_read",
-            Self::FileWrite => "file_write",
-            Self::FileEdit => "file_edit",
-            Self::Search => "search",
-            Self::CommandRun => "command_run",
-            Self::RuntimeError => "runtime_error",
-            Self::GoalReport => "goal_report",
-            Self::Review => "review",
-            Self::OpenQuestion => "open_question",
-            Self::Subagent => "subagent",
-            Self::Other => "other",
-        }
-    }
-
-    pub fn auto_inject_kind_allowed(self) -> bool {
-        matches!(
-            self,
-            Self::UserRule | Self::GoalReport | Self::Review | Self::OpenQuestion
-        )
     }
 }
 
@@ -159,26 +114,13 @@ pub struct MemoryCodeRef {
     pub symbol: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MemoryObservationUpsert {
-    pub id: String,
-    pub scope: MemoryScope,
-    pub project_id: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MemorySourceRef {
     pub thread_id: ThreadId,
     pub turn_id: Option<TurnId>,
-    pub event_id: Option<String>,
-    pub source_tool_call_id: Option<String>,
-    pub kind: MemoryObservationKind,
-    pub title: String,
-    pub narrative: String,
-    pub files: Vec<String>,
-    pub code_refs: Vec<MemoryCodeRef>,
-    pub concepts: Vec<String>,
-    pub importance: i64,
-    pub confidence: f64,
-    pub auto_inject_eligible: bool,
-    pub privacy_flags: MemoryPrivacyFlags,
-    pub created_at_ms: i64,
+    pub event_id: Option<EventId>,
+    pub tool_call_id: Option<String>,
+    pub tool_invocation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -193,7 +135,7 @@ pub struct MemoryEntryRecord {
     pub files: Vec<String>,
     pub code_refs: Vec<MemoryCodeRef>,
     pub concepts: Vec<String>,
-    pub source_observation_ids: Vec<String>,
+    pub source_refs: Vec<MemorySourceRef>,
     pub confidence: f64,
     pub strength: i64,
     pub pinned: bool,
@@ -216,7 +158,7 @@ pub struct MemorySaveInput {
     pub content: String,
     pub files: Vec<String>,
     pub concepts: Vec<String>,
-    pub source_observation_ids: Vec<String>,
+    pub source_refs: Vec<MemorySourceRef>,
     pub pinned: bool,
 }
 
@@ -229,7 +171,6 @@ pub struct MemorySearchQuery {
     pub mode: MemoryRecallMode,
     pub limit: usize,
     pub include_entries: bool,
-    pub include_observations: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -256,11 +197,10 @@ pub struct MemorySearchHit {
     pub files: Vec<String>,
     pub code_refs: Vec<MemoryCodeRef>,
     pub concepts: Vec<String>,
-    pub source_observation_ids: Vec<String>,
+    pub source_refs: Vec<MemorySourceRef>,
     pub confidence: f64,
     pub stale: bool,
     pub quarantined: bool,
-    pub auto_inject_eligible: bool,
     pub pinned: bool,
     pub status: Option<MemoryStatus>,
     pub supersedes_id: Option<String>,

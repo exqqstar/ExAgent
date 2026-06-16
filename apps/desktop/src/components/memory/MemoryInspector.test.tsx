@@ -4,7 +4,12 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryInspector } from "@/components/memory/MemoryInspector";
 import * as memoryApi from "@/lib/api/memory";
-import type { MemoryAuditResponse, MemoryListCandidatesResponse, MemorySearchResponse } from "@/lib/api/memory";
+import type {
+  MemoryAuditResponse,
+  MemoryListArchivedResponse,
+  MemoryListCandidatesResponse,
+  MemorySearchResponse
+} from "@/lib/api/memory";
 
 class ResizeObserverMock {
   observe() {}
@@ -18,6 +23,7 @@ vi.mock("@/lib/api/memory", () => ({
   memoryUpdate: vi.fn(),
   memoryForget: vi.fn(),
   memoryAudit: vi.fn(),
+  memoryListArchived: vi.fn(),
   memoryListCandidates: vi.fn(),
   memoryPromote: vi.fn()
 }));
@@ -33,7 +39,6 @@ const activeResponse: MemorySearchResponse = {
       body: "Approval rollback is backed by a checkpoint id.",
       files: [],
       concepts: ["desktop", "approval"],
-      source_observation_ids: ["obs-entry-1"],
       confidence: 0.91,
       stale: false,
       quarantined: false,
@@ -45,22 +50,23 @@ const activeResponse: MemorySearchResponse = {
   ]
 };
 
-const observationResponse: MemorySearchResponse = {
-  hits: [
+const archivedResponse: MemoryListArchivedResponse = {
+  archived: [
     {
-      id: "observation-1",
-      source: "observation",
+      id: "archived-1",
       scope: "project",
-      kind: "note",
-      title: "Possible stale protocol note",
-      body: "Observed in an older protocol draft.",
+      kind: "workflow",
+      title: "Old protocol note",
+      body: "Archived memory is restorable.",
       files: ["src/protocol.rs"],
       concepts: ["protocol"],
-      source_observation_ids: [],
       confidence: 0.35,
+      pinned: false,
+      status: "archived",
       stale: true,
       quarantined: true,
-      rank: 1
+      created_at_ms: 1_700_000_000_000,
+      updated_at_ms: 1_700_000_000_000
     }
   ]
 };
@@ -80,7 +86,6 @@ const candidatesResponse: MemoryListCandidatesResponse = {
       status: "candidate",
       stale: false,
       quarantined: false,
-      source_observation_ids: ["obs-candidate-1"],
       created_at_ms: 1_700_000_000_000,
       updated_at_ms: 1_700_000_000_000
     }
@@ -93,9 +98,8 @@ const auditResponse: MemoryAuditResponse = {
 
 beforeEach(() => {
   vi.stubGlobal("ResizeObserver", ResizeObserverMock);
-  vi.mocked(memoryApi.memorySearch).mockImplementation((_projectId, _scope, _query, includeObservations) =>
-    Promise.resolve(includeObservations ? observationResponse : activeResponse)
-  );
+  vi.mocked(memoryApi.memorySearch).mockResolvedValue(activeResponse);
+  vi.mocked(memoryApi.memoryListArchived).mockResolvedValue(archivedResponse);
   vi.mocked(memoryApi.memoryListCandidates).mockResolvedValue(candidatesResponse);
   vi.mocked(memoryApi.memoryAudit).mockResolvedValue(auditResponse);
   vi.mocked(memoryApi.memoryPromote).mockResolvedValue({ entry: candidatesResponse.candidates[0] });
@@ -105,21 +109,18 @@ beforeEach(() => {
 });
 
 describe("MemoryInspector", () => {
-  it("shows observations as low-trust records distinct from active entries", async () => {
+  it("shows archived records distinct from active entries", async () => {
     render(<MemoryInspector projectId="project-1" />);
 
     const activeEntry = await screen.findByTestId("memory-active-entry-entry-1");
     expect(within(activeEntry).getByText("Use local approval checkpoints")).toBeInTheDocument();
-    expect(within(activeEntry).queryByText("Observation")).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: /Observations/ }));
+    await userEvent.click(screen.getByRole("button", { name: /Archived/ }));
 
-    const observation = await screen.findByTestId("memory-observation-observation-1");
-    expect(within(observation).getByText("Observation")).toBeInTheDocument();
-    expect(within(observation).getByText("Low confidence")).toBeInTheDocument();
-    expect(within(observation).getByText("0.35")).toBeInTheDocument();
-    expect(within(observation).getByText("Stale file reference")).toBeInTheDocument();
-    expect(within(observation).getByText("Quarantined")).toBeInTheDocument();
+    const archived = await screen.findByTestId("memory-archived-entry-archived-1");
+    expect(within(archived).getByText("Archived")).toBeInTheDocument();
+    expect(within(archived).getByText("Stale file reference")).toBeInTheDocument();
+    expect(within(archived).getByText("Quarantined")).toBeInTheDocument();
   });
 
   it("promotes a pending project candidate", async () => {
@@ -137,7 +138,6 @@ describe("MemoryInspector", () => {
     render(<MemoryInspector projectId="project-1" />);
 
     const candidate = await screen.findByTestId("memory-candidate-candidate-1");
-    expect(within(candidate).getByText("obs-candidate-1")).toBeInTheDocument();
 
     await user.click(within(candidate).getByRole("button", { name: "Edit and promote Prefer compact inspector sections" }));
     await user.clear(screen.getByLabelText("Title"));
@@ -150,13 +150,12 @@ describe("MemoryInspector", () => {
       content: "Use dense sections instead of table-heavy memory UI.",
       files: ["apps/desktop/src/components/Inspector.tsx"],
       concepts: ["desktop", "memory"],
-      source_observation_ids: ["obs-candidate-1"],
       pinned: false
     });
     expect(memoryApi.memoryUpdate).toHaveBeenCalledWith("project-1", "candidate-1", "reject", "project");
   });
 
-  it("edits an active entry without dropping concepts or source observations", async () => {
+  it("edits an active entry without dropping concepts", async () => {
     const user = userEvent.setup();
     render(<MemoryInspector projectId="project-1" />);
 
@@ -174,8 +173,21 @@ describe("MemoryInspector", () => {
       "Approval rollback is backed by a checkpoint id.",
       [],
       ["desktop", "approval"],
-      false,
-      ["obs-entry-1"]
+      false
     );
+  });
+
+  it("archives and restores entries", async () => {
+    const user = userEvent.setup();
+    render(<MemoryInspector projectId="project-1" />);
+
+    const activeEntry = await screen.findByTestId("memory-active-entry-entry-1");
+    await user.click(within(activeEntry).getByRole("button", { name: "Archive Use local approval checkpoints" }));
+    expect(memoryApi.memoryUpdate).toHaveBeenCalledWith("project-1", "entry-1", "archive", "project");
+
+    await user.click(screen.getByRole("button", { name: /Archived/ }));
+    const archived = await screen.findByTestId("memory-archived-entry-archived-1");
+    await user.click(within(archived).getByRole("button", { name: "Restore Old protocol note" }));
+    expect(memoryApi.memoryUpdate).toHaveBeenCalledWith("project-1", "archived-1", "unarchive", "project");
   });
 });

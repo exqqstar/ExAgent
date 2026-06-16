@@ -18,8 +18,6 @@ pub struct MemoryRecallTool;
 struct MemoryRecallArgs {
     query: String,
     scope: Option<MemoryScopeArg>,
-    #[serde(default)]
-    include_observations: bool,
     limit: Option<usize>,
 }
 
@@ -53,7 +51,6 @@ impl ToolHandler for MemoryRecallTool {
             args.scope
                 .map(MemoryScope::from)
                 .unwrap_or(MemoryScope::Project),
-            args.include_observations,
             args.limit,
         )
         .await

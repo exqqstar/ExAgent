@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Activity,
+  Archive,
   ChevronRight,
-  FileWarning,
   History,
   Pencil,
   Pin,
   PinOff,
   RefreshCw,
+  RotateCcw,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
@@ -23,6 +24,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import {
   memoryAudit,
   memoryForget,
+  memoryListArchived,
   memoryListCandidates,
   memoryPromote,
   memorySave,
@@ -47,7 +49,7 @@ export function MemoryInspector({ projectId }: { projectId: string | null }) {
   const [scope, setScope] = useState<MemoryScopeMode>("project");
   const [candidates, setCandidates] = useState<MemoryEntryView[]>([]);
   const [activeEntries, setActiveEntries] = useState<MemoryHitView[]>([]);
-  const [observations, setObservations] = useState<MemoryHitView[]>([]);
+  const [archivedEntries, setArchivedEntries] = useState<MemoryEntryView[]>([]);
   const [auditEvents, setAuditEvents] = useState<MemoryAuditEventView[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -58,7 +60,7 @@ export function MemoryInspector({ projectId }: { projectId: string | null }) {
     if (!projectId) {
       setCandidates([]);
       setActiveEntries([]);
-      setObservations([]);
+      setArchivedEntries([]);
       setAuditEvents([]);
       return;
     }
@@ -66,15 +68,15 @@ export function MemoryInspector({ projectId }: { projectId: string | null }) {
     setLoading(true);
     setError(null);
     try {
-      const [candidateResponse, activeResponse, observationResponse, auditResponse] = await Promise.all([
+      const [candidateResponse, activeResponse, archivedResponse, auditResponse] = await Promise.all([
         memoryListCandidates(projectId, scope, "", 50),
-        memorySearch(projectId, scope, "", false, 50),
-        memorySearch(projectId, scope, "", true, 50),
+        memorySearch(projectId, scope, "", 50),
+        memoryListArchived(projectId, scope, "", 50),
         memoryAudit(projectId, scope, undefined, 50)
       ]);
       setCandidates(candidateResponse.candidates);
-      setActiveEntries(activeResponse.hits.filter((hit) => hit.source !== "observation"));
-      setObservations(observationResponse.hits.filter((hit) => hit.source === "observation"));
+      setActiveEntries(activeResponse.hits);
+      setArchivedEntries(archivedResponse.archived);
       setAuditEvents(auditResponse.events);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Memory load failed");
@@ -126,9 +128,21 @@ export function MemoryInspector({ projectId }: { projectId: string | null }) {
     });
   }
 
-  async function deleteEntry(entry: MemoryHitView) {
+  async function deleteEntry(entry: MemoryHitView | MemoryEntryView) {
     await runAction(`delete:${entry.id}`, async () => {
       await memoryForget(projectId!, entry.id, memoryScopeForItem(entry));
+    });
+  }
+
+  async function archiveEntry(entry: MemoryHitView) {
+    await runAction(`archive:${entry.id}`, async () => {
+      await memoryUpdate(projectId!, entry.id, "archive", memoryScopeForItem(entry));
+    });
+  }
+
+  async function unarchiveEntry(entry: MemoryEntryView) {
+    await runAction(`unarchive:${entry.id}`, async () => {
+      await memoryUpdate(projectId!, entry.id, "unarchive", memoryScopeForItem(entry));
     });
   }
 
@@ -147,7 +161,6 @@ export function MemoryInspector({ projectId }: { projectId: string | null }) {
           content: input.content,
           files: input.files,
           concepts: input.concepts,
-          source_observation_ids: "source_observation_ids" in editor.entry ? editor.entry.source_observation_ids : [],
           pinned: input.pinned
         });
         await memoryUpdate(projectId, entryId, "reject", entryScope);
@@ -162,8 +175,7 @@ export function MemoryInspector({ projectId }: { projectId: string | null }) {
           input.content,
           input.files,
           input.concepts,
-          input.pinned,
-          sourceObservationIdsForItem(editor.entry)
+          input.pinned
         );
       }
       setEditor(null);
@@ -291,17 +303,18 @@ export function MemoryInspector({ projectId }: { projectId: string | null }) {
                       onEdit={(nextEntry) => setEditor({ entry: nextEntry, mode: "edit" })}
                       onSupersede={(nextEntry) => setEditor({ entry: nextEntry, mode: "supersede" })}
                       onPin={pinEntry}
+                      onArchive={archiveEntry}
                       onDelete={deleteEntry}
                     />
                   ))}
                 </div>
               </MemorySection>
 
-              <MemorySection icon={FileWarning} title="Observations" summary={`${observations.length}`}>
+              <MemorySection icon={Archive} title="Archived" summary={`${archivedEntries.length}`}>
                 <div className="space-y-2">
-                  {observations.length === 0 ? <EmptyText>No debug observations.</EmptyText> : null}
-                  {observations.map((observation) => (
-                    <ObservationRow key={observation.id} observation={observation} />
+                  {archivedEntries.length === 0 ? <EmptyText>No archived memories.</EmptyText> : null}
+                  {archivedEntries.map((entry) => (
+                    <ArchivedRow key={entry.id} entry={entry} busyAction={busyAction} onUnarchive={unarchiveEntry} onDelete={deleteEntry} />
                   ))}
                 </div>
               </MemorySection>
@@ -359,23 +372,11 @@ function CandidateRow({
         candidate.quarantined || quarantinedGroup ? "border-danger/35 bg-danger/8" : "border-border bg-surface-2/65"
       )}
     >
-      <MemoryRowHeader title={candidate.title} kind={candidate.kind} confidence={candidate.confidence}>
+      <MemoryRowHeader title={candidate.title} kind={candidate.kind}>
         <TrustBadges item={candidate} candidate />
       </MemoryRowHeader>
       <p className="type-body-sm mt-1 break-words text-muted">{candidate.body}</p>
       <FileRefs files={candidate.files} stale={candidate.stale} />
-      {candidate.source_observation_ids.length > 0 ? (
-        <details className="mt-2">
-          <summary className="type-label-sm cursor-pointer text-muted">Source observations</summary>
-          <ul className="mt-1 space-y-1">
-            {candidate.source_observation_ids.map((observation, index) => (
-              <li key={`${candidate.id}-source-${index}`} className="type-body-sm break-words border-l border-border pl-2 text-muted">
-                {observation}
-              </li>
-            ))}
-          </ul>
-        </details>
-      ) : null}
       {candidate.quarantined ? (
         <p className="type-body-sm mt-1 text-danger">
           {candidate.quarantine_reason ?? "Prompt-injection or sensitive provenance flagged"}
@@ -426,6 +427,7 @@ function ActiveRow({
   onEdit,
   onSupersede,
   onPin,
+  onArchive,
   onDelete
 }: {
   entry: MemoryHitView;
@@ -433,13 +435,14 @@ function ActiveRow({
   onEdit: (entry: MemoryHitView) => void;
   onSupersede: (entry: MemoryHitView) => void;
   onPin: (entry: MemoryHitView) => Promise<void>;
+  onArchive: (entry: MemoryHitView) => Promise<void>;
   onDelete: (entry: MemoryHitView) => Promise<void>;
 }) {
   const pinned = Boolean(entry.pinned);
 
   return (
     <article data-testid={`memory-active-entry-${entry.id}`} className="rounded-md border border-border bg-surface-2/65 px-2.5 py-2">
-      <MemoryRowHeader title={entry.title} kind={entry.kind} confidence={entry.confidence}>
+      <MemoryRowHeader title={entry.title} kind={entry.kind}>
         {pinned ? (
           <Badge variant="primary" className="gap-1">
             <Star className="h-3 w-3 fill-current" />
@@ -497,6 +500,17 @@ function ActiveRow({
           type="button"
           size="sm"
           variant="ghost"
+          aria-label={`Archive ${entry.title}`}
+          disabled={busyAction !== null}
+          onClick={() => void onArchive(entry)}
+        >
+          <Archive className="h-3.5 w-3.5" />
+          Archive
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
           aria-label={`Delete ${entry.title}`}
           disabled={busyAction !== null}
           onClick={() => void onDelete(entry)}
@@ -509,19 +523,49 @@ function ActiveRow({
   );
 }
 
-function ObservationRow({ observation }: { observation: MemoryHitView }) {
+function ArchivedRow({
+  entry,
+  busyAction,
+  onUnarchive,
+  onDelete
+}: {
+  entry: MemoryEntryView;
+  busyAction: string | null;
+  onUnarchive: (entry: MemoryEntryView) => Promise<void>;
+  onDelete: (entry: MemoryEntryView) => Promise<void>;
+}) {
   return (
-    <article
-      data-testid={`memory-observation-${observation.id}`}
-      className="rounded-md border border-warning/30 bg-warning/8 px-2.5 py-2"
-    >
-      <MemoryRowHeader title={observation.title} kind={observation.kind} confidence={observation.confidence}>
-        <Badge variant="warning">Observation</Badge>
-        <Badge variant="warning">Low confidence</Badge>
-        <TrustBadges item={observation} />
+    <article data-testid={`memory-archived-entry-${entry.id}`} className="rounded-md border border-border bg-surface-2/45 px-2.5 py-2">
+      <MemoryRowHeader title={entry.title} kind={entry.kind}>
+        <Badge variant="neutral">Archived</Badge>
+        <TrustBadges item={entry} />
       </MemoryRowHeader>
-      <p className="type-body-sm mt-1 break-words text-muted">{observation.body}</p>
-      <FileRefs files={observation.files} stale={observation.stale} />
+      <p className="type-body-sm mt-1 break-words text-muted">{entry.body}</p>
+      <FileRefs files={entry.files} stale={entry.stale} />
+      <div className="mt-2 flex flex-wrap justify-end gap-1.5">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          aria-label={`Restore ${entry.title}`}
+          disabled={busyAction !== null}
+          onClick={() => void onUnarchive(entry)}
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+          Restore
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          aria-label={`Delete ${entry.title}`}
+          disabled={busyAction !== null}
+          onClick={() => void onDelete(entry)}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+          Delete
+        </Button>
+      </div>
     </article>
   );
 }
@@ -543,12 +587,10 @@ function ActivityRow({ event }: { event: MemoryAuditEventView }) {
 function MemoryRowHeader({
   title,
   kind,
-  confidence,
   children
 }: {
   title: string;
   kind: string;
-  confidence: number;
   children?: ReactNode;
 }) {
   return (
@@ -560,7 +602,6 @@ function MemoryRowHeader({
         </div>
       </div>
       <div className="flex shrink-0 flex-wrap justify-end gap-1">
-        <Badge variant={confidence < 0.5 ? "warning" : "info"}>{formatConfidence(confidence)}</Badge>
         {children}
       </div>
     </div>
@@ -648,10 +689,6 @@ function EmptyText({ children }: { children: ReactNode }) {
   return <p className="type-body-md text-muted">{children}</p>;
 }
 
-function formatConfidence(value: number) {
-  return value.toFixed(2);
-}
-
 function formatTime(value: number) {
   if (!Number.isFinite(value) || value <= 0) {
     return "unknown";
@@ -688,8 +725,4 @@ function fileStale(file: string | { stale?: boolean }) {
 
 function memoryScopeForItem(item: { scope: string }): MemoryScope {
   return item.scope === "global" ? "global" : "project";
-}
-
-function sourceObservationIdsForItem(item: { source_observation_ids?: string[] }): string[] {
-  return item.source_observation_ids ?? [];
 }

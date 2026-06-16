@@ -118,7 +118,6 @@ pub struct AgentConfig {
     pub memory_enabled: bool,
     pub memory_auto_inject_enabled: bool,
     pub memory_frozen_inject_enabled: bool,
-    pub memory_projection_background_enabled: bool,
     pub memory_auto_context_max_chars: usize,
     pub memory_frozen_context_max_chars: usize,
     pub memory_tool_context_max_chars: usize,
@@ -184,10 +183,6 @@ impl Default for AgentConfig {
             .unwrap_or(true),
             memory_frozen_inject_enabled: parse_optional_bool_env(
                 "EXAGENT_MEMORY_FROZEN_INJECT_ENABLED",
-            )
-            .unwrap_or(true),
-            memory_projection_background_enabled: parse_optional_bool_env(
-                "EXAGENT_MEMORY_PROJECTION_BACKGROUND_ENABLED",
             )
             .unwrap_or(true),
             memory_auto_context_max_chars: parse_optional_usize_env(

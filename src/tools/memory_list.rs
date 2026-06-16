@@ -51,7 +51,6 @@ impl ToolHandler for MemoryListTool {
             args.scope
                 .map(crate::state::memory::MemoryScope::from)
                 .unwrap_or(crate::state::memory::MemoryScope::Project),
-            false,
             args.limit,
         )
         .await

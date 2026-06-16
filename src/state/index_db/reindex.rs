@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use crate::session::ThreadSource;
-use crate::state::memory::projector::project_memory_observations_from_rollout;
-use crate::state::rollout::RolloutStore;
 use crate::state::rollout::ThreadMeta;
 use crate::types::ThreadId;
 
@@ -32,25 +30,9 @@ pub async fn reindex_project(
         }
         scanned_threads += 1;
         if let Some(summary) = summarize_rollout(&rollout_path).await? {
-            let items = RolloutStore::read_items(&rollout_path).await.ok();
             if summary.thread_source == ThreadSource::Subagent {
                 delete_thread_summary(db, project_id, &summary.thread_id).await?;
-                db.replace_thread_memory_observations(&summary.thread_id, Vec::new())
-                    .await?;
                 continue;
-            }
-            if let Some(items) = items {
-                let observations = project_memory_observations_from_rollout(
-                    Some(project_id),
-                    &summary.thread_id,
-                    &items,
-                    0,
-                    time::now_unix_millis(),
-                );
-                db.replace_thread_memory_observations(&summary.thread_id, observations)
-                    .await?;
-                db.set_memory_projection_cursor(&summary.thread_id, &rollout_path, items.len())
-                    .await?;
             }
             upsert_thread_summary(db, project_id, rollout_path, summary).await?;
             indexed_threads += 1;
@@ -197,10 +179,6 @@ mod tests {
     use crate::index_db::{IndexDb, ProjectUpsert, ThreadListFilter};
     use serde_json::json;
 
-    use crate::state::memory::{
-        MemoryObservationKind, MemoryObservationUpsert, MemoryPrivacyFlags, MemoryRecallMode,
-        MemoryScope, MemorySearchQuery,
-    };
     use crate::state::rollout::{ResponseItem, RolloutItem, RolloutStore, ThreadMeta};
     use crate::types::{ConversationMessage, TurnId};
 
@@ -317,57 +295,49 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
         .expect("insert stale thread row");
     }
 
-    fn observation(
+    async fn insert_legacy_observation_row(
+        db: &IndexDb,
         id: &str,
         project_id: &str,
         thread_id: &str,
         title: &str,
         narrative: &str,
-    ) -> MemoryObservationUpsert {
-        MemoryObservationUpsert {
-            id: id.into(),
-            scope: MemoryScope::Project,
-            project_id: Some(project_id.to_string()),
-            thread_id: ThreadId::new(thread_id),
-            turn_id: Some(TurnId::new(format!("turn_{id}"))),
-            event_id: None,
-            source_tool_call_id: None,
-            kind: MemoryObservationKind::UserRule,
-            title: title.into(),
-            narrative: narrative.into(),
-            files: vec![],
-            code_refs: vec![],
-            concepts: vec!["reindex".into()],
-            importance: 5,
-            confidence: 0.8,
-            auto_inject_eligible: true,
-            privacy_flags: MemoryPrivacyFlags::default(),
-            created_at_ms: 1,
-        }
+    ) {
+        sqlx::query(
+            r#"
+INSERT INTO memory_observations (
+  id, scope, project_id, thread_id, turn_id, event_id, source_tool_call_id,
+  kind, title, narrative, files_json, code_refs_json, concepts_json, importance,
+  confidence, auto_inject_eligible, suspicious_injection, privacy_flags_json,
+  created_at_ms
+)
+VALUES (?, 'project', ?, ?, ?, NULL, NULL, 'user_rule', ?, ?, '[]', '[]', '["reindex"]', 5, 0.8, 1, 0, '{}', 1)
+            "#,
+        )
+        .bind(id)
+        .bind(project_id)
+        .bind(thread_id)
+        .bind(format!("turn_{id}"))
+        .bind(title)
+        .bind(narrative)
+        .execute(db.pool())
+        .await
+        .expect("insert legacy observation row");
     }
 
-    async fn search_observations(
-        db: &IndexDb,
-        project_id: &str,
-        thread_id: &str,
-        query: &str,
-    ) -> Vec<crate::state::memory::MemorySearchHit> {
-        db.search_memory(MemorySearchQuery {
-            scope: MemoryScope::Project,
-            project_id: Some(project_id.to_string()),
-            thread_id: Some(ThreadId::new(thread_id)),
-            query: query.to_string(),
-            mode: MemoryRecallMode::ToolPull,
-            limit: 10,
-            include_entries: false,
-            include_observations: true,
-        })
+    async fn memory_observation_count(db: &IndexDb, project_id: &str, title_like: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM memory_observations WHERE project_id = ? AND title LIKE ?",
+        )
+        .bind(project_id)
+        .bind(title_like)
+        .fetch_one(db.pool())
         .await
-        .expect("search memory observations")
+        .expect("count legacy observations")
     }
 
     #[tokio::test]
-    async fn reindex_project_backfills_memory_observations_and_cursor() {
+    async fn reindex_project_does_not_backfill_memory_observations_or_cursor() {
         let (dir, db) = temp_db().await;
         let workspace_root = dir.path().join("project");
         tokio::fs::create_dir_all(&workspace_root)
@@ -387,42 +357,39 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
             ThreadSource::User,
             "Always keep public docs concise and sanitized.",
         );
-        db.replace_thread_memory_observations(
-            &ThreadId::new("thread_user"),
-            vec![observation(
-                "obs_stale_thread_user",
-                &project.id,
-                "thread_user",
-                "stale reindex observation",
-                "stale reindex marker should be replaced",
-            )],
+        insert_legacy_observation_row(
+            &db,
+            "obs_stale_thread_user",
+            &project.id,
+            "thread_user",
+            "stale reindex observation",
+            "stale reindex marker should be retained",
         )
-        .await
-        .expect("seed stale observation");
+        .await;
 
         let report = reindex_project(&db, &project.id, &workspace_root)
             .await
             .expect("reindex project");
-        let hits = search_observations(
-            &db,
-            &project.id,
-            "thread_user",
-            "public docs concise sanitized",
-        )
-        .await;
-        let stale_hits =
-            search_observations(&db, &project.id, "thread_user", "stale reindex marker").await;
 
         assert_eq!(report.scanned_threads, 1);
         assert_eq!(report.indexed_threads, 1);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].thread_id.as_ref().unwrap().as_str(), "thread_user");
-        assert_eq!(stale_hits.len(), 0);
         assert_eq!(
-            db.memory_projection_start_index(&ThreadId::new("thread_user"))
-                .await
-                .expect("memory projection cursor"),
-            2
+            memory_observation_count(&db, &project.id, "public docs concise sanitized").await,
+            0
+        );
+        assert_eq!(
+            memory_observation_count(&db, &project.id, "stale reindex observation").await,
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM memory_projection_cursors WHERE thread_id = ?",
+            )
+            .bind("thread_user")
+            .fetch_one(db.pool())
+            .await
+            .expect("memory projection cursor count"),
+            0
         );
     }
 
@@ -454,18 +421,6 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
             "Child agent prompt",
         );
         insert_stale_thread_row(&db, &project.id, "thread_child").await;
-        db.replace_thread_memory_observations(
-            &ThreadId::new("thread_child"),
-            vec![observation(
-                "obs_stale_thread_child",
-                &project.id,
-                "thread_child",
-                "subagent noise",
-                "subagent noise should be cleared",
-            )],
-        )
-        .await
-        .expect("seed subagent observation");
 
         let report = reindex_project(&db, &project.id, &workspace_root)
             .await
@@ -478,20 +433,12 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
             })
             .await
             .expect("list threads");
-        let child_hits = search_observations(
-            &db,
-            &threads[0].project_id,
-            "thread_child",
-            "subagent noise",
-        )
-        .await;
 
         assert_eq!(report.scanned_threads, 2);
         assert_eq!(report.indexed_threads, 1);
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].id.as_str(), "thread_user");
         assert_eq!(threads[0].preview, "Root user prompt");
-        assert_eq!(child_hits.len(), 0);
     }
 
     #[tokio::test]
@@ -533,11 +480,5 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].id.as_str(), "thread_legacy_context");
         assert_eq!(threads[0].preview, "Legacy prompt without explicit turn id");
-        assert_eq!(
-            db.memory_projection_start_index(&ThreadId::new("thread_legacy_context"))
-                .await
-                .expect("legacy memory projection cursor"),
-            0
-        );
     }
 }

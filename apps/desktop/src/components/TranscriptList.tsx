@@ -7,6 +7,7 @@ import {
   FileText,
   GitBranchPlus,
   Info,
+  LoaderCircle,
   Terminal
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
@@ -16,7 +17,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { TranscriptMessage, TurnInput } from "@/types";
+import type { SessionStatus, TranscriptMessage, TurnInput } from "@/types";
 import { useI18n } from "@/lib/i18n";
 import { fileBaseName, localFileAssetSrc } from "@/lib/media";
 import { cn } from "@/lib/utils";
@@ -57,11 +58,23 @@ type TranscriptRenderItem =
       turnStatus?: string;
       messages: TranscriptMessage[];
       defaultExpanded: boolean;
+      active: boolean;
+      activeStatus?: ActiveRunStatus;
     };
 
 const activityRoles = new Set<TranscriptMessage["role"]>(["reasoning", "tool", "approval"]);
+type ActiveRunStatus = Extract<SessionStatus, "running" | "awaiting_approval">;
+type ActiveRun = {
+  threadId: string;
+  turnId: string | null;
+  status: ActiveRunStatus;
+};
 
-function transcriptRenderItems(messages: TranscriptMessage[], groupTurnActivity: boolean): TranscriptRenderItem[] {
+function transcriptRenderItems(
+  messages: TranscriptMessage[],
+  groupTurnActivity: boolean,
+  activeRun?: ActiveRun | null
+): TranscriptRenderItem[] {
   if (!groupTurnActivity) {
     return messages.map((message) => ({ type: "message", message }));
   }
@@ -88,13 +101,18 @@ function transcriptRenderItems(messages: TranscriptMessage[], groupTurnActivity:
       index += 1;
     }
 
-    result.push(...renderItemsForTurn(threadId, turnId, turnMessages));
+    result.push(...renderItemsForTurn(threadId, turnId, turnMessages, activeRun));
   }
 
-  return result;
+  return insertActiveRunPlaceholder(result, activeRun);
 }
 
-function renderItemsForTurn(threadId: string, turnId: string, messages: TranscriptMessage[]): TranscriptRenderItem[] {
+function renderItemsForTurn(
+  threadId: string,
+  turnId: string,
+  messages: TranscriptMessage[],
+  activeRun?: ActiveRun | null
+): TranscriptRenderItem[] {
   const activity = messages.filter((message) => activityRoles.has(message.role));
   const visible = messages.filter((message) => !activityRoles.has(message.role));
 
@@ -113,6 +131,7 @@ function renderItemsForTurn(threadId: string, turnId: string, messages: Transcri
       message.toolStatus === "waiting_approval" ||
       message.toolStatus === "waiting_user_input"
   );
+  const active = !hasFinalAssistant && activeRunMatches(activeRun, threadId, turnId);
   const group: TranscriptRenderItem = {
     type: "activity",
     id: `activity-${threadId}-${turnId}`,
@@ -120,11 +139,75 @@ function renderItemsForTurn(threadId: string, turnId: string, messages: Transcri
     turnId,
     turnStatus,
     messages: activity,
-    defaultExpanded: hasActiveTool || !hasFinalAssistant
+    defaultExpanded: active || hasActiveTool || !hasFinalAssistant,
+    active,
+    activeStatus: active ? activeRun?.status : undefined
   };
   const items: TranscriptRenderItem[] = visible.map((message) => ({ type: "message", message }));
   items.splice(insertIndex, 0, group);
   return items;
+}
+
+function insertActiveRunPlaceholder(
+  items: TranscriptRenderItem[],
+  activeRun?: ActiveRun | null
+): TranscriptRenderItem[] {
+  if (!activeRun || items.some((item) => item.type === "activity" && item.active)) {
+    return items;
+  }
+
+  const insertAfterIndex = lastActiveRunMessageIndex(items, activeRun);
+  if (insertAfterIndex === -1) {
+    return items;
+  }
+
+  const next = [...items];
+  next.splice(insertAfterIndex + 1, 0, {
+    type: "activity",
+    id: `activity-${activeRun.threadId}-${activeRun.turnId ?? "pending"}`,
+    threadId: activeRun.threadId,
+    turnId: activeRun.turnId ?? undefined,
+    messages: [],
+    defaultExpanded: true,
+    active: true,
+    activeStatus: activeRun.status
+  });
+  return next;
+}
+
+function lastActiveRunMessageIndex(items: TranscriptRenderItem[], activeRun: ActiveRun) {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.type !== "message") {
+      continue;
+    }
+    const message = item.message;
+    if (!messageMatchesActiveRun(message, activeRun)) {
+      continue;
+    }
+    if (isFinalAssistantMessage(message)) {
+      return -1;
+    }
+    if (message.role !== "user") {
+      continue;
+    }
+    return index;
+  }
+  return -1;
+}
+
+function messageMatchesActiveRun(message: TranscriptMessage, activeRun: ActiveRun) {
+  if (message.threadId !== activeRun.threadId) {
+    return false;
+  }
+  return activeRun.turnId ? message.turnId === activeRun.turnId : true;
+}
+
+function activeRunMatches(activeRun: ActiveRun | null | undefined, threadId: string, turnId: string) {
+  if (!activeRun || activeRun.threadId !== threadId) {
+    return false;
+  }
+  return activeRun.turnId ? activeRun.turnId === turnId : true;
 }
 
 function isFinalAssistantMessage(message: TranscriptMessage) {
@@ -143,6 +226,7 @@ export function TranscriptList({
   forkDisabled = false,
   readOnly = false,
   groupTurnActivity = false,
+  activeRun,
   onForkFromTurn
 }: {
   messages: TranscriptMessage[];
@@ -152,6 +236,7 @@ export function TranscriptList({
   forkDisabled?: boolean;
   readOnly?: boolean;
   groupTurnActivity?: boolean;
+  activeRun?: ActiveRun | null;
   onForkFromTurn?: (threadId: string, turnId: string) => void;
 }) {
   const { t } = useI18n();
@@ -164,7 +249,7 @@ export function TranscriptList({
     return <p className="type-body-md text-muted">{emptyLabel}</p>;
   }
 
-  const renderItems = transcriptRenderItems(messages, groupTurnActivity);
+  const renderItems = transcriptRenderItems(messages, groupTurnActivity, activeRun);
 
   return (
     <div className={cn("flex flex-col gap-5", className)}>
@@ -338,7 +423,8 @@ function TurnActivityGroup({
 }) {
   const [expanded, setExpanded] = useState(group.defaultExpanded);
   const [manuallyChanged, setManuallyChanged] = useState(false);
-  const summary = activitySummary(group.messages);
+  const summary = group.active ? activeActivitySummary(group.messages, group.activeStatus) : activitySummary(group.messages);
+  const label = group.active ? "Working" : "Activity";
 
   useEffect(() => {
     if (!manuallyChanged) {
@@ -358,18 +444,44 @@ function TurnActivityGroup({
         }}
       >
         <ChevronRight className={cn("h-4 w-4 shrink-0 transition-transform", expanded && "rotate-90")} />
-        <span className="type-label-md text-muted">Activity</span>
+        <span className={cn("type-label-md", group.active ? "text-ink" : "text-muted")}>{label}</span>
         <span className="type-label-sm min-w-0 truncate text-subtle">{summary}</span>
+        {group.active ? (
+          <Badge variant={group.activeStatus === "awaiting_approval" ? "warning" : "success"} className="shrink-0">
+            {group.activeStatus === "awaiting_approval" ? "Waiting" : "Running"}
+          </Badge>
+        ) : null}
       </button>
       {expanded ? (
         <div className="mt-2 space-y-2 border-l border-border pl-4">
-          {group.messages.map((message) => (
-            <TurnActivityMessage key={message.id} message={message} readOnly={readOnly} />
-          ))}
+          {group.messages.length > 0 ? (
+            group.messages.map((message) => (
+              <TurnActivityMessage key={message.id} message={message} readOnly={readOnly} />
+            ))
+          ) : (
+            <ActiveRunPlaceholder status={group.activeStatus ?? "running"} />
+          )}
         </div>
       ) : null}
       <div className="mt-3 border-t border-border" aria-hidden="true" />
     </section>
+  );
+}
+
+function ActiveRunPlaceholder({ status }: { status: ActiveRunStatus }) {
+  const waitingApproval = status === "awaiting_approval";
+  return (
+    <div className="min-w-0 rounded-md border border-border bg-surface-1 px-3 py-2">
+      <div className="flex min-w-0 items-center gap-2">
+        <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
+        <span className="type-label-md min-w-0 truncate text-ink">
+          {waitingApproval ? "waiting for approval" : "starting turn"}
+        </span>
+      </div>
+      <p className="type-body-sm mt-1 text-muted">
+        {waitingApproval ? "Waiting for an approval request to arrive." : "Waiting for first runtime event."}
+      </p>
+    </div>
   );
 }
 
@@ -433,6 +545,46 @@ function activitySummary(messages: TranscriptMessage[]) {
     approvalCount > 0 ? `${approvalCount} ${approvalCount === 1 ? "approval" : "approvals"}` : null
   ].filter(Boolean);
   return parts.join(" · ");
+}
+
+function activeActivitySummary(messages: TranscriptMessage[], status: ActiveRunStatus | undefined) {
+  const waitingInput = latestToolMessageWithStatus(messages, "waiting_user_input");
+  if (waitingInput) {
+    return "waiting for input";
+  }
+  const waitingApproval = latestToolMessageWithStatus(messages, "waiting_approval");
+  if (waitingApproval || status === "awaiting_approval") {
+    return "waiting for approval";
+  }
+  const runningTool = latestToolMessageWithStatus(messages, "running");
+  if (runningTool) {
+    return `running ${toolActivityLabel(runningTool)}`;
+  }
+  const latest = messages.at(-1);
+  if (latest?.role === "reasoning") {
+    return "thinking";
+  }
+  if (latest?.role === "tool" && latest.toolStatus === "completed") {
+    return `completed ${toolActivityLabel(latest)}`;
+  }
+  return "starting turn";
+}
+
+function latestToolMessageWithStatus(
+  messages: TranscriptMessage[],
+  status: NonNullable<TranscriptMessage["toolStatus"]>
+) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === "tool" && message.toolStatus === status) {
+      return message;
+    }
+  }
+  return null;
+}
+
+function toolActivityLabel(message: TranscriptMessage) {
+  return message.toolName ?? message.title ?? "tool";
 }
 
 function GoalReportCard({ message }: { message: TranscriptMessage }) {

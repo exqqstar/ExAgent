@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useRef } from "react";
 import { Blocks, Bug, CircleAlert, FileText, FolderPlus, X } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
@@ -14,18 +15,59 @@ type WorkbenchState = ReturnType<typeof getWorkbenchState>;
 
 export function ChatView({ state }: { state: WorkbenchState }) {
   const { t } = useI18n();
-
-  if (state.compareView) {
-    return <BranchCompareView state={state} compare={state.compareView} />;
-  }
+  const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
 
   const empty = !state.loading && state.transcript.length === 0;
   const activeSession = state.sessions.find((session) => session.id === state.activeSessionId);
+  const activeRun =
+    state.activeSessionId && (activeSession?.status === "running" || activeSession?.status === "awaiting_approval")
+      ? {
+          threadId: state.activeSessionId,
+          turnId: state.activeTurnId ?? null,
+          status: activeSession.status
+        }
+      : null;
+  const activeRunScrollSignature = useMemo(() => {
+    if (!activeRun) {
+      return null;
+    }
+    const latest = state.transcript.at(-1);
+    return [
+      activeRun.threadId,
+      activeRun.turnId ?? "pending",
+      activeRun.status,
+      state.transcript.length,
+      latest?.id ?? "none",
+      latest?.body.length ?? 0,
+      latest?.toolStatus ?? "none",
+      latest?.turnStatus ?? "none"
+    ].join(":");
+  }, [activeRun, state.transcript]);
   const forkDisabled =
     state.loading ||
     Boolean(state.activeTurnId) ||
     activeSession?.status === "running" ||
     activeSession?.status === "awaiting_approval";
+
+  useEffect(() => {
+    if (!activeRunScrollSignature) {
+      return;
+    }
+    const viewport = transcriptScrollRef.current?.querySelector<HTMLElement>(
+      "[data-radix-scroll-area-viewport]"
+    );
+    if (!viewport) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      viewport.scrollTop = viewport.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeRunScrollSignature]);
+
+  if (state.compareView) {
+    return <BranchCompareView state={state} compare={state.compareView} />;
+  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -37,7 +79,7 @@ export function ChatView({ state }: { state: WorkbenchState }) {
               <NewSessionState state={state} />
             ) : (
               <>
-                <ScrollArea className="min-h-0 flex-1">
+                <ScrollArea ref={transcriptScrollRef} className="min-h-0 flex-1">
                   <div className="mx-auto flex w-full max-w-[920px] flex-col gap-5 pb-5 pt-1">
                     <TranscriptList
                       messages={state.transcript}
@@ -45,6 +87,7 @@ export function ChatView({ state }: { state: WorkbenchState }) {
                       forkDisabled={forkDisabled}
                       onForkFromTurn={state.forkThreadFromTurn}
                       groupTurnActivity
+                      activeRun={activeRun}
                     />
                   </div>
                 </ScrollArea>

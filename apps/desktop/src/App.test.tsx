@@ -6442,7 +6442,7 @@ describe("AppShell", () => {
     });
 
     const liveGroup = screen.getByLabelText("Turn activity");
-    const liveToggle = within(liveGroup).getByRole("button", { name: /Activity/ });
+    const liveToggle = within(liveGroup).getByRole("button", { name: /Working/ });
     expect(liveToggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("checking files")).toBeInTheDocument();
 
@@ -6466,6 +6466,95 @@ describe("AppShell", () => {
     });
     expect(screen.getByText("Done.")).toBeInTheDocument();
     expect(screen.queryByText("checking files")).not.toBeInTheDocument();
+  });
+
+  it("shows working activity while an active turn has no runtime events yet", async () => {
+    render(<App />);
+
+    await screen.findByLabelText("Message ExAgent");
+    act(() => {
+      useWorkbenchStore.setState({
+        activeSessionId: "session-desktop",
+        activeTurnId: "turn-starting",
+        transcript: [
+          {
+            id: "user-starting",
+            role: "user",
+            body: "Build the active turn status UI",
+            timestamp: "now",
+            threadId: "session-desktop",
+            turnId: "turn-starting",
+            turnStatus: "running",
+          },
+        ],
+        events: [],
+        sessions: [
+          {
+            id: "session-desktop",
+            projectId: "project-exagent",
+            title: "Desktop GUI workbench",
+            updatedAt: "local preview",
+            status: "running",
+          },
+        ],
+        loading: false,
+      });
+    });
+
+    const activityGroup = screen.getByLabelText("Turn activity");
+    const activityToggle = within(activityGroup).getByRole("button", {
+      name: /Working/,
+    });
+    expect(activityToggle).toHaveAttribute("aria-expanded", "true");
+    expect(activityToggle).toHaveTextContent("starting turn");
+    expect(within(activityGroup).getByText("Waiting for first runtime event.")).toBeInTheDocument();
+  });
+
+  it("does not show a working placeholder after the active turn has an assistant reply", async () => {
+    render(<App />);
+
+    await screen.findByLabelText("Message ExAgent");
+    act(() => {
+      useWorkbenchStore.setState({
+        activeSessionId: "session-desktop",
+        activeTurnId: "turn-final-text",
+        transcript: [
+          {
+            id: "user-final-text",
+            role: "user",
+            body: "Build the active turn status UI",
+            timestamp: "now",
+            threadId: "session-desktop",
+            turnId: "turn-final-text",
+            turnStatus: "running",
+          },
+          {
+            id: "assistant-final-text",
+            role: "assistant",
+            body: "Done.",
+            timestamp: "now",
+            threadId: "session-desktop",
+            turnId: "turn-final-text",
+            turnStatus: "running",
+          },
+        ],
+        events: [],
+        sessions: [
+          {
+            id: "session-desktop",
+            projectId: "project-exagent",
+            title: "Desktop GUI workbench",
+            updatedAt: "local preview",
+            status: "running",
+          },
+        ],
+        loading: false,
+      });
+    });
+
+    expect(screen.getByText("Done.")).toBeInTheDocument();
+    expect(screen.queryByText("Working")).not.toBeInTheDocument();
+    expect(screen.queryByText("Waiting for first runtime event.")).not.toBeInTheDocument();
   });
 
   it("streams reasoning and assistant deltas into stable transcript messages", async () => {

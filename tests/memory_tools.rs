@@ -4,7 +4,7 @@ use exagent::config::AgentConfig;
 use exagent::exec_session::ExecSessionManager;
 use exagent::index_db::{IndexDb, ProjectUpsert};
 use exagent::policy::PolicyManager;
-use exagent::registry::ToolContext;
+use exagent::registry::{ToolContext, ToolRegistry};
 use exagent::runtime::agent_profile::AgentToolPolicy;
 use exagent::runtime::memory::{MemoryRuntime, MemoryToolApi};
 use exagent::state::memory::{MemoryEntryKind, MemorySaveInput, MemoryScope, MemorySearchQuery};
@@ -95,6 +95,125 @@ async fn memory_save_creates_candidate_visible_to_list_but_not_recall() {
 }
 
 #[tokio::test]
+async fn memory_save_records_server_side_source_refs_for_current_turn() {
+    let fixture = fixture().await;
+    let ctx = fixture.context(Some(fixture.memory_api.clone()));
+    let mut registry = ToolRegistry::new();
+    registry.register(MemorySaveTool);
+
+    let result = registry
+        .execute(
+            ToolCall {
+                id: "call_save_source_refs".into(),
+                name: "memory_save".into(),
+                arguments: json!({
+                    "scope": "project",
+                    "kind": "architecture",
+                    "title": "Tool-first memory provenance",
+                    "content": "Memory candidates cite rollout refs captured by the server.",
+                    "files": ["src/tools/memory_save.rs"],
+                    "concepts": ["memory provenance"]
+                }),
+                thought_signature: None,
+            },
+            Some(&ctx),
+        )
+        .await;
+
+    assert_eq!(result.status, ToolStatus::Success);
+    let candidate_id = result.meta.as_ref().unwrap()["id"].as_str().unwrap();
+    let candidate = fixture
+        .memory_api
+        .runtime()
+        .db()
+        .memory_entry_for_tests(candidate_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        candidate.status,
+        exagent::state::memory::MemoryStatus::Candidate
+    );
+    assert_eq!(candidate.title, "Tool-first memory provenance");
+    assert_eq!(
+        candidate.content,
+        "Memory candidates cite rollout refs captured by the server."
+    );
+
+    let value = serde_json::to_value(&candidate).unwrap();
+    let refs = value["source_refs"].as_array().expect("source_refs array");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0]["thread_id"], "thread_memory_tools");
+    assert_eq!(refs[0]["turn_id"], "turn_memory_tools");
+    assert_eq!(refs[0]["tool_call_id"], "call_save_source_refs");
+    assert_eq!(refs[0]["tool_invocation_id"], "inv_call_save_source_refs");
+    assert!(value.get("source_observation_ids").is_none());
+}
+
+#[tokio::test]
+async fn memory_save_skips_duplicate_candidate_from_same_rollout_ref_and_content() {
+    let fixture = fixture().await;
+    let ctx = fixture.context(Some(fixture.memory_api.clone()));
+    let mut registry = ToolRegistry::new();
+    registry.register(MemorySaveTool);
+
+    let args = json!({
+        "scope": "project",
+        "kind": "preference",
+        "title": "Do not commit local instructions",
+        "content": "AGENTS.md is local-only workspace guidance and must not be committed.",
+        "concepts": ["local instructions"]
+    });
+    let first = registry
+        .execute(
+            ToolCall {
+                id: "call_save_duplicate_a".into(),
+                name: "memory_save".into(),
+                arguments: args.clone(),
+                thought_signature: None,
+            },
+            Some(&ctx),
+        )
+        .await;
+    assert_eq!(first.status, ToolStatus::Success);
+    assert_eq!(first.meta.as_ref().unwrap()["status"], "candidate");
+
+    let second = registry
+        .execute(
+            ToolCall {
+                id: "call_save_duplicate_b".into(),
+                name: "memory_save".into(),
+                arguments: args,
+                thought_signature: None,
+            },
+            Some(&ctx),
+        )
+        .await;
+
+    assert_eq!(second.status, ToolStatus::Success);
+    assert_eq!(second.meta.as_ref().unwrap()["status"], "skipped");
+    assert_eq!(
+        second.meta.as_ref().unwrap()["duplicate_of"],
+        first.meta.as_ref().unwrap()["id"]
+    );
+
+    let list = MemoryListTool
+        .handle(
+            invocation(
+                "call_list_duplicate",
+                "memory_list",
+                json!({ "query": "Do not commit local instructions", "scope": "project" }),
+            ),
+            &ctx,
+        )
+        .await;
+    assert_eq!(list.model_result.status, ToolStatus::Success);
+    let candidates = list.model_result.meta.as_ref().unwrap()["candidates"]
+        .as_array()
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+}
+
+#[tokio::test]
 async fn memory_save_rejects_project_id_and_global_scope() {
     let fixture = fixture().await;
     let ctx = fixture.context(Some(fixture.memory_api.clone()));
@@ -170,7 +289,7 @@ async fn memory_forget_is_limited_to_derived_project_scope() {
                 content: "This entry must not be deletable from the current project.".into(),
                 files: vec!["src/tools/memory_forget.rs".into()],
                 concepts: vec!["forget".into()],
-                source_observation_ids: vec![],
+                source_refs: vec![],
                 pinned: false,
             },
             "test",
@@ -199,7 +318,6 @@ async fn memory_forget_is_limited_to_derived_project_scope() {
             mode: exagent::state::memory::MemoryRecallMode::ToolPull,
             limit: 10,
             include_entries: true,
-            include_observations: false,
         })
         .await
         .unwrap();
@@ -230,7 +348,7 @@ async fn memory_update_allows_pin_unpin_and_supersede_but_rejects_promote() {
                 content: "Tool update old content toololdgone should no longer be recalled.".into(),
                 files: vec!["src/tools/memory_update.rs".into()],
                 concepts: vec!["tool update old".into()],
-                source_observation_ids: vec![],
+                source_refs: vec![],
                 pinned: false,
             },
             "test",
@@ -328,7 +446,6 @@ async fn memory_update_allows_pin_unpin_and_supersede_but_rejects_promote() {
             mode: exagent::state::memory::MemoryRecallMode::ToolPull,
             limit: 10,
             include_entries: true,
-            include_observations: false,
         })
         .await
         .unwrap();
@@ -343,7 +460,6 @@ async fn memory_update_allows_pin_unpin_and_supersede_but_rejects_promote() {
             mode: exagent::state::memory::MemoryRecallMode::ToolPull,
             limit: 10,
             include_entries: true,
-            include_observations: false,
         })
         .await
         .unwrap();
@@ -374,7 +490,7 @@ async fn memory_recall_respects_tool_context_budget() {
             content: "large ".repeat(200),
             files: vec!["src/tools/memory_recall.rs".into()],
             concepts: vec!["budget".into()],
-            source_observation_ids: vec![],
+            source_refs: vec![],
             pinned: false,
         },
         "test",

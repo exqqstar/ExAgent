@@ -6,8 +6,8 @@ use serde_json::json;
 use crate::registry::ToolContext;
 use crate::state::memory::MemorySaveInput;
 use crate::tools::memory_common::{
-    derive_scope, error, memory_api, success_json, MemoryEntryKindArg, MemoryScopeArg,
-    MEMORY_TOOL_ACTOR,
+    derive_scope, error, memory_api, source_refs_for_tool_call, success_json, MemoryEntryKindArg,
+    MemoryScopeArg, MEMORY_TOOL_ACTOR,
 };
 use crate::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
 
@@ -27,8 +27,6 @@ struct MemorySaveArgs {
     #[serde(default)]
     concepts: Vec<String>,
     #[serde(default)]
-    source_observation_ids: Vec<String>,
-    #[serde(default)]
     pinned: bool,
 }
 
@@ -37,7 +35,7 @@ impl ToolHandler for MemorySaveTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec::function(
             "memory_save",
-            "Propose a memory candidate for human curation using server-derived scope.",
+            "Propose one rare long-term memory candidate for human curation using server-derived scope. Use for durable user rules/preferences, architectural decisions with their why, and hard-won gotchas. Do not use for transient task state or facts that grep, git, LSP, or the current files can re-derive.",
             serde_json::to_value(schemars::schema_for!(MemorySaveArgs)).unwrap(),
         )
     }
@@ -52,7 +50,7 @@ impl ToolHandler for MemorySaveTool {
 
     async fn handle(&self, invocation: ToolInvocation, ctx: &ToolContext) -> ToolOutcome {
         let call = invocation.call;
-        let args: MemorySaveArgs = match serde_json::from_value(call.arguments) {
+        let args: MemorySaveArgs = match serde_json::from_value(call.arguments.clone()) {
             Ok(args) => args,
             Err(err) => return error(call.id, call.name, err.to_string()),
         };
@@ -78,9 +76,40 @@ impl ToolHandler for MemorySaveTool {
             content: args.content,
             files: args.files,
             concepts: args.concepts,
-            source_observation_ids: args.source_observation_ids,
+            source_refs: source_refs_for_tool_call(ctx, &call),
             pinned: args.pinned,
         };
+
+        match api
+            .runtime()
+            .db()
+            .find_duplicate_memory_candidate_or_entry(
+                derived.project_id.as_deref(),
+                derived.thread_id.as_ref(),
+                &input,
+            )
+            .await
+        {
+            Ok(Some(existing)) => {
+                return success_json(
+                    call.id,
+                    call.name,
+                    format!(
+                        "Memory candidate skipped; {} is already known.",
+                        existing.id
+                    ),
+                    json!({
+                        "status": "skipped",
+                        "duplicate_of": existing.id,
+                        "scope": existing.scope.as_str(),
+                        "kind": existing.kind.as_str(),
+                        "pending_curation": false
+                    }),
+                );
+            }
+            Ok(None) => {}
+            Err(err) => return error(call.id, call.name, err.to_string()),
+        }
 
         match api
             .runtime()

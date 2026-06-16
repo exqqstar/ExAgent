@@ -3,15 +3,11 @@ use crate::state::index_db::IndexDb;
 use super::{
     code_awareness::CodeAwarenessSnapshot,
     query::{build_memory_query_terms, fts_match_query},
-    types::{
-        MemoryRankSignals, MemoryRecallMode, MemoryScope, MemorySearchHit, MemorySearchQuery,
-        MemorySourceKind,
-    },
+    types::{MemoryRankSignals, MemoryRecallMode, MemoryScope, MemorySearchHit, MemorySearchQuery},
 };
 
 const RRF_K: f64 = 60.0;
 const AUTO_INJECT_STALE_ENTRY_MIN_SCORE: f64 = 0.28;
-const AUTO_INJECT_OBSERVATION_MIN_CONFIDENCE: f64 = 0.72;
 const STALE_CHECK_BUDGET_PER_RANK_PASS: usize = 6;
 
 pub async fn search_and_rank(
@@ -79,10 +75,7 @@ pub async fn search_and_rank(
     if query.mode == MemoryRecallMode::AutoInject {
         hits.retain(|hit| {
             !hit.quarantined
-                && auto_inject_source_allowed(hit)
-                && (!hit.stale
-                    || (hit.source == MemorySourceKind::Entry
-                        && hit.rank.final_score >= AUTO_INJECT_STALE_ENTRY_MIN_SCORE))
+                && (!hit.stale || hit.rank.final_score >= AUTO_INJECT_STALE_ENTRY_MIN_SCORE)
         });
     }
 
@@ -99,10 +92,8 @@ pub async fn search_and_rank(
 
 fn source_boost(hit: &MemorySearchHit, mode: MemoryRecallMode) -> f64 {
     match (hit.source, mode) {
-        (MemorySourceKind::Entry, MemoryRecallMode::AutoInject) => 0.18,
-        (MemorySourceKind::Entry, _) => 0.12,
-        (MemorySourceKind::Observation, MemoryRecallMode::AutoInject) => -0.08,
-        (MemorySourceKind::Observation, _) => 0.02,
+        (_, MemoryRecallMode::AutoInject) => 0.18,
+        _ => 0.12,
     }
 }
 
@@ -124,11 +115,8 @@ fn confidence_boost(confidence: f64) -> f64 {
     ((confidence.clamp(0.0, 1.0) - 0.5) * 0.28).clamp(-0.14, 0.14)
 }
 
-fn strength_boost(source: MemorySourceKind) -> f64 {
-    match source {
-        MemorySourceKind::Entry => 0.14,
-        MemorySourceKind::Observation => 0.0,
-    }
+fn strength_boost(_source: super::types::MemorySourceKind) -> f64 {
+    0.14
 }
 
 fn candidate_order_boost(index: usize) -> f64 {
@@ -140,18 +128,6 @@ fn privacy_penalty(hit: &MemorySearchHit) -> f64 {
         -1.0
     } else {
         0.0
-    }
-}
-
-fn auto_inject_source_allowed(hit: &MemorySearchHit) -> bool {
-    match hit.source {
-        MemorySourceKind::Entry => true,
-        MemorySourceKind::Observation => {
-            hit.kind == "user_rule"
-                && hit.auto_inject_eligible
-                && hit.confidence.is_finite()
-                && hit.confidence >= AUTO_INJECT_OBSERVATION_MIN_CONFIDENCE
-        }
     }
 }
 

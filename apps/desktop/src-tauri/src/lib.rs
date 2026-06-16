@@ -74,6 +74,7 @@ pub fn run() {
             commands::memory_forget,
             commands::memory_audit,
             commands::memory_list_candidates,
+            commands::memory_list_archived,
             commands::memory_promote,
             commands::provider_settings_get,
             commands::provider_settings_save,

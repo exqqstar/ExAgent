@@ -226,6 +226,7 @@ impl ThreadManager {
                 BoundaryCapability::MemoryForget,
                 BoundaryCapability::MemoryAudit,
                 BoundaryCapability::MemoryListCandidates,
+                BoundaryCapability::MemoryListArchived,
                 BoundaryCapability::MemoryPromote,
             ],
             supported_streams: vec![BoundaryCapability::EventsSubscribe],
@@ -423,6 +424,11 @@ impl ThreadManager {
                 memory_processor::memory_list_candidates(self.services.as_ref(), params)
                     .await
                     .map(BoundaryOpResponse::MemoryCandidatesListed)
+            }
+            BoundaryOp::MemoryListArchived(params) => {
+                memory_processor::memory_list_archived(self.services.as_ref(), params)
+                    .await
+                    .map(BoundaryOpResponse::MemoryArchivedListed)
             }
             BoundaryOp::MemoryPromote(params) => {
                 memory_processor::memory_promote(self.services.as_ref(), params)

@@ -2,10 +2,10 @@ use crate::registry::ToolContext;
 use crate::runtime::memory::MemoryToolApi;
 use crate::state::memory::{
     MemoryEntryKind, MemoryEntryRecord, MemoryRecallMode, MemoryScope, MemorySearchHit,
-    MemorySearchQuery, MemoryStatus,
+    MemorySearchQuery, MemorySourceRef, MemoryStatus,
 };
 use crate::tools::ToolOutcome;
-use crate::types::{ThreadId, ToolResult, ToolStatus};
+use crate::types::{ThreadId, ToolCall, ToolResult, ToolStatus};
 
 pub(crate) const MEMORY_TOOL_ACTOR: &str = "model";
 
@@ -109,7 +109,6 @@ pub(crate) async fn search_query(
     ctx: &ToolContext,
     query: String,
     scope: MemoryScope,
-    include_observations: bool,
     limit: Option<usize>,
 ) -> Result<MemorySearchQuery, String> {
     let derived = derive_scope(ctx, scope).await?;
@@ -121,8 +120,23 @@ pub(crate) async fn search_query(
         mode: MemoryRecallMode::ToolPull,
         limit: tool_limit(ctx, limit),
         include_entries: true,
-        include_observations,
     })
+}
+
+pub(crate) fn source_refs_for_tool_call(
+    ctx: &ToolContext,
+    call: &ToolCall,
+) -> Vec<MemorySourceRef> {
+    let Some(thread_id) = ctx.thread_id.clone() else {
+        return Vec::new();
+    };
+    vec![MemorySourceRef {
+        thread_id,
+        turn_id: ctx.turn_id.clone(),
+        event_id: None,
+        tool_call_id: Some(call.id.clone()),
+        tool_invocation_id: ctx.tool_invocation_id.clone(),
+    }]
 }
 
 pub(crate) fn tool_limit(ctx: &ToolContext, limit: Option<usize>) -> usize {
@@ -141,12 +155,11 @@ pub(crate) fn format_hits(hits: &[MemorySearchHit], max_chars: usize) -> String 
     let mut rendered = String::new();
     for (index, hit) in hits.iter().enumerate() {
         let mut line = format!(
-            "{}. [{}/{}/{} confidence={:.2} stale={} quarantined={}] {}",
+            "{}. [{}/{}/{} stale={} quarantined={}] {}",
             index + 1,
             hit.source.as_str(),
             hit.scope.as_str(),
             hit.kind,
-            hit.confidence,
             hit.stale,
             hit.quarantined,
             single_line(&hit.title)
@@ -296,11 +309,10 @@ mod tests {
                 symbol: Some("ContextManager".into()),
             }],
             concepts: vec!["memory".into()],
-            source_observation_ids: vec![],
+            source_refs: vec![],
             confidence: 0.93,
             stale: false,
             quarantined: false,
-            auto_inject_eligible: true,
             pinned: false,
             status: None,
             supersedes_id: None,

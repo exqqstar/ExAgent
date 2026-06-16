@@ -1,17 +1,13 @@
 use exagent::app_server::desktop_facade::{DesktopFacade, NewProjectRequest};
 use exagent::app_server::protocol::{
-    BoundaryCapability, BoundaryOp, BoundaryOpResponse, InitializeParams, MemoryUpdateAction,
-    MemoryUpdateParams,
+    BoundaryCapability, BoundaryOp, BoundaryOpResponse, InitializeParams, MemoryListArchivedParams,
+    MemoryUpdateAction, MemoryUpdateParams,
 };
 use exagent::app_server::AppServerService;
 use exagent::config::AgentConfig;
 use exagent::index_db::IndexDb;
 use exagent::resolver::EnvModelResolver;
-use exagent::state::memory::{
-    MemoryCodeRef, MemoryEntryKind, MemoryObservationKind, MemoryObservationUpsert,
-    MemoryPrivacyFlags, MemorySaveInput, MemoryScope,
-};
-use exagent::types::ThreadId;
+use exagent::state::memory::{MemoryEntryKind, MemorySaveInput, MemoryScope};
 use std::sync::Arc;
 
 #[tokio::test]
@@ -32,6 +28,9 @@ async fn initialize_exposes_memory_capability() {
     assert!(initialized
         .supported_ops
         .contains(&BoundaryCapability::MemoryPromote));
+    assert!(initialized
+        .supported_ops
+        .contains(&BoundaryCapability::MemoryListArchived));
 }
 
 #[tokio::test]
@@ -71,7 +70,7 @@ async fn desktop_memory_search_derives_scope_from_project_lookup() {
             content: "Desktop memory search must derive scope from workspace root.".into(),
             files: vec!["src/app_server/desktop_facade.rs".into()],
             concepts: vec!["app-server-memory".into()],
-            source_observation_ids: vec![],
+            source_refs: vec![],
             pinned: false,
         },
         "test",
@@ -80,7 +79,7 @@ async fn desktop_memory_search_derives_scope_from_project_lookup() {
     .unwrap();
 
     let response = facade
-        .memory_search(&project.id, None, "Derived workspace memory", false, 10)
+        .memory_search(&project.id, None, "Derived workspace memory", 10)
         .await
         .unwrap();
 
@@ -126,7 +125,7 @@ async fn desktop_memory_update_is_scoped_and_supersedes_active_entries() {
                 content: "appserveroldgone should disappear after supersession.".into(),
                 files: vec!["src/app_server/request_processors/memory_processor.rs".into()],
                 concepts: vec!["desktop memory update".into()],
-                source_observation_ids: vec![],
+                source_refs: vec![],
                 pinned: false,
             },
             "test",
@@ -147,7 +146,6 @@ async fn desktop_memory_update_is_scoped_and_supersedes_active_entries() {
                 content: None,
                 files: None,
                 concepts: None,
-                source_observation_ids: None,
                 pinned: None,
             },
         )
@@ -170,7 +168,6 @@ async fn desktop_memory_update_is_scoped_and_supersedes_active_entries() {
                     "src/app_server/request_processors/memory_processor.rs".into(),
                 ]),
                 concepts: Some(vec!["desktop memory update".into()]),
-                source_observation_ids: None,
                 pinned: Some(true),
             },
         )
@@ -184,13 +181,13 @@ async fn desktop_memory_update_is_scoped_and_supersedes_active_entries() {
     assert!(superseded.entry.pinned);
 
     let old_hits = facade
-        .memory_search(&project.id, None, "appserveroldgone", false, 10)
+        .memory_search(&project.id, None, "appserveroldgone", 10)
         .await
         .unwrap();
     assert!(old_hits.hits.is_empty());
 
     let new_hits = facade
-        .memory_search(&project.id, None, "appservernewkept", false, 10)
+        .memory_search(&project.id, None, "appservernewkept", 10)
         .await
         .unwrap();
     assert_eq!(new_hits.hits.len(), 1);
@@ -198,7 +195,7 @@ async fn desktop_memory_update_is_scoped_and_supersedes_active_entries() {
 }
 
 #[tokio::test]
-async fn desktop_memory_empty_search_lists_inspection_rows_with_trust_metadata() {
+async fn desktop_memory_archive_is_reversible_and_excluded_from_active_search() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path().join("workspace");
     tokio::fs::create_dir_all(&workspace).await.unwrap();
@@ -213,7 +210,7 @@ async fn desktop_memory_empty_search_lists_inspection_rows_with_trust_metadata()
     let facade = DesktopFacade::new(service, db.clone());
     let project = facade
         .add_project(NewProjectRequest {
-            name: "Memory Inspect".into(),
+            name: "Memory Archive".into(),
             path: workspace.clone(),
         })
         .await
@@ -230,65 +227,97 @@ async fn desktop_memory_empty_search_lists_inspection_rows_with_trust_metadata()
             MemorySaveInput {
                 scope: MemoryScope::Project,
                 kind: MemoryEntryKind::Fact,
-                title: "Pinned inspection entry".into(),
-                content: "Empty desktop memory search should list active entries.".into(),
+                title: "Archive candidate entry".into(),
+                content: "archivereversiblemarker should disappear while archived.".into(),
                 files: vec!["src/app_server/request_processors/memory_processor.rs".into()],
-                concepts: vec!["desktop memory inspection".into()],
-                source_observation_ids: vec![],
-                pinned: true,
+                concepts: vec!["desktop memory archive".into()],
+                source_refs: vec![],
+                pinned: false,
             },
             "test",
         )
         .await
         .unwrap();
-    db.upsert_memory_observations_incremental(vec![MemoryObservationUpsert {
-        id: "obs_desktop_inspect".into(),
-        scope: MemoryScope::Project,
-        project_id: Some(derived_project_id),
-        thread_id: ThreadId::new("thread_memory_inspect"),
-        turn_id: None,
-        event_id: None,
-        source_tool_call_id: None,
-        kind: MemoryObservationKind::FileRead,
-        title: "Low trust observation".into(),
-        narrative: "Empty desktop memory search should list observations separately.".into(),
-        files: vec!["src/app_server/protocol.rs".into()],
-        code_refs: vec![MemoryCodeRef {
-            path: "src/app_server/protocol.rs".into(),
-            line: None,
-            symbol: None,
-        }],
-        concepts: vec!["desktop memory inspection".into()],
-        importance: 2,
-        confidence: 0.35,
-        auto_inject_eligible: false,
-        privacy_flags: MemoryPrivacyFlags::default(),
-        created_at_ms: 1_700_000_000_000,
-    }])
-    .await
-    .unwrap();
 
-    let response = facade
-        .memory_search(&project.id, None, "", true, 10)
+    let archived = facade
+        .memory_update(
+            &project.id,
+            MemoryUpdateParams {
+                workspace_root: None,
+                entry_id: entry.id.clone(),
+                action: MemoryUpdateAction::Archive,
+                scope: None,
+                kind: None,
+                title: None,
+                content: None,
+                files: None,
+                concepts: None,
+                pinned: None,
+            },
+        )
         .await
         .unwrap();
+    assert_eq!(archived.entry.status, "archived");
 
-    let active = response
-        .hits
-        .iter()
-        .find(|hit| hit.id == entry.id)
-        .expect("active entry listed");
-    assert_eq!(active.source, "entry");
-    assert!(active.pinned);
-    assert_eq!(active.status.as_deref(), Some("active"));
-    assert_eq!(active.use_count, 0);
+    let archived_list = facade
+        .memory_list_archived(
+            &project.id,
+            MemoryListArchivedParams {
+                workspace_root: None,
+                scope: None,
+                query: Some("archivereversiblemarker".into()),
+                limit: Some(10),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(archived_list.archived.len(), 1);
+    assert_eq!(archived_list.archived[0].id, entry.id);
 
-    let observation = response
-        .hits
-        .iter()
-        .find(|hit| hit.id == "obs_desktop_inspect")
-        .expect("observation listed");
-    assert_eq!(observation.source, "observation");
-    assert_eq!(observation.confidence, 0.35);
-    assert!(!observation.pinned);
+    let archived_hits = facade
+        .memory_search(&project.id, None, "archivereversiblemarker", 10)
+        .await
+        .unwrap();
+    assert!(archived_hits.hits.is_empty());
+
+    let restored = facade
+        .memory_update(
+            &project.id,
+            MemoryUpdateParams {
+                workspace_root: None,
+                entry_id: entry.id.clone(),
+                action: MemoryUpdateAction::Unarchive,
+                scope: None,
+                kind: None,
+                title: None,
+                content: None,
+                files: None,
+                concepts: None,
+                pinned: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(restored.entry.status, "active");
+
+    let archived_after_restore = facade
+        .memory_list_archived(
+            &project.id,
+            MemoryListArchivedParams {
+                workspace_root: None,
+                scope: None,
+                query: Some("archivereversiblemarker".into()),
+                limit: Some(10),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(archived_after_restore.archived.is_empty());
+
+    let restored_hits = facade
+        .memory_search(&project.id, None, "archivereversiblemarker", 10)
+        .await
+        .unwrap();
+    assert_eq!(restored_hits.hits.len(), 1);
+    assert_eq!(restored_hits.hits[0].id, entry.id);
 }

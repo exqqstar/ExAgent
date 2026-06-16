@@ -1,6 +1,4 @@
-use crate::state::memory::{MemorySearchHit, MemorySourceKind};
-
-const MIN_AUTO_INJECT_CONFIDENCE: f64 = 0.72;
+use crate::state::memory::MemorySearchHit;
 
 pub fn format_auto_memory_context(hits: &[MemorySearchHit], max_chars: usize) -> String {
     format_memory_context("Relevant project memory:", hits, max_chars)
@@ -50,17 +48,12 @@ fn format_memory_context(header: &str, hits: &[MemorySearchHit], max_chars: usiz
 }
 
 fn strictly_injectable(hit: &MemorySearchHit) -> bool {
-    if hit.quarantined
-        || hit.stale
-        || !hit.confidence.is_finite()
-        || hit.confidence < MIN_AUTO_INJECT_CONFIDENCE
-    {
+    if hit.quarantined || hit.stale {
         return false;
     }
-    match hit.source {
-        MemorySourceKind::Entry => hit.kind != "candidate",
-        MemorySourceKind::Observation => hit.kind == "user_rule" && hit.auto_inject_eligible,
-    }
+    hit.status
+        .map(|status| status == crate::state::memory::MemoryStatus::Active)
+        .unwrap_or_else(|| hit.kind != "candidate")
 }
 
 fn format_hit(hit: &MemorySearchHit) -> String {
@@ -69,8 +62,6 @@ fn format_hit(hit: &MemorySearchHit) -> String {
     line.push_str(hit.source.as_str());
     line.push(':');
     line.push_str(&hit.kind);
-    line.push_str(" confidence=");
-    line.push_str(&format!("{:.2}", hit.confidence));
     line.push_str("] ");
     line.push_str(&single_line(hit.title.trim()));
 

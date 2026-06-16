@@ -44,6 +44,7 @@ pub enum BoundaryCapability {
     MemoryForget,
     MemoryAudit,
     MemoryListCandidates,
+    MemoryListArchived,
     MemoryPromote,
 }
 
@@ -752,7 +753,6 @@ pub struct MemorySearchParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     pub query: String,
-    pub include_observations: bool,
     pub limit: usize,
 }
 
@@ -771,8 +771,6 @@ pub struct MemoryHitView {
     pub body: String,
     pub files: Vec<String>,
     pub concepts: Vec<String>,
-    #[serde(default)]
-    pub source_observation_ids: Vec<String>,
     pub confidence: f64,
     pub stale: bool,
     pub quarantined: bool,
@@ -802,8 +800,6 @@ pub struct MemorySaveInputView {
     #[serde(default)]
     pub concepts: Vec<String>,
     #[serde(default)]
-    pub source_observation_ids: Vec<String>,
-    #[serde(default)]
     pub pinned: bool,
 }
 
@@ -830,8 +826,6 @@ pub struct MemoryUpdateParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concepts: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_observation_ids: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
 }
 
@@ -840,6 +834,8 @@ pub struct MemoryUpdateParams {
 pub enum MemoryUpdateAction {
     Pin,
     Unpin,
+    Archive,
+    Unarchive,
     Reject,
     Supersede,
 }
@@ -906,6 +902,22 @@ pub struct MemoryListCandidatesResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryListArchivedParams {
+    pub workspace_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryListArchivedResponse {
+    pub archived: Vec<MemoryEntryView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryPromoteParams {
     pub workspace_root: Option<String>,
     pub entry_id: String,
@@ -929,8 +941,6 @@ pub struct MemoryEntryView {
     pub body: String,
     pub files: Vec<String>,
     pub concepts: Vec<String>,
-    #[serde(default)]
-    pub source_observation_ids: Vec<String>,
     pub confidence: f64,
     pub pinned: bool,
     pub status: String,
@@ -973,6 +983,7 @@ pub enum BoundaryOp {
     MemoryForget(MemoryForgetParams),
     MemoryAudit(MemoryAuditParams),
     MemoryListCandidates(MemoryListCandidatesParams),
+    MemoryListArchived(MemoryListArchivedParams),
     MemoryPromote(MemoryPromoteParams),
 }
 
@@ -1003,6 +1014,7 @@ pub enum BoundaryOpResponse {
     MemoryForgotten(MemoryForgetResponse),
     MemoryAudit(MemoryAuditResponse),
     MemoryCandidatesListed(MemoryListCandidatesResponse),
+    MemoryArchivedListed(MemoryListArchivedResponse),
     MemoryPromoted(MemoryPromoteResponse),
 }
 

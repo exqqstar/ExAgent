@@ -1,5 +1,5 @@
 export type MemoryScope = "project" | "global";
-export type MemorySource = "entry" | "observation" | "candidate" | string;
+export type MemorySource = "entry" | string;
 
 export interface MemoryFileRef {
   path: string;
@@ -15,7 +15,6 @@ export interface MemoryHitView {
   body: string;
   files: Array<string | MemoryFileRef>;
   concepts: string[];
-  source_observation_ids: string[];
   confidence: number;
   stale: boolean;
   quarantined: boolean;
@@ -41,7 +40,6 @@ export interface MemoryEntryView {
   quarantined: boolean;
   inactive_reason?: string | null;
   supersedes_id?: string | null;
-  source_observation_ids: string[];
   created_at_ms: number;
   updated_at_ms: number;
   use_count?: number;
@@ -67,7 +65,6 @@ export interface MemorySaveInput {
   content: string;
   files?: string[];
   concepts?: string[];
-  source_observation_ids?: string[];
   pinned?: boolean;
 }
 
@@ -75,7 +72,7 @@ export interface MemorySaveResponse {
   entry: MemoryEntryView;
 }
 
-export type MemoryUpdateAction = "pin" | "unpin" | "reject" | "supersede";
+export type MemoryUpdateAction = "pin" | "unpin" | "archive" | "unarchive" | "reject" | "supersede";
 
 export interface MemoryUpdateResponse {
   entry: MemoryEntryView;
@@ -92,6 +89,10 @@ export interface MemoryAuditResponse {
 
 export interface MemoryListCandidatesResponse {
   candidates: MemoryEntryView[];
+}
+
+export interface MemoryListArchivedResponse {
+  archived: MemoryEntryView[];
 }
 
 export interface MemoryPromoteResponse {
@@ -117,13 +118,12 @@ export async function memorySearch(
   projectId: string,
   scope: MemoryScope = "project",
   query = "",
-  includeObservations = false,
   limit = 50
 ): Promise<MemorySearchResponse> {
   if (!isTauriRuntime()) {
     return { hits: [] };
   }
-  return invokeCommand<MemorySearchResponse>("memory_search", { projectId, scope, query, includeObservations, limit });
+  return invokeCommand<MemorySearchResponse>("memory_search", { projectId, scope, query, limit });
 }
 
 export async function memorySave(
@@ -145,8 +145,7 @@ export async function memoryUpdate(
   content?: string,
   files?: string[],
   concepts?: string[],
-  pinned?: boolean,
-  sourceObservationIds?: string[]
+  pinned?: boolean
 ): Promise<MemoryUpdateResponse> {
   ensureTauriRuntimeForMemoryWrite();
   return invokeCommand<MemoryUpdateResponse>("memory_update", {
@@ -159,7 +158,6 @@ export async function memoryUpdate(
     content,
     files,
     concepts,
-    sourceObservationIds,
     pinned
   });
 }
@@ -195,6 +193,18 @@ export async function memoryListCandidates(
     return { candidates: [] };
   }
   return invokeCommand<MemoryListCandidatesResponse>("memory_list_candidates", { projectId, scope, query, limit });
+}
+
+export async function memoryListArchived(
+  projectId: string,
+  scope: MemoryScope = "project",
+  query = "",
+  limit = 50
+): Promise<MemoryListArchivedResponse> {
+  if (!isTauriRuntime()) {
+    return { archived: [] };
+  }
+  return invokeCommand<MemoryListArchivedResponse>("memory_list_archived", { projectId, scope, query, limit });
 }
 
 export async function memoryPromote(

@@ -1,6 +1,5 @@
 pub mod code_awareness;
 pub mod privacy;
-pub mod projector;
 pub mod query;
 pub mod ranker;
 pub mod safety;
@@ -9,8 +8,7 @@ pub mod store;
 pub mod types;
 
 pub use types::{
-    MemoryCodeRef, MemoryEntryKind, MemoryEntryRecord, MemoryObservationKind,
-    MemoryObservationUpsert, MemoryPrivacyFlags, MemoryRankSignals, MemoryRecallMode,
-    MemorySaveInput, MemoryScope, MemorySearchHit, MemorySearchQuery, MemorySourceKind,
-    MemoryStatus,
+    MemoryCodeRef, MemoryEntryKind, MemoryEntryRecord, MemoryPrivacyFlags, MemoryRankSignals,
+    MemoryRecallMode, MemorySaveInput, MemoryScope, MemorySearchHit, MemorySearchQuery,
+    MemorySourceKind, MemorySourceRef, MemoryStatus,
 };

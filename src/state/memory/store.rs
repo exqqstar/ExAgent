@@ -8,18 +8,15 @@ use serde::{de::DeserializeOwned, Serialize};
 use sqlx::{Row, Sqlite, Transaction};
 use time::OffsetDateTime;
 
-use crate::{
-    state::index_db::IndexDb,
-    types::{ThreadId, TurnId},
-};
+use crate::{state::index_db::IndexDb, types::ThreadId};
 
 use super::{
     code_awareness::CodeAwarenessSnapshot,
     privacy, safety,
     types::{
-        MemoryCodeRef, MemoryEntryKind, MemoryEntryRecord, MemoryObservationKind,
-        MemoryObservationUpsert, MemoryPrivacyFlags, MemoryRankSignals, MemorySaveInput,
-        MemoryScope, MemorySearchHit, MemorySearchQuery, MemorySourceKind, MemoryStatus,
+        MemoryCodeRef, MemoryEntryKind, MemoryEntryRecord, MemoryPrivacyFlags, MemoryRankSignals,
+        MemorySaveInput, MemoryScope, MemorySearchHit, MemorySearchQuery, MemorySourceKind,
+        MemorySourceRef, MemoryStatus,
     },
 };
 
@@ -48,6 +45,71 @@ impl IndexDb {
             .await
     }
 
+    pub async fn find_duplicate_memory_candidate_or_entry(
+        &self,
+        project_id: Option<&str>,
+        thread_id: Option<&ThreadId>,
+        input: &MemorySaveInput,
+    ) -> anyhow::Result<Option<MemoryEntryRecord>> {
+        validate_memory_write_scope(input.scope, project_id, thread_id)?;
+
+        let privacy::RedactedMemoryText { text: title, .. } =
+            privacy::redact_memory_text(&input.title, 512);
+        let privacy::RedactedMemoryText { text: content, .. } =
+            privacy::redact_memory_text(&input.content, 12 * 1024);
+        let thread_id_string = thread_id.map(|thread_id| thread_id.as_str().to_string());
+        let mut sql = String::from(
+            r#"
+SELECT e.*
+FROM memory_entries e
+WHERE e.scope = ?
+  AND e.kind = ?
+  AND e.title = ?
+  AND e.content = ?
+  AND e.status IN ('candidate', 'active', 'rejected')
+            "#,
+        );
+        match input.scope {
+            MemoryScope::Global => {
+                sql.push_str(" AND e.project_id IS NULL AND e.thread_id IS NULL")
+            }
+            MemoryScope::Project => sql.push_str(" AND e.project_id = ? AND e.thread_id IS NULL"),
+            MemoryScope::Thread => sql.push_str(" AND e.project_id = ? AND e.thread_id = ?"),
+        }
+        sql.push_str(
+            r#"
+ORDER BY CASE e.status
+  WHEN 'active' THEN 0
+  WHEN 'candidate' THEN 1
+  WHEN 'rejected' THEN 2
+  ELSE 3
+END, e.updated_at_ms DESC
+LIMIT 1
+            "#,
+        );
+
+        let mut query = sqlx::query(&sql)
+            .bind(input.scope.as_str())
+            .bind(input.kind.as_str())
+            .bind(title)
+            .bind(content);
+        match input.scope {
+            MemoryScope::Global => {}
+            MemoryScope::Project => {
+                query = query.bind(project_id);
+            }
+            MemoryScope::Thread => {
+                query = query.bind(project_id).bind(thread_id_string.as_deref());
+            }
+        }
+
+        query
+            .fetch_optional(self.pool())
+            .await?
+            .map(|row| memory_entry_from_row(&row))
+            .transpose()
+    }
+
     async fn insert_memory_entry(
         &self,
         project_id: Option<&str>,
@@ -72,9 +134,6 @@ impl IndexDb {
         let concepts = sanitize_memory_concepts(&input.concepts, &mut privacy_flags);
         let scan = safety::scan_injection(&combined_memory_text(&title, &content, &concepts));
         privacy_flags.suspicious_injection |= scan.suspicious;
-        privacy_flags.suspicious_injection |= self
-            .source_observations_have_suspicious_injection(&input.source_observation_ids)
-            .await?;
 
         let id = memory_id(now, &title);
         let project_id = project_id.map(str::to_string);
@@ -84,9 +143,10 @@ impl IndexDb {
         let code_refs_json = to_json(&code_refs, "memory entry code refs")?;
         let concepts_json = to_json(&concepts, "memory entry concepts")?;
         let source_observation_ids_json = to_json(
-            &input.source_observation_ids,
-            "memory entry source observation ids",
+            &Vec::<String>::new(),
+            "deprecated memory entry source observation ids",
         )?;
+        let source_refs_json = to_json(&input.source_refs, "memory entry source refs")?;
         let privacy_flags_json = to_json(&privacy_flags, "memory entry privacy flags")?;
         let confidence = match status {
             MemoryStatus::Active => 0.9,
@@ -103,14 +163,14 @@ impl IndexDb {
         sqlx::query(
             r#"
 INSERT INTO memory_entries (
-  id, scope, project_id, thread_id, kind, title, content, files_json,
-  code_refs_json, concepts_json, source_observation_ids_json, confidence,
-  strength, pinned, status, inactive_reason, supersedes_id, suspicious_injection,
-  privacy_flags_json, created_by, created_at_ms, updated_at_ms, last_used_at_ms,
-  use_count
-)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 7, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL, 0)
-            "#,
+	  id, scope, project_id, thread_id, kind, title, content, files_json,
+	  code_refs_json, concepts_json, source_observation_ids_json, source_refs_json, confidence,
+	  strength, pinned, status, inactive_reason, supersedes_id, suspicious_injection,
+	  privacy_flags_json, created_by, created_at_ms, updated_at_ms, last_used_at_ms,
+	  use_count
+	)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 7, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL, 0)
+	            "#,
         )
         .bind(&id)
         .bind(input.scope.as_str())
@@ -123,6 +183,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 7, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, 
         .bind(&code_refs_json)
         .bind(&concepts_json)
         .bind(&source_observation_ids_json)
+        .bind(&source_refs_json)
         .bind(confidence)
         .bind(if input.pinned { 1_i64 } else { 0_i64 })
         .bind(status.as_str())
@@ -154,25 +215,6 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 7, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, 
         tx.commit().await?;
 
         self.memory_entry_by_id(&id).await
-    }
-
-    pub async fn source_observations_have_suspicious_injection(
-        &self,
-        ids: &[String],
-    ) -> anyhow::Result<bool> {
-        if ids.is_empty() {
-            return Ok(false);
-        }
-
-        let placeholders = (0..ids.len()).map(|_| "?").collect::<Vec<_>>().join(", ");
-        let sql = format!(
-            "SELECT 1 FROM memory_observations WHERE id IN ({placeholders}) AND suspicious_injection != 0 LIMIT 1"
-        );
-        let mut query = sqlx::query(&sql);
-        for id in ids {
-            query = query.bind(id);
-        }
-        Ok(query.fetch_optional(self.pool()).await?.is_some())
     }
 
     pub async fn promote_memory_candidate(
@@ -286,16 +328,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 7, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, 
         merge_privacy_flags(&mut privacy_flags, content_flags);
         let files = sanitize_memory_files(&input.files, &mut privacy_flags);
         let concepts = sanitize_memory_concepts(&input.concepts, &mut privacy_flags);
-        let source_observation_ids = merge_source_observation_ids(
-            &old.source_observation_ids,
-            &input.source_observation_ids,
-        );
+        let source_refs = merge_source_refs(&old.source_refs, &input.source_refs);
         let scan = safety::scan_injection(&combined_memory_text(&title, &content, &concepts));
         privacy_flags.suspicious_injection |= scan.suspicious;
         privacy_flags.suspicious_injection |= old.privacy_flags.suspicious_injection;
-        privacy_flags.suspicious_injection |= self
-            .source_observations_have_suspicious_injection(&source_observation_ids)
-            .await?;
 
         let new_id = memory_id(now, &title);
         let thread_id_string = old
@@ -307,9 +343,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 7, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, 
         let code_refs_json = to_json(&code_refs, "memory entry code refs")?;
         let concepts_json = to_json(&concepts, "memory entry concepts")?;
         let source_observation_ids_json = to_json(
-            &source_observation_ids,
-            "memory entry source observation ids",
+            &Vec::<String>::new(),
+            "deprecated memory entry source observation ids",
         )?;
+        let source_refs_json = to_json(&source_refs, "memory entry source refs")?;
         let privacy_flags_json = to_json(&privacy_flags, "memory entry privacy flags")?;
         let inactive_reason = format!("superseded_by:{new_id}");
 
@@ -332,14 +369,14 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 7, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, 
         sqlx::query(
             r#"
 INSERT INTO memory_entries (
-  id, scope, project_id, thread_id, kind, title, content, files_json,
-  code_refs_json, concepts_json, source_observation_ids_json, confidence,
-  strength, pinned, status, inactive_reason, supersedes_id, suspicious_injection,
-  privacy_flags_json, created_by, created_at_ms, updated_at_ms, last_used_at_ms,
-  use_count
-)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.9, 7, ?, 'active', NULL, ?, ?, ?, ?, ?, ?, NULL, 0)
-            "#,
+	  id, scope, project_id, thread_id, kind, title, content, files_json,
+	  code_refs_json, concepts_json, source_observation_ids_json, source_refs_json, confidence,
+	  strength, pinned, status, inactive_reason, supersedes_id, suspicious_injection,
+	  privacy_flags_json, created_by, created_at_ms, updated_at_ms, last_used_at_ms,
+	  use_count
+	)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.9, 7, ?, 'active', NULL, ?, ?, ?, ?, ?, ?, NULL, 0)
+	            "#,
         )
         .bind(&new_id)
         .bind(input.scope.as_str())
@@ -352,6 +389,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.9, 7, ?, 'active', NULL, ?, ?, ?, ?, 
         .bind(&code_refs_json)
         .bind(&concepts_json)
         .bind(&source_observation_ids_json)
+        .bind(&source_refs_json)
         .bind(if input.pinned { 1_i64 } else { 0_i64 })
         .bind(old_id)
         .bind(if privacy_flags.suspicious_injection {
@@ -438,6 +476,131 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.9, 7, ?, 'active', NULL, ?, ?, ?, ?, 
             bail!("memory entry {id} does not exist");
         }
         let action = if pinned { "pin" } else { "unpin" };
+        insert_audit_event(&mut tx, id, action, actor, "{}", now).await?;
+        tx.commit().await?;
+
+        self.memory_entry_by_id(id).await
+    }
+
+    pub async fn archive_memory_entry(
+        &self,
+        id: &str,
+        actor: &str,
+    ) -> anyhow::Result<MemoryEntryRecord> {
+        self.archive_memory_entry_with_scope(id, actor, None, None)
+            .await
+    }
+
+    pub async fn archive_memory_entry_with_scope(
+        &self,
+        id: &str,
+        actor: &str,
+        project_id: Option<&str>,
+        thread_id: Option<&ThreadId>,
+    ) -> anyhow::Result<MemoryEntryRecord> {
+        self.transition_memory_entry_archive_state(
+            id,
+            MemoryStatus::Active,
+            MemoryStatus::Archived,
+            Some("archived"),
+            "archive",
+            actor,
+            project_id,
+            thread_id,
+        )
+        .await
+    }
+
+    pub async fn unarchive_memory_entry(
+        &self,
+        id: &str,
+        actor: &str,
+    ) -> anyhow::Result<MemoryEntryRecord> {
+        self.unarchive_memory_entry_with_scope(id, actor, None, None)
+            .await
+    }
+
+    pub async fn unarchive_memory_entry_with_scope(
+        &self,
+        id: &str,
+        actor: &str,
+        project_id: Option<&str>,
+        thread_id: Option<&ThreadId>,
+    ) -> anyhow::Result<MemoryEntryRecord> {
+        self.transition_memory_entry_archive_state(
+            id,
+            MemoryStatus::Archived,
+            MemoryStatus::Active,
+            None,
+            "unarchive",
+            actor,
+            project_id,
+            thread_id,
+        )
+        .await
+    }
+
+    async fn transition_memory_entry_archive_state(
+        &self,
+        id: &str,
+        expected_status: MemoryStatus,
+        target_status: MemoryStatus,
+        inactive_reason: Option<&str>,
+        action: &str,
+        actor: &str,
+        allowed_project_id: Option<&str>,
+        allowed_thread_id: Option<&ThreadId>,
+    ) -> anyhow::Result<MemoryEntryRecord> {
+        let record = self.memory_entry_by_id(id).await?;
+        if record.status != expected_status {
+            bail!(
+                "memory entry {id} must be {} to {action}, found {}",
+                expected_status.as_str(),
+                record.status.as_str()
+            );
+        }
+        if !entry_matches_allowed_scope(&record, allowed_project_id, allowed_thread_id) {
+            bail!("memory entry {id} is outside the current memory scope");
+        }
+
+        let now = now_unix_millis();
+        let thread_id_string = record
+            .thread_id
+            .as_ref()
+            .map(|thread_id| thread_id.as_str().to_string());
+        let mut tx = self.pool().begin().await?;
+        let result = sqlx::query(
+            "UPDATE memory_entries SET status = ?, inactive_reason = ?, updated_at_ms = ? WHERE id = ? AND status = ?",
+        )
+        .bind(target_status.as_str())
+        .bind(inactive_reason)
+        .bind(now)
+        .bind(id)
+        .bind(expected_status.as_str())
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() == 0 {
+            bail!("memory entry {id} was not {action}d");
+        }
+
+        sqlx::query("DELETE FROM memory_entries_fts WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        if target_status == MemoryStatus::Active {
+            insert_entry_fts(
+                &mut tx,
+                id,
+                record.scope,
+                record.project_id.as_deref(),
+                thread_id_string.as_deref(),
+                &record.title,
+                &record.content,
+                &record.files,
+                &record.concepts,
+            )
+            .await?;
+        }
         insert_audit_event(&mut tx, id, action, actor, "{}", now).await?;
         tx.commit().await?;
 
@@ -542,6 +705,23 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.9, 7, ?, 'active', NULL, ?, ?, ?, ?, 
         &self,
         query: &MemorySearchQuery,
     ) -> anyhow::Result<Vec<MemoryEntryRecord>> {
+        self.list_memory_entries_by_status(query, MemoryStatus::Candidate)
+            .await
+    }
+
+    pub async fn list_archived_memory_entries(
+        &self,
+        query: &MemorySearchQuery,
+    ) -> anyhow::Result<Vec<MemoryEntryRecord>> {
+        self.list_memory_entries_by_status(query, MemoryStatus::Archived)
+            .await
+    }
+
+    async fn list_memory_entries_by_status(
+        &self,
+        query: &MemorySearchQuery,
+        status: MemoryStatus,
+    ) -> anyhow::Result<Vec<MemoryEntryRecord>> {
         if !query.include_entries {
             return Ok(Vec::new());
         }
@@ -550,7 +730,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.9, 7, ?, 'active', NULL, ?, ?, ?, ?, 
             r#"
 SELECT e.*
 FROM memory_entries e
-WHERE status = 'candidate'
+WHERE status = ?
   AND {}
             "#,
             scope_predicate("e", query.scope)
@@ -567,7 +747,7 @@ WHERE status = 'candidate'
             .thread_id
             .as_ref()
             .map(|thread_id| thread_id.as_str().to_string());
-        let mut db_query = sqlx::query(&sql);
+        let mut db_query = sqlx::query(&sql).bind(status.as_str());
         db_query = bind_scope_context(db_query, query, thread_id.as_deref());
         if has_search {
             let term = query.query.trim().to_string();
@@ -623,25 +803,6 @@ LIMIT ?
             }
         }
 
-        if query.include_observations {
-            let sql = format!(
-                r#"
-SELECT o.*
-FROM memory_observations o
-WHERE {}
-ORDER BY o.created_at_ms DESC
-LIMIT ?
-                "#,
-                scope_predicate("o", query.scope)
-            );
-            let mut db_query = sqlx::query(&sql);
-            db_query = bind_scope_context(db_query, query, thread_id.as_deref());
-            let rows = db_query.bind(limit).fetch_all(self.pool()).await?;
-            for row in rows {
-                hits.push(memory_observation_hit_from_row(&row)?);
-            }
-        }
-
         Ok(hits)
     }
 
@@ -662,7 +823,6 @@ FROM memory_entries e
 WHERE e.status = 'active'
   AND e.pinned = 1
   AND e.suspicious_injection = 0
-  AND e.confidence >= 0.72
   AND {}
 ORDER BY e.scope DESC, e.updated_at_ms DESC
 LIMIT ?
@@ -675,34 +835,6 @@ LIMIT ?
         let entry_rows = entry_query.bind(row_limit).fetch_all(self.pool()).await?;
         for row in entry_rows {
             let hit = memory_entry_hit_from_row(&row)?;
-            if hit.confidence.is_finite() {
-                hits.push(hit);
-            }
-        }
-
-        let observation_sql = format!(
-            r#"
-SELECT o.*
-FROM memory_observations o
-WHERE o.kind = 'user_rule'
-  AND o.auto_inject_eligible = 1
-  AND o.suspicious_injection = 0
-  AND o.confidence >= 0.72
-  AND {}
-ORDER BY o.scope DESC, o.created_at_ms DESC
-LIMIT ?
-            "#,
-            frozen_scope_predicate("o", project_id.is_some(), thread_id.is_some())
-        );
-        let mut observation_query = sqlx::query(&observation_sql);
-        observation_query =
-            bind_frozen_scope_context(observation_query, project_id, thread_id_string.as_deref());
-        let observation_rows = observation_query
-            .bind(row_limit)
-            .fetch_all(self.pool())
-            .await?;
-        for row in observation_rows {
-            let hit = memory_observation_hit_from_row(&row)?;
             if hit.confidence.is_finite() {
                 hits.push(hit);
             }
@@ -727,79 +859,6 @@ LIMIT ?
         }
 
         Ok(hits)
-    }
-
-    pub async fn replace_thread_memory_observations(
-        &self,
-        thread_id: &ThreadId,
-        observations: Vec<MemoryObservationUpsert>,
-    ) -> anyhow::Result<()> {
-        let mut tx = self.pool().begin().await?;
-        sqlx::query("DELETE FROM memory_observations_fts WHERE thread_id = ?")
-            .bind(thread_id.as_str())
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM memory_observations WHERE thread_id = ?")
-            .bind(thread_id.as_str())
-            .execute(&mut *tx)
-            .await?;
-        for observation in observations {
-            upsert_observation(&mut tx, &observation).await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
-    pub async fn upsert_memory_observations_incremental(
-        &self,
-        observations: Vec<MemoryObservationUpsert>,
-    ) -> anyhow::Result<()> {
-        let mut tx = self.pool().begin().await?;
-        for observation in observations {
-            upsert_observation(&mut tx, &observation).await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
-    pub async fn memory_projection_start_index(
-        &self,
-        thread_id: &ThreadId,
-    ) -> anyhow::Result<usize> {
-        let row: Option<(i64,)> = sqlx::query_as(
-            "SELECT last_event_index FROM memory_projection_cursors WHERE thread_id = ?",
-        )
-        .bind(thread_id.as_str())
-        .fetch_optional(self.pool())
-        .await?;
-        Ok(row.map(|(index,)| index.max(0) as usize).unwrap_or(0))
-    }
-
-    pub async fn set_memory_projection_cursor(
-        &self,
-        thread_id: &ThreadId,
-        rollout_path: &Path,
-        last_event_index: usize,
-    ) -> anyhow::Result<()> {
-        sqlx::query(
-            r#"
-INSERT INTO memory_projection_cursors (
-  thread_id, rollout_path, last_event_index, last_projected_at_ms
-)
-VALUES (?, ?, ?, ?)
-ON CONFLICT(thread_id) DO UPDATE SET
-  rollout_path = excluded.rollout_path,
-  last_event_index = excluded.last_event_index,
-  last_projected_at_ms = excluded.last_projected_at_ms
-            "#,
-        )
-        .bind(thread_id.as_str())
-        .bind(rollout_path.display().to_string())
-        .bind(last_event_index as i64)
-        .bind(now_unix_millis())
-        .execute(self.pool())
-        .await?;
-        Ok(())
     }
 
     pub async fn project_id_for_existing_path(
@@ -856,28 +915,6 @@ LIMIT 200
 
             for row in rows {
                 hits.push(memory_entry_hit_from_row(&row)?);
-            }
-        }
-
-        if query.include_observations {
-            let sql = format!(
-                r#"
-SELECT o.*
-FROM memory_observations_fts
-JOIN memory_observations o ON o.id = memory_observations_fts.id
-WHERE memory_observations_fts MATCH ?
-  AND {}
-ORDER BY bm25(memory_observations_fts), o.created_at_ms DESC
-LIMIT 200
-                "#,
-                scope_predicate("o", query.scope)
-            );
-            let mut db_query = sqlx::query(&sql).bind(fts);
-            db_query = bind_scope_context(db_query, query, thread_id.as_deref());
-            let rows = db_query.fetch_all(self.pool()).await?;
-
-            for row in rows {
-                hits.push(memory_observation_hit_from_row(&row)?);
             }
         }
 
@@ -1062,126 +1099,6 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     Ok(())
 }
 
-async fn upsert_observation(
-    tx: &mut Transaction<'_, Sqlite>,
-    observation: &MemoryObservationUpsert,
-) -> anyhow::Result<()> {
-    validate_observation_scope(observation)?;
-
-    let privacy::RedactedMemoryText {
-        text: title,
-        flags: title_flags,
-    } = privacy::redact_memory_text(&observation.title, 512);
-    let privacy::RedactedMemoryText {
-        text: narrative,
-        flags: narrative_flags,
-    } = privacy::redact_memory_text(&observation.narrative, 12 * 1024);
-
-    let mut privacy_flags = observation.privacy_flags.clone();
-    merge_privacy_flags(&mut privacy_flags, title_flags);
-    merge_privacy_flags(&mut privacy_flags, narrative_flags);
-    let files = sanitize_memory_files(&observation.files, &mut privacy_flags);
-    let code_refs = sanitize_memory_code_refs(&observation.code_refs, &mut privacy_flags);
-    let concepts = sanitize_memory_concepts(&observation.concepts, &mut privacy_flags);
-    let scan = safety::scan_injection(&combined_memory_text(&title, &narrative, &concepts));
-    privacy_flags.suspicious_injection |= scan.suspicious;
-    let auto_inject_eligible = observation.auto_inject_eligible
-        && observation.kind.auto_inject_kind_allowed()
-        && !privacy_flags.suspicious_injection
-        && !privacy_flags.redacted_secret
-        && !privacy_flags.sensitive_path;
-
-    let files_json = to_json(&files, "memory observation files")?;
-    let code_refs_json = to_json(&code_refs, "memory observation code refs")?;
-    let concepts_json = to_json(&concepts, "memory observation concepts")?;
-    let privacy_flags_json = to_json(&privacy_flags, "memory observation privacy flags")?;
-
-    sqlx::query("DELETE FROM memory_observations_fts WHERE id = ?")
-        .bind(&observation.id)
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query("DELETE FROM memory_observations WHERE id = ?")
-        .bind(&observation.id)
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query(
-        r#"
-INSERT INTO memory_observations (
-  id, scope, project_id, thread_id, turn_id, event_id, source_tool_call_id,
-  kind, title, narrative, files_json, code_refs_json, concepts_json, importance,
-  confidence, auto_inject_eligible, suspicious_injection, privacy_flags_json,
-  created_at_ms
-)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        "#,
-    )
-    .bind(&observation.id)
-    .bind(observation.scope.as_str())
-    .bind(observation.project_id.as_deref())
-    .bind(observation.thread_id.as_str())
-    .bind(observation.turn_id.as_ref().map(|turn_id| turn_id.as_str()))
-    .bind(observation.event_id.as_deref())
-    .bind(observation.source_tool_call_id.as_deref())
-    .bind(observation.kind.as_str())
-    .bind(&title)
-    .bind(&narrative)
-    .bind(&files_json)
-    .bind(&code_refs_json)
-    .bind(&concepts_json)
-    .bind(observation.importance)
-    .bind(observation.confidence)
-    .bind(if auto_inject_eligible { 1_i64 } else { 0_i64 })
-    .bind(if privacy_flags.suspicious_injection {
-        1_i64
-    } else {
-        0_i64
-    })
-    .bind(&privacy_flags_json)
-    .bind(observation.created_at_ms)
-    .execute(&mut **tx)
-    .await?;
-    sqlx::query(
-        r#"
-INSERT INTO memory_observations_fts (
-  id, scope, project_id, thread_id, title, narrative, files, concepts
-)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        "#,
-    )
-    .bind(&observation.id)
-    .bind(observation.scope.as_str())
-    .bind(observation.project_id.as_deref())
-    .bind(observation.thread_id.as_str())
-    .bind(&title)
-    .bind(&narrative)
-    .bind(files.join(" "))
-    .bind(concepts.join(" "))
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-fn validate_observation_scope(observation: &MemoryObservationUpsert) -> anyhow::Result<()> {
-    match observation.scope {
-        MemoryScope::Global => {
-            if observation.project_id.is_some() {
-                bail!("global memory observations cannot include project_id");
-            }
-        }
-        MemoryScope::Project => {
-            if observation.project_id.is_none() {
-                bail!("project memory observations require project_id");
-            }
-        }
-        MemoryScope::Thread => {
-            if observation.project_id.is_none() {
-                bail!("thread memory observations require project_id");
-            }
-        }
-    }
-    Ok(())
-}
-
 async fn insert_audit_event(
     tx: &mut Transaction<'_, Sqlite>,
     memory_id: &str,
@@ -1228,9 +1145,9 @@ fn memory_entry_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Memory
         files,
         code_refs,
         concepts: parse_json_vec(row.try_get("concepts_json")?, "memory entry concepts_json")?,
-        source_observation_ids: parse_json_vec(
-            row.try_get("source_observation_ids_json")?,
-            "memory entry source_observation_ids_json",
+        source_refs: parse_json_vec(
+            row.try_get("source_refs_json")?,
+            "memory entry source_refs_json",
         )?,
         confidence: row.try_get("confidence")?,
         strength: row.try_get("strength")?,
@@ -1260,57 +1177,16 @@ fn memory_entry_hit_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Me
         files: entry.files,
         code_refs: entry.code_refs,
         concepts: entry.concepts,
-        source_observation_ids: entry.source_observation_ids,
+        source_refs: entry.source_refs,
         confidence: entry.confidence,
         stale: false,
         quarantined,
-        auto_inject_eligible: !quarantined,
         pinned: entry.pinned,
         status: Some(entry.status),
         supersedes_id: entry.supersedes_id,
         use_count: entry.use_count,
         thread_id: entry.thread_id,
         turn_id: None,
-        rank: zero_rank(),
-    })
-}
-
-fn memory_observation_hit_from_row(
-    row: &sqlx::sqlite::SqliteRow,
-) -> anyhow::Result<MemorySearchHit> {
-    let files =
-        parse_json_vec::<String>(row.try_get("files_json")?, "memory observation files_json")?;
-    let code_refs = parse_code_refs(row.try_get("code_refs_json")?, &files)?;
-    let mut privacy_flags = parse_privacy_flags(row.try_get("privacy_flags_json")?);
-    privacy_flags.suspicious_injection |= row.try_get::<i64, _>("suspicious_injection")? != 0;
-    let kind = parse_observation_kind(row.try_get::<String, _>("kind")?.as_str())?;
-
-    Ok(MemorySearchHit {
-        source_id: row.try_get("id")?,
-        source: MemorySourceKind::Observation,
-        scope: parse_scope(row.try_get::<String, _>("scope")?.as_str())?,
-        kind: kind.as_str().to_string(),
-        title: row.try_get("title")?,
-        body: row.try_get("narrative")?,
-        files,
-        code_refs,
-        concepts: parse_json_vec(
-            row.try_get("concepts_json")?,
-            "memory observation concepts_json",
-        )?,
-        source_observation_ids: Vec::new(),
-        confidence: row.try_get("confidence")?,
-        stale: false,
-        quarantined: privacy_flags.suspicious_injection,
-        auto_inject_eligible: row.try_get::<i64, _>("auto_inject_eligible")? != 0,
-        pinned: false,
-        status: None,
-        supersedes_id: None,
-        use_count: 0,
-        thread_id: Some(ThreadId::new(row.try_get::<String, _>("thread_id")?)),
-        turn_id: row
-            .try_get::<Option<String>, _>("turn_id")?
-            .map(TurnId::new),
         rank: zero_rank(),
     })
 }
@@ -1332,24 +1208,6 @@ fn parse_entry_kind(value: &str) -> anyhow::Result<MemoryEntryKind> {
         "bug" => Ok(MemoryEntryKind::Bug),
         "fact" => Ok(MemoryEntryKind::Fact),
         _ => bail!("unknown memory entry kind {value:?}"),
-    }
-}
-
-fn parse_observation_kind(value: &str) -> anyhow::Result<MemoryObservationKind> {
-    match value {
-        "user_rule" => Ok(MemoryObservationKind::UserRule),
-        "file_read" => Ok(MemoryObservationKind::FileRead),
-        "file_write" => Ok(MemoryObservationKind::FileWrite),
-        "file_edit" => Ok(MemoryObservationKind::FileEdit),
-        "search" => Ok(MemoryObservationKind::Search),
-        "command_run" => Ok(MemoryObservationKind::CommandRun),
-        "runtime_error" => Ok(MemoryObservationKind::RuntimeError),
-        "goal_report" => Ok(MemoryObservationKind::GoalReport),
-        "review" => Ok(MemoryObservationKind::Review),
-        "open_question" => Ok(MemoryObservationKind::OpenQuestion),
-        "subagent" => Ok(MemoryObservationKind::Subagent),
-        "other" => Ok(MemoryObservationKind::Other),
-        _ => bail!("unknown memory observation kind {value:?}"),
     }
 }
 
@@ -1424,23 +1282,6 @@ fn sanitize_memory_files(files: &[String], privacy_flags: &mut MemoryPrivacyFlag
         .collect()
 }
 
-fn sanitize_memory_code_refs(
-    code_refs: &[MemoryCodeRef],
-    privacy_flags: &mut MemoryPrivacyFlags,
-) -> Vec<MemoryCodeRef> {
-    code_refs
-        .iter()
-        .filter_map(|code_ref| {
-            if is_sensitive_memory_path(&code_ref.path) {
-                privacy_flags.sensitive_path = true;
-                None
-            } else {
-                Some(code_ref.clone())
-            }
-        })
-        .collect()
-}
-
 fn sanitize_memory_concepts(
     concepts: &[String],
     privacy_flags: &mut MemoryPrivacyFlags,
@@ -1484,11 +1325,14 @@ fn merge_privacy_flags(target: &mut MemoryPrivacyFlags, other: MemoryPrivacyFlag
     target.suspicious_injection |= other.suspicious_injection;
 }
 
-fn merge_source_observation_ids(existing: &[String], incoming: &[String]) -> Vec<String> {
+fn merge_source_refs(
+    existing: &[MemorySourceRef],
+    incoming: &[MemorySourceRef],
+) -> Vec<MemorySourceRef> {
     let mut merged = Vec::with_capacity(existing.len() + incoming.len());
-    for id in existing.iter().chain(incoming.iter()) {
-        if !merged.iter().any(|known| known == id) {
-            merged.push(id.clone());
+    for source_ref in existing.iter().chain(incoming.iter()) {
+        if !merged.iter().any(|known| known == source_ref) {
+            merged.push(source_ref.clone());
         }
     }
     merged

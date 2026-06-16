@@ -20,7 +20,7 @@ import { MemoryInspector } from "@/components/memory/MemoryInspector";
 import { Sidebar } from "@/components/Sidebar";
 import { loadWorkbench, useWorkbenchStore } from "@/stores/workbenchStore";
 import type { AgentNode } from "@/types";
-import { useI18n } from "@/lib/i18n";
+import { useI18n, type TranslationKey } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 const DESKTOP_SIDEBAR_DEFAULT_WIDTH = 280;
@@ -48,7 +48,7 @@ export function AppShell() {
   const [resizingDesktopSidebar, setResizingDesktopSidebar] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const pendingApprovalCount = workbench.pendingApprovals.length;
-  const chromeSidebarWidth = desktopSidebarCollapsed ? 164 : desktopSidebarWidth;
+  const chromeSidebarWidth = desktopSidebarWidth;
   const approvalInboxLabel = `${t("approvals.inbox.title")}, ${pendingApprovalCount} ${t("approvals.inbox.pending")} ${
     pendingApprovalCount === 1 ? t("approvals.inbox.approvalSingular") : t("approvals.inbox.approvalPlural")
   }`;
@@ -253,67 +253,114 @@ export function AppShell() {
     <TooltipProvider delayDuration={250}>
       <div ref={shellRef} className="workspace-canvas relative flex h-screen min-h-[640px] flex-col overflow-hidden text-ink">
         <header className="window-chrome flex h-10 shrink-0 items-center">
-          <div
-            className="window-chrome-sidebar hidden h-full shrink-0 items-center md:flex"
-            style={{ width: `${chromeSidebarWidth}px` }}
-          >
-            <div className="traffic-light-space h-full shrink-0" data-tauri-drag-region="" />
-            <div className="flex h-full min-w-0 flex-1 items-center gap-1.5 pr-2">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="window-chrome-action"
-                    aria-label={desktopSidebarCollapsed ? "Show project sidebar" : "Hide project sidebar"}
-                    onClick={() => setDesktopSidebarCollapsed((collapsed) => !collapsed)}
-                  >
-                    <SidebarIcon className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{desktopSidebarCollapsed ? "Show sidebar" : "Hide sidebar"}</TooltipContent>
-              </Tooltip>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="window-chrome-action"
-                aria-label="Back"
-                disabled
-              >
-                <ArrowLeft className="h-4 w-4" />
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="window-chrome-action"
-                aria-label="Forward"
-                disabled
-              >
-                <ArrowRight className="h-4 w-4" />
-              </Button>
-              <div className="h-full min-w-0 flex-1" data-tauri-drag-region="" />
+          {!desktopSidebarCollapsed ? (
+            <div
+              className="window-chrome-sidebar hidden h-full shrink-0 items-center md:flex"
+              style={{ width: `${chromeSidebarWidth}px` }}
+            >
+              <div className="traffic-light-space h-full shrink-0" data-tauri-drag-region="" />
+              <div className="flex h-full min-w-0 flex-1 items-center gap-1.5 pr-2">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="window-chrome-action"
+                      aria-label={t("chrome.sidebar.hideProjectSidebar")}
+                      onClick={() => setDesktopSidebarCollapsed(true)}
+                    >
+                      <SidebarIcon className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{t("chrome.sidebar.hideSidebar")}</TooltipContent>
+                </Tooltip>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="window-chrome-action"
+                  aria-label={t("chrome.navigation.back")}
+                  disabled
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="window-chrome-action"
+                  aria-label={t("chrome.navigation.forward")}
+                  disabled
+                >
+                  <ArrowRight className="h-4 w-4" />
+                </Button>
+                <div className="h-full min-w-0 flex-1" data-tauri-drag-region="" />
+              </div>
             </div>
-          </div>
+          ) : null}
 
-          <div className="flex h-full min-w-0 flex-1 items-center gap-3 px-3 md:px-4">
+          <div
+            className={cn(
+              "window-chrome-main flex h-full min-w-0 flex-1 items-center gap-3 px-3 md:px-4",
+              desktopSidebarCollapsed && "window-chrome-main-full"
+            )}
+          >
+            {desktopSidebarCollapsed ? (
+              <div className="hidden h-full shrink-0 items-center gap-1.5 pr-1 md:flex">
+                <div className="traffic-light-space h-full shrink-0" data-tauri-drag-region="" />
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="window-chrome-action"
+                      aria-label={t("chrome.sidebar.showProjectSidebar")}
+                      onClick={() => setDesktopSidebarCollapsed(false)}
+                    >
+                      <SidebarIcon className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{t("chrome.sidebar.showSidebar")}</TooltipContent>
+                </Tooltip>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="window-chrome-action"
+                  aria-label={t("chrome.navigation.back")}
+                  disabled
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="window-chrome-action"
+                  aria-label={t("chrome.navigation.forward")}
+                  disabled
+                >
+                  <ArrowRight className="h-4 w-4" />
+                </Button>
+              </div>
+            ) : null}
             <div className="flex min-w-0 items-center gap-2">
               <Sheet>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <SheetTrigger asChild>
-                      <Button variant="ghost" size="icon" className="md:hidden" aria-label="Open sidebar">
+                      <Button variant="ghost" size="icon" className="md:hidden" aria-label={t("chrome.sidebar.open")}>
                         <SidebarIcon className="h-4 w-4" />
                       </Button>
                     </SheetTrigger>
                   </TooltipTrigger>
-                  <TooltipContent>Open sidebar</TooltipContent>
+                  <TooltipContent>{t("chrome.sidebar.open")}</TooltipContent>
                 </Tooltip>
                 <SheetContent side="left" className="sidebar-surface w-[280px] border-border p-0">
                   <SheetHeader className="sr-only">
-                    <SheetTitle>Projects and sessions</SheetTitle>
+                    <SheetTitle>{t("chrome.sidebar.projectsAndSessions")}</SheetTitle>
                   </SheetHeader>
                   <Sidebar state={workbench} />
                 </SheetContent>
@@ -324,7 +371,9 @@ export function AppShell() {
                   aria-hidden="true"
                   className={cn("h-1.5 w-1.5 shrink-0 rounded-full", sessionStatusDotClass(activeStatus))}
                 />
-                <p className="type-label-md min-w-0 truncate text-ink">{activeSession?.title ?? "New session"}</p>
+                <p className="type-label-md min-w-0 truncate text-ink">
+                  {activeSession?.title ?? t("chrome.session.new")}
+                </p>
               </div>
             </div>
 
@@ -335,9 +384,11 @@ export function AppShell() {
                 <span className="type-code-sm max-w-[180px] truncate text-muted" data-tauri-drag-region="">
                   {runtimeModel}
                 </span>
-                <span className="window-status-pill type-label-sm text-muted" data-tauri-drag-region="">
-                  {activeStatus.replace("_", " ")}
-                </span>
+                {activeStatus !== "idle" ? (
+                  <span className="window-status-pill type-label-sm text-muted" data-tauri-drag-region="">
+                    {sessionStatusLabel(activeStatus, t)}
+                  </span>
+                ) : null}
               </div>
               {pendingApprovalCount > 0 || workbench.approvalInboxOpen ? (
                 <Sheet open={workbench.approvalInboxOpen} onOpenChange={workbench.setApprovalInboxOpen}>
@@ -376,18 +427,18 @@ export function AppShell() {
                       type="button"
                       variant="ghost"
                       size="icon"
-                      aria-label="Open memory"
+                      aria-label={t("chrome.memory.open")}
                       onClick={() => setMemoryOpen(true)}
                     >
                       <Database className="h-4 w-4" />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>Memory</TooltipContent>
+                  <TooltipContent>{t("chrome.memory.title")}</TooltipContent>
                 </Tooltip>
                 <SheetContent side="right" className="w-[min(680px,calc(100vw-24px))] p-0">
                   <SheetHeader className="sr-only">
-                    <SheetTitle>Memory</SheetTitle>
-                    <SheetDescription>Project memory governance</SheetDescription>
+                    <SheetTitle>{t("chrome.memory.title")}</SheetTitle>
+                    <SheetDescription>{t("chrome.memory.description")}</SheetDescription>
                   </SheetHeader>
                   <MemoryInspector projectId={workbench.activeProjectId} />
                 </SheetContent>
@@ -396,16 +447,16 @@ export function AppShell() {
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <SheetTrigger asChild>
-                      <Button variant="ghost" size="icon" className="2xl:hidden" aria-label="Open inspector">
+                      <Button variant="ghost" size="icon" className="2xl:hidden" aria-label={t("chrome.inspector.open")}>
                         <PanelRight className="h-4 w-4" />
                       </Button>
                     </SheetTrigger>
                   </TooltipTrigger>
-                  <TooltipContent>Open inspector</TooltipContent>
+                  <TooltipContent>{t("chrome.inspector.open")}</TooltipContent>
                 </Tooltip>
                 <SheetContent side="right" className="w-[min(320px,calc(100vw-24px))] p-0">
                   <SheetHeader className="sr-only">
-                    <SheetTitle>Inspector</SheetTitle>
+                    <SheetTitle>{t("chrome.inspector.title")}</SheetTitle>
                   </SheetHeader>
                   <Inspector state={workbench} />
                 </SheetContent>
@@ -417,13 +468,13 @@ export function AppShell() {
         <div className="workspace-body flex min-h-0 flex-1">
           {!desktopSidebarCollapsed ? (
             <aside
-              aria-label="Projects and sessions"
-              className="sidebar-surface relative hidden shrink-0 border-r border-border md:block"
+              aria-label={t("chrome.sidebar.projectsAndSessions")}
+              className="sidebar-surface relative hidden shrink-0 md:block"
               style={{ width: `${desktopSidebarWidth}px` }}
             >
               <Sidebar state={workbench} />
               <div
-                aria-label="Resize project sidebar"
+                aria-label={t("chrome.sidebar.resizeProjectSidebar")}
                 aria-orientation="vertical"
                 aria-valuemax={DESKTOP_SIDEBAR_MAX_WIDTH}
                 aria-valuemin={DESKTOP_SIDEBAR_MIN_WIDTH}
@@ -448,7 +499,12 @@ export function AppShell() {
             </aside>
           ) : null}
 
-          <main className="flex min-w-0 flex-1 flex-col">
+          <main
+            className={cn(
+              "workspace-main flex min-w-0 flex-1 flex-col",
+              desktopSidebarCollapsed && "workspace-main-full"
+            )}
+          >
             <ChatView state={workbench} />
           </main>
         </div>
@@ -492,4 +548,19 @@ function findAgentNode(nodes: AgentNode[], threadId: string): AgentNode | null {
     }
   }
   return null;
+}
+
+function sessionStatusLabel(status: string, t: (key: TranslationKey) => string) {
+  switch (status) {
+    case "running":
+      return t("status.session.running");
+    case "awaiting_approval":
+      return t("status.session.awaitingApproval");
+    case "failed":
+      return t("status.session.failed");
+    case "archived":
+      return t("status.session.archived");
+    default:
+      return t("status.session.idle");
+  }
 }

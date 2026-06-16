@@ -1,4 +1,5 @@
 import type { ThreadTokenUsage } from "@/types";
+import { useI18n, type TranslationKey } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 type TokenUsageRowData = {
@@ -13,28 +14,30 @@ export function TokenUsagePanel({
   usage: ThreadTokenUsage | null | undefined;
   className?: string;
 }) {
+  const { t } = useI18n();
+
   if (!usage) {
-    return <p className={cn("type-body-md text-muted", className)}>No token usage reported for this thread.</p>;
+    return <p className={cn("type-body-md text-muted", className)}>{t("tokenUsage.empty")}</p>;
   }
 
   const totalRows: TokenUsageRowData[] = [
-    { label: "thread total", value: usage.total.total_tokens },
-    { label: "input", value: usage.total.input_tokens },
-    { label: "output", value: usage.total.output_tokens }
+    { label: t("tokenUsage.threadTotal"), value: usage.total.total_tokens },
+    { label: t("tokenUsage.input"), value: usage.total.input_tokens },
+    { label: t("tokenUsage.output"), value: usage.total.output_tokens }
   ];
 
   if (usage.total.reasoning_output_tokens > 0) {
-    totalRows.push({ label: "reasoning", value: usage.total.reasoning_output_tokens });
+    totalRows.push({ label: t("tokenUsage.reasoning"), value: usage.total.reasoning_output_tokens });
   }
 
   if (usage.total.cached_input_tokens > 0) {
-    totalRows.push({ label: "cached input", value: usage.total.cached_input_tokens });
+    totalRows.push({ label: t("tokenUsage.cachedInput"), value: usage.total.cached_input_tokens });
   }
 
   const lastRows: TokenUsageRowData[] = [
-    { label: "last turn", value: usage.last.total_tokens },
-    { label: "last input", value: usage.last.input_tokens },
-    { label: "last output", value: usage.last.output_tokens }
+    { label: t("tokenUsage.lastTurn"), value: usage.last.total_tokens },
+    { label: t("tokenUsage.lastInput"), value: usage.last.input_tokens },
+    { label: t("tokenUsage.lastOutput"), value: usage.last.output_tokens }
   ];
 
   return (
@@ -53,11 +56,12 @@ export function TokenUsagePanel({
   );
 }
 
-export function tokenUsageSummary(usage: ThreadTokenUsage | null | undefined) {
+export function tokenUsageSummary(usage: ThreadTokenUsage | null | undefined, t?: (key: TranslationKey) => string) {
   if (!usage) {
-    return "not reported";
+    return t ? t("tokenUsage.summary.notReported") : "not reported";
   }
-  return `${formatCompactCount(usage.total.total_tokens)} tokens`;
+  const count = formatCompactCount(usage.total.total_tokens);
+  return t ? t("tokenUsage.summary.tokens").replace("{count}", count) : `${count} tokens`;
 }
 
 function TokenUsageRow({ label, value }: { label: string; value: number }) {

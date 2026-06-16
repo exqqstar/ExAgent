@@ -3,6 +3,7 @@ import {
   ChevronRight,
   CircleAlert,
   Clock3,
+  Copy,
   FileText,
   GitBranchPlus,
   Info,
@@ -198,6 +199,17 @@ export function TranscriptItem({
   readOnly?: boolean;
   onForkFromTurn?: (threadId: string, turnId: string) => void;
 }) {
+  const { t } = useI18n();
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!copied) {
+      return;
+    }
+    const reset = window.setTimeout(() => setCopied(false), 1400);
+    return () => window.clearTimeout(reset);
+  }, [copied]);
+
   if (message.role === "approval") {
     return <ApprovalCard message={message} readOnly={readOnly} />;
   }
@@ -223,28 +235,56 @@ export function TranscriptItem({
     const canFork = Boolean(
       !readOnly && onForkFromTurn && message.threadId && message.turnId && message.turnStatus === "completed"
     );
+    const canCopy = !readOnly && message.body.trim().length > 0;
+    const showActions = canCopy || canFork;
+    const copyLabel = copied ? t("transcript.actions.copiedReply") : t("transcript.actions.copyReply");
     return (
-      <article className="group flex w-full max-w-[780px] items-start gap-2 py-1" aria-label="Assistant message">
-        <div className="min-w-0 flex-1 type-body-lg break-words text-muted">
+      <article className="group flex w-full max-w-[780px] flex-col py-1" aria-label="Assistant message">
+        <div className="min-w-0 type-body-lg break-words text-muted">
           <AssistantText text={message.body} />
         </div>
-        {canFork && message.threadId && message.turnId ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                disabled={forkDisabled}
-                aria-label={forkLabel}
-                className="mt-0.5 h-7 w-7 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
-                onClick={() => onForkFromTurn?.(message.threadId as string, message.turnId as string)}
-              >
-                <GitBranchPlus className="h-3.5 w-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{forkLabel}</TooltipContent>
-          </Tooltip>
+        {showActions ? (
+          <div className="mt-2 flex items-center gap-1 text-subtle opacity-70 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+            {canCopy ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label={copyLabel}
+                    className="h-7 w-7 rounded-md"
+                    onClick={() => {
+                      void copyTranscriptText(message.body)
+                        .then(() => setCopied(true))
+                        .catch(() => undefined);
+                    }}
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{copyLabel}</TooltipContent>
+              </Tooltip>
+            ) : null}
+            {canFork && message.threadId && message.turnId ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    disabled={forkDisabled}
+                    aria-label={forkLabel}
+                    className="h-7 w-7 rounded-md"
+                    onClick={() => onForkFromTurn?.(message.threadId as string, message.turnId as string)}
+                  >
+                    <GitBranchPlus className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{forkLabel}</TooltipContent>
+              </Tooltip>
+            ) : null}
+          </div>
         ) : null}
       </article>
     );
@@ -519,6 +559,26 @@ function durationValue(seconds: number) {
 }
 
 const numberFormatter = new Intl.NumberFormat();
+
+async function copyTranscriptText(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "-1000px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    document.execCommand("copy");
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
 
 function UserImageGrid({
   images,

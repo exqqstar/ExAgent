@@ -45,13 +45,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { exagentClient } from "@/api/exagentClient";
 import type { getWorkbenchState } from "@/stores/workbenchStore";
 import type { ProjectSummary, SessionStatus, SessionSummary } from "@/types";
-import { useI18n } from "@/lib/i18n";
+import { useI18n, type TranslationKey } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 type WorkbenchState = ReturnType<typeof getWorkbenchState>;
@@ -250,7 +249,7 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
     setProjectConfirmation(null);
   }
 
-  const confirmationCopy = projectConfirmation ? projectConfirmationText(projectConfirmation) : null;
+  const confirmationCopy = projectConfirmation ? projectConfirmationText(projectConfirmation, t) : null;
 
   function forkLabelForSession(session: SessionSummary) {
     if (!session.forkPointTurnId) {
@@ -277,11 +276,13 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
   }
 
   function renderSessionRow(session: SessionSummary, expanded: boolean, forkLabel: string | null) {
-    const sessionButtonLabel = forkLabel ? `Forked session ${session.title}, ${forkLabel}` : undefined;
+    const sessionButtonLabel = forkLabel
+      ? formatText(t("sidebar.forkedSessionLabel"), { session: session.title, fork: forkLabel })
+      : undefined;
     return (
       <div
         className={cn(
-          "type-label-sm group flex w-full items-center gap-1.5 rounded-md border border-transparent pr-1.5 text-muted transition-colors duration-150 hover:border-border hover:bg-surface-2 hover:text-ink",
+          "type-label-sm group flex w-full items-center gap-1.5 rounded-lg border border-transparent pr-1.5 text-muted transition-colors duration-150 hover:border-border hover:bg-surface-2 hover:text-ink",
           session.id === state.activeSessionId && "active-rail border-border-strong bg-surface-2 text-ink"
         )}
       >
@@ -291,7 +292,7 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
           aria-label={sessionButtonLabel}
           onClick={() => openProjectSession(session)}
           className={cn(
-            "flex min-w-0 flex-1 items-center gap-2 rounded-md py-1 pr-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus",
+            "flex min-w-0 flex-1 items-center gap-2 rounded-lg py-1 pr-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus",
             forkLabel ? "pl-2" : "pl-6"
           )}
         >
@@ -312,7 +313,9 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
               </Tooltip>
             ) : null}
           </span>
-          <Badge variant={statusVariant[session.status]}>{session.status.replace("_", " ")}</Badge>
+          {session.status !== "idle" ? (
+            <Badge variant={statusVariant[session.status]}>{sessionStatusLabel(session.status, t)}</Badge>
+          ) : null}
         </button>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -322,13 +325,13 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
               size="icon"
               tabIndex={expanded ? undefined : -1}
               className="h-6 w-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-              aria-label={`Archive ${session.title}`}
+              aria-label={formatText(t("sidebar.archiveSessionFor"), { session: session.title })}
               onClick={() => void state.archiveSession(session.id)}
             >
               <Archive className="h-3.5 w-3.5" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Archive session</TooltipContent>
+          <TooltipContent>{t("sidebar.archiveSession")}</TooltipContent>
         </Tooltip>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -338,7 +341,7 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
               size="icon"
               tabIndex={expanded ? undefined : -1}
               className="h-6 w-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-              aria-label={`Session actions for ${session.title}`}
+              aria-label={formatText(t("sidebar.sessionActionsFor"), { session: session.title })}
             >
               <MoreHorizontal className="h-3.5 w-3.5" />
             </Button>
@@ -348,7 +351,7 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
               <>
                 <DropdownMenuItem onSelect={() => void state.openBranchCompare(session.id, session.projectId)}>
                   <GitCompareArrows className="mr-2 h-4 w-4" />
-                  Compare with parent
+                  {t("sidebar.compareWithParent")}
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
               </>
@@ -359,15 +362,15 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
               }}
             >
               <Pencil className="mr-2 h-4 w-4" />
-              Rename session
+              {t("sidebar.renameSession")}
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => void state.pinSession(session.id, !session.pinned)}>
               <Pin className="mr-2 h-4 w-4" />
-              {session.pinned ? "Unpin session" : "Pin session"}
+              {session.pinned ? t("sidebar.unpinSession") : t("sidebar.pinSession")}
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => void state.archiveSession(session.id)}>
               <Archive className="mr-2 h-4 w-4" />
-              Archive session
+              {t("sidebar.archiveSession")}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -377,48 +380,45 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      <span className="sr-only">Project</span>
+      <span className="sr-only">{t("sidebar.project")}</span>
       <div className="sidebar-quick-actions p-1.5">
         <button
           type="button"
           className="sidebar-action-row group"
-          aria-label="New chat"
+          aria-label={t("sidebar.newChat")}
           onClick={() => void state.startPersonalSession()}
         >
           <Pencil className="h-3.5 w-3.5 shrink-0 text-muted transition-colors group-hover:text-ink" />
-          <span className="min-w-0 flex-1 truncate">新对话</span>
-          <kbd className="sidebar-shortcut">Cmd N</kbd>
+          <span className="min-w-0 flex-1 truncate">{t("sidebar.newChat")}</span>
         </button>
         <button
           type="button"
           className="sidebar-action-row group"
-          aria-label="Search sessions"
+          aria-label={t("sidebar.searchDialog.placeholder")}
           onClick={() => setSessionSearchOpen(true)}
         >
           <Search className="h-3.5 w-3.5 shrink-0 text-muted transition-colors group-hover:text-ink" />
-          <span className="min-w-0 flex-1 truncate">搜索</span>
+          <span className="min-w-0 flex-1 truncate">{t("sidebar.search")}</span>
         </button>
       </div>
 
-      <Separator />
-
-      <ScrollArea className="min-h-0 flex-1">
+      <ScrollArea className="min-h-0 flex-1 pt-1">
         <section className="p-2">
           <div className="flex items-center justify-between gap-2 px-2 py-1.5">
-            <p className="type-label-sm tracking-normal text-muted">Projects</p>
+            <p className="type-label-sm tracking-normal text-muted">{t("sidebar.projects")}</p>
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
                   size="icon"
                   variant="ghost"
                   className="h-7 w-7"
-                  aria-label="Add project"
+                  aria-label={t("sidebar.addProject")}
                   onClick={() => void state.addProject()}
                 >
                   <FolderPlus className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>Add project</TooltipContent>
+              <TooltipContent>{t("sidebar.addProject")}</TooltipContent>
             </Tooltip>
           </div>
           <div className="space-y-1">
@@ -433,7 +433,7 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
                 <div key={project.id}>
                   <div
                     className={cn(
-                      "group/project flex items-center rounded-md text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-within:bg-surface-2 focus-within:text-ink",
+                      "group/project flex items-center rounded-lg text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink focus-within:bg-surface-2 focus-within:text-ink",
                       active && "active-rail bg-surface-2 text-ink"
                     )}
                   >
@@ -441,7 +441,7 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
                       type="button"
                       aria-expanded={expanded}
                       onClick={() => toggleProject(project.id)}
-                      className="type-body-sm flex min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 pl-2 pr-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+                      className="type-body-sm flex min-w-0 flex-1 items-center gap-2 rounded-lg py-1.5 pl-2 pr-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
                     >
                       <ChevronRight
                         className={cn(
@@ -460,13 +460,13 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
                             variant="ghost"
                             size="icon"
                             className="h-6 w-6"
-                            aria-label={`New session for ${project.name}`}
+                            aria-label={formatText(t("sidebar.newSessionFor"), { project: project.name })}
                             onClick={() => startProjectSession(project)}
                           >
                             <Plus className="h-3.5 w-3.5" />
                           </Button>
                         </TooltipTrigger>
-                        <TooltipContent>New session</TooltipContent>
+                        <TooltipContent>{t("sidebar.newSession")}</TooltipContent>
                       </Tooltip>
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
@@ -475,7 +475,7 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
                             variant="ghost"
                             size="icon"
                             className="h-6 w-6"
-                            aria-label={`Project actions for ${project.name}`}
+                            aria-label={formatText(t("sidebar.projectActionsFor"), { project: project.name })}
                           >
                             <MoreHorizontal className="h-3.5 w-3.5" />
                           </Button>
@@ -483,41 +483,41 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
                         <DropdownMenuContent align="end" className="min-w-56">
                           <DropdownMenuItem onSelect={() => void state.pinProject(project.id, !project.pinned)}>
                             <Pin className="mr-2 h-4 w-4" />
-                            {project.pinned ? "Unpin project" : "Pin project"}
+                            {project.pinned ? t("sidebar.unpinProject") : t("sidebar.pinProject")}
                           </DropdownMenuItem>
                           <DropdownMenuItem onSelect={() => void revealProject(project)}>
                             <FolderOpen className="mr-2 h-4 w-4" />
-                            Show in Finder
+                            {t("sidebar.showInFinder")}
                           </DropdownMenuItem>
                           <DropdownMenuItem onSelect={() => void state.createProjectWorktree(project.id)}>
                             <GitBranch className="mr-2 h-4 w-4" />
-                            Create permanent worktree
+                            {t("sidebar.createPermanentWorktree")}
                           </DropdownMenuItem>
                           <DropdownMenuItem onSelect={() => setRenamingProjectId(project.id)}>
                             <Pencil className="mr-2 h-4 w-4" />
-                            Rename project
+                            {t("sidebar.renameProject")}
                           </DropdownMenuItem>
                           <DropdownMenuItem disabled>
                             <CheckCheck className="mr-2 h-4 w-4" />
-                            Mark all as read
+                            {t("sidebar.markAllRead")}
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
                           <DropdownMenuItem
                             onSelect={() => setProjectConfirmation({ type: "archive_conversations", project })}
                           >
                             <Archive className="mr-2 h-4 w-4" />
-                            Archive conversations
+                            {t("sidebar.archiveConversations")}
                           </DropdownMenuItem>
                           <DropdownMenuItem onSelect={() => setProjectConfirmation({ type: "archive_project", project })}>
                             <Archive className="mr-2 h-4 w-4" />
-                            Archive project
+                            {t("sidebar.archiveProject")}
                           </DropdownMenuItem>
                           <DropdownMenuItem
                             onSelect={() => setProjectConfirmation({ type: "remove_project", project })}
                             className="text-danger"
                           >
                             <Trash2 className="mr-2 h-4 w-4" />
-                            Remove from sidebar
+                            {t("sidebar.removeFromSidebar")}
                           </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
@@ -536,13 +536,13 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
                         <div className="space-y-0.5">
                           {buildSessionBranchRows(sessions).map((node) => renderSessionBranch(node, expanded))}
                           {loadingSessions ? (
-                            <p className="type-body-sm px-2 py-1.5 text-subtle">Loading sessions...</p>
+                            <p className="type-body-sm px-2 py-1.5 text-subtle">{t("sidebar.loadingSessions")}</p>
                           ) : null}
                           {sessionsError ? (
                             <p className="type-body-sm px-2 py-1.5 text-danger">{sessionsError}</p>
                           ) : null}
                           {!loadingSessions && !sessionsError && sessions.length === 0 ? (
-                            <p className="type-body-sm px-2 py-1.5 text-subtle">No sessions</p>
+                            <p className="type-body-sm px-2 py-1.5 text-subtle">{t("sidebar.noSessions")}</p>
                           ) : null}
                         </div>
                       </div>
@@ -555,39 +555,37 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
         </section>
       </ScrollArea>
 
-      <Separator />
-
-      <div className="p-2">
+      <div className="sidebar-footer p-2">
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
               type="button"
               variant="ghost"
               className="w-full justify-start"
-              aria-label="Open settings"
+              aria-label={t("sidebar.openSettings")}
               onClick={() => setSettingsOpen(true)}
             >
               <Settings className="h-4 w-4" />
-              Settings
+              {t("sidebar.settings")}
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Settings</TooltipContent>
+          <TooltipContent>{t("sidebar.settings")}</TooltipContent>
         </Tooltip>
       </div>
 
       <Dialog open={sessionSearchOpen} onOpenChange={setSessionSearchOpen}>
         <DialogContent className="w-[min(560px,calc(100vw-32px))] gap-0 overflow-hidden p-0">
           <DialogHeader className="border-b border-border px-4 py-3">
-            <DialogTitle>搜索会话</DialogTitle>
-            <DialogDescription>按名称查找最近的 session。</DialogDescription>
+            <DialogTitle>{t("sidebar.searchDialog.title")}</DialogTitle>
+            <DialogDescription>{t("sidebar.searchDialog.description")}</DialogDescription>
           </DialogHeader>
           <div className="border-b border-border p-3">
             <div className="relative">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-subtle" />
               <Input
                 className="pl-8"
-                placeholder="Search sessions"
-                aria-label="Search sessions"
+                placeholder={t("sidebar.searchDialog.placeholder")}
+                aria-label={t("sidebar.searchDialog.placeholder")}
                 value={sessionSearchQuery}
                 onChange={(event) => setSessionSearchQuery(event.target.value)}
               />
@@ -600,7 +598,7 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
                   <button
                     key={session.id}
                     type="button"
-                    className="type-body-sm flex w-full items-center justify-between gap-3 rounded-md px-2.5 py-2 text-left text-muted transition-colors hover:bg-surface-2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+                    className="type-body-sm flex w-full items-center justify-between gap-3 rounded-lg px-2.5 py-2 text-left text-muted transition-colors hover:bg-surface-2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
                     onClick={() => {
                       setSessionSearchOpen(false);
                       setSessionSearchQuery("");
@@ -610,7 +608,7 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
                     <span className="min-w-0 flex-1 overflow-hidden">
                       <span className="block truncate">{session.title}</span>
                       <span className="type-label-sm block truncate text-subtle">
-                        {isPersonalProject(project) ? "未指定项目" : project.name}
+                        {isPersonalProject(project) ? t("sidebar.searchDialog.noProject") : project.name}
                       </span>
                     </span>
                     <span className="type-label-sm shrink-0 text-subtle">{session.updatedAt}</span>
@@ -618,11 +616,11 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
                 ))}
               </div>
             ) : sessionSearchLoading ? (
-              <p className="type-body-sm px-2.5 py-6 text-center text-subtle">Loading sessions...</p>
+              <p className="type-body-sm px-2.5 py-6 text-center text-subtle">{t("sidebar.loadingSessions")}</p>
             ) : sessionSearchError ? (
               <p className="type-body-sm px-2.5 py-6 text-center text-danger">{sessionSearchError}</p>
             ) : (
-              <p className="type-body-sm px-2.5 py-6 text-center text-subtle">No matching sessions</p>
+              <p className="type-body-sm px-2.5 py-6 text-center text-subtle">{t("sidebar.searchDialog.noMatches")}</p>
             )}
           </div>
         </DialogContent>
@@ -631,8 +629,8 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
       <Dialog open={renamingSession !== null} onOpenChange={(open) => !open && setRenamingSessionId(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Rename session</DialogTitle>
-            <DialogDescription>Set a local title for this project's session list.</DialogDescription>
+            <DialogTitle>{t("sidebar.renameSession.title")}</DialogTitle>
+            <DialogDescription>{t("sidebar.renameSession.description")}</DialogDescription>
           </DialogHeader>
           <form
             className="space-y-4"
@@ -647,16 +645,16 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
           >
             <Input
               autoFocus
-              aria-label="Session title"
+              aria-label={t("sidebar.renameSession.field")}
               value={renameTitle}
               onChange={(event) => setRenameTitle(event.target.value)}
             />
             <DialogFooter>
               <Button type="button" variant="secondary" onClick={() => setRenamingSessionId(null)}>
-                Cancel
+                {t("common.cancel")}
               </Button>
               <Button type="submit" disabled={!renameTitle.trim()}>
-                Save
+                {t("common.save")}
               </Button>
             </DialogFooter>
           </form>
@@ -666,8 +664,8 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
       <Dialog open={renamingProject !== null} onOpenChange={(open) => !open && setRenamingProjectId(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Rename project</DialogTitle>
-            <DialogDescription>Set a local name for this sidebar project.</DialogDescription>
+            <DialogTitle>{t("sidebar.renameProject.title")}</DialogTitle>
+            <DialogDescription>{t("sidebar.renameProject.description")}</DialogDescription>
           </DialogHeader>
           <form
             className="space-y-4"
@@ -682,16 +680,16 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
           >
             <Input
               autoFocus
-              aria-label="Project name"
+              aria-label={t("sidebar.renameProject.field")}
               value={renameProjectName}
               onChange={(event) => setRenameProjectName(event.target.value)}
             />
             <DialogFooter>
               <Button type="button" variant="secondary" onClick={() => setRenamingProjectId(null)}>
-                Cancel
+                {t("common.cancel")}
               </Button>
               <Button type="submit" disabled={!renameProjectName.trim()}>
-                Save
+                {t("common.save")}
               </Button>
             </DialogFooter>
           </form>
@@ -705,7 +703,7 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
             <AlertDialogDescription>{confirmationCopy?.description}</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               className={projectConfirmation?.type === "remove_project" ? "bg-danger text-white hover:brightness-110" : undefined}
               onClick={() => {
@@ -778,25 +776,51 @@ function forkTurnLabel(turnId: string) {
   return turnId.match(/(\d+)$/)?.[1] ?? turnId;
 }
 
-function projectConfirmationText(confirmation: Exclude<ProjectConfirmation, null>) {
+function formatText(template: string, values: Record<string, string>) {
+  return Object.entries(values).reduce(
+    (result, [key, value]) => result.replace(`{${key}}`, value),
+    template
+  );
+}
+
+function projectConfirmationText(
+  confirmation: Exclude<ProjectConfirmation, null>,
+  t: (key: TranslationKey) => string
+) {
   switch (confirmation.type) {
     case "archive_project":
       return {
-        title: `Archive ${confirmation.project.name}?`,
-        description: "This hides the project from the sidebar. It does not delete the folder or conversation files.",
-        action: "Archive project"
+        title: formatText(t("sidebar.confirm.archiveProject.title"), { project: confirmation.project.name }),
+        description: t("sidebar.confirm.archiveProject.description"),
+        action: t("sidebar.confirm.archiveProject.action")
       };
     case "archive_conversations":
       return {
-        title: `Archive conversations in ${confirmation.project.name}?`,
-        description: "This hides this project's sessions from the default list. Runtime rollout files stay on disk.",
-        action: "Archive conversations"
+        title: formatText(t("sidebar.confirm.archiveConversations.title"), { project: confirmation.project.name }),
+        description: t("sidebar.confirm.archiveConversations.description"),
+        action: t("sidebar.confirm.archiveConversations.action")
       };
     case "remove_project":
       return {
-        title: `Remove ${confirmation.project.name} from the sidebar?`,
-        description: "This removes the project from the desktop registry only. It does not delete files from disk.",
-        action: "Remove from sidebar"
+        title: formatText(t("sidebar.confirm.removeProject.title"), { project: confirmation.project.name }),
+        description: t("sidebar.confirm.removeProject.description"),
+        action: t("sidebar.confirm.removeProject.action")
       };
+  }
+}
+
+function sessionStatusLabel(status: SessionStatus, t: (key: TranslationKey) => string) {
+  switch (status) {
+    case "running":
+      return t("status.session.running");
+    case "awaiting_approval":
+      return t("status.session.awaitingApproval");
+    case "failed":
+      return t("status.session.failed");
+    case "archived":
+      return t("status.session.archived");
+    case "idle":
+    default:
+      return t("status.session.idle");
   }
 }

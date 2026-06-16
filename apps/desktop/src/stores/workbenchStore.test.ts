@@ -450,6 +450,32 @@ describe("workbenchStore runtime events", () => {
     expect(useWorkbenchStore.getState().tokenUsageByThreadId["thread-child"]?.total.total_tokens).toBe(1600);
   });
 
+  it("updates the selected agent tree token count from live token count events", () => {
+    const childTokenEvent = tokenCountEvent("evt-token-child-live", 2800, "thread-child");
+    mountSelectedChildAgentSession(1200);
+
+    useWorkbenchStore.getState().applySelectedAgentRuntimeEvents([childTokenEvent]);
+
+    const child = useWorkbenchStore.getState().agents[0]?.children[0];
+    expect(useWorkbenchStore.getState().tokenUsageByThreadId["thread-child"]?.total.total_tokens).toBe(2800);
+    expect(child?.tokensUsed).toBe(2800);
+  });
+
+  it("keeps live agent token counts when a delayed agent tree refresh is older", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(exagentClient, "agentTree").mockResolvedValue(agentTreeWithChildTokens(1200));
+    const childTokenEvent = tokenCountEvent("evt-token-child-before-refresh", 2800, "thread-child");
+    mountSelectedChildAgentSession(1200);
+
+    useWorkbenchStore.getState().applySelectedAgentRuntimeEvents([childTokenEvent]);
+    expect(useWorkbenchStore.getState().agents[0]?.children[0]?.tokensUsed).toBe(2800);
+
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(exagentClient.agentTree).toHaveBeenCalledWith("project", "thread-root");
+    expect(useWorkbenchStore.getState().agents[0]?.children[0]?.tokensUsed).toBe(2800);
+  });
+
   it("keeps selected models scoped to their active thread session", async () => {
     vi.spyOn(exagentClient, "resumeThread").mockImplementation(async (_projectId, threadId) =>
       threadReadResponse(threadId)
@@ -524,6 +550,149 @@ describe("workbenchStore runtime events", () => {
         }
       })
     );
+  });
+
+  it("keeps the current transcript visible while opening another session", async () => {
+    const pendingRead = createDeferred<ThreadReadResponse>();
+    vi.spyOn(exagentClient, "resumeThread").mockReturnValue(pendingRead.promise);
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(vi.fn());
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "thread-b",
+      events: []
+    });
+    vi.spyOn(exagentClient, "agentTree").mockResolvedValue(agentTreeResponse("thread-b"));
+    vi.spyOn(exagentClient, "listApprovals").mockResolvedValue({ approvals: [] });
+
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      activeProjectId: "project",
+      activeSessionId: "thread-a",
+      sessions: [
+        {
+          id: "thread-a",
+          projectId: "project",
+          title: "Thread A",
+          updatedAt: "now",
+          status: "idle"
+        },
+        {
+          id: "thread-b",
+          projectId: "project",
+          title: "Thread B",
+          updatedAt: "now",
+          status: "idle"
+        }
+      ],
+      transcript: [
+        {
+          id: "thread-a-message",
+          role: "assistant",
+          body: "Thread A remains visible",
+          timestamp: "history",
+          threadId: "thread-a"
+        }
+      ]
+    });
+
+    const open = useWorkbenchStore.getState().openSession("thread-b");
+    await Promise.resolve();
+
+    expect(useWorkbenchStore.getState()).toMatchObject({
+      activeSessionId: "thread-b",
+      loading: true
+    });
+    expect(useWorkbenchStore.getState().transcript).toEqual([
+      expect.objectContaining({ body: "Thread A remains visible" })
+    ]);
+
+    pendingRead.resolve(threadReadResponse("thread-b"));
+    await open;
+
+    expect(useWorkbenchStore.getState()).toMatchObject({
+      activeSessionId: "thread-b",
+      loading: false
+    });
+  });
+
+  it("keeps the current view stable while preparing a personal draft session", async () => {
+    const pendingProject = createDeferred<{
+      id: string;
+      name: string;
+      path: string;
+      archived_at: null;
+      pinned: boolean;
+    }>();
+    vi.spyOn(exagentClient, "getOrCreatePersonalProject").mockReturnValue(pendingProject.promise);
+    vi.spyOn(exagentClient, "listProjects").mockResolvedValue([
+      {
+        id: "project-personal",
+        name: "Personal",
+        path: "/tmp/personal",
+        archived_at: null,
+        pinned: false
+      }
+    ]);
+
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      activeProjectId: "project-personal",
+      activeSessionId: "thread-a",
+      projects: [
+        {
+          id: "project-personal",
+          name: "Personal",
+          path: "/tmp/personal",
+          active: true
+        }
+      ],
+      sessions: [
+        {
+          id: "thread-a",
+          projectId: "project-personal",
+          title: "Thread A",
+          updatedAt: "now",
+          status: "idle"
+        }
+      ],
+      transcript: [
+        {
+          id: "thread-a-message",
+          role: "assistant",
+          body: "Current view remains visible",
+          timestamp: "history",
+          threadId: "thread-a"
+        }
+      ]
+    });
+
+    const start = useWorkbenchStore.getState().startPersonalSession();
+    await Promise.resolve();
+
+    expect(useWorkbenchStore.getState()).toMatchObject({
+      loading: false,
+      activeSessionId: "thread-a"
+    });
+    expect(useWorkbenchStore.getState().transcript).toEqual([
+      expect.objectContaining({ body: "Current view remains visible" })
+    ]);
+
+    pendingProject.resolve({
+      id: "project-personal",
+      name: "Personal",
+      path: "/tmp/personal",
+      archived_at: null,
+      pinned: false
+    });
+    await start;
+
+    expect(useWorkbenchStore.getState()).toMatchObject({
+      loading: false,
+      activeProjectId: "project-personal",
+      activeSessionId: null,
+      transcript: []
+    });
   });
 
   it("restores a reopened thread session model from the backend thread view", async () => {
@@ -982,10 +1151,10 @@ describe("workbenchStore runtime events", () => {
   });
 });
 
-function tokenCountEvent(eventId: string, totalTokens: number): BackendRuntimeEvent {
+function tokenCountEvent(eventId: string, totalTokens: number, threadId = "thread-root"): BackendRuntimeEvent {
   return {
     event_id: eventId,
-    thread_id: "thread-root",
+    thread_id: threadId,
     turn_id: "turn-1",
     kind: {
       type: "token_count",
@@ -1008,6 +1177,45 @@ function tokenCountEvent(eventId: string, totalTokens: number): BackendRuntimeEv
       }
     }
   };
+}
+
+function mountSelectedChildAgentSession(childTokensUsed: number) {
+  useWorkbenchStore.setState({
+    ...useWorkbenchStore.getInitialState(),
+    loading: false,
+    activeProjectId: "project",
+    activeSessionId: "thread-root",
+    selectedAgentThreadId: "thread-child",
+    selectedAgentView: {
+      threadId: "thread-child",
+      transcript: [],
+      events: [],
+      loading: false,
+      error: null
+    },
+    selectedAgentAppliedEventIds: new Set(),
+    agents: [
+      {
+        ...rootAgent("thread-root", "running"),
+        children: [
+          {
+            threadId: "thread-child",
+            parentThreadId: "thread-root",
+            name: "worker",
+            agentPath: "root/worker",
+            status: "running",
+            task: "inspect token usage",
+            lastActivity: null,
+            currentTool: null,
+            tokensUsed: childTokensUsed,
+            isRoot: false,
+            children: []
+          }
+        ]
+      }
+    ],
+    tokenUsageByThreadId: {}
+  });
 }
 
 function mountRootSession(threadId: string) {
@@ -1079,6 +1287,30 @@ function agentTreeResponse(
       status: fields.status ?? "running",
       current_tool: fields.currentTool ?? null,
       children: []
+    }
+  };
+}
+
+function agentTreeWithChildTokens(tokensUsed: number): AgentTreeResponse {
+  return {
+    root: {
+      thread_id: "thread-root",
+      root_thread_id: "thread-root",
+      depth: 0,
+      agent_path: "root",
+      status: "running",
+      children: [
+        {
+          thread_id: "thread-child",
+          parent_thread_id: "thread-root",
+          root_thread_id: "thread-root",
+          depth: 1,
+          agent_path: "root/worker",
+          status: "running",
+          tokens_used: tokensUsed,
+          children: []
+        }
+      ]
     }
   };
 }

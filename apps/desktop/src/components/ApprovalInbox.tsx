@@ -131,7 +131,7 @@ export function ApprovalInbox() {
                       return (
                         <article
                           key={item.approval_id}
-                          className="rounded-lg border border-border bg-surface px-3 py-3"
+                          className="rounded-lg border border-border bg-surface-1 px-3 py-3"
                         >
                           <div className="flex min-w-0 items-start gap-3">
                             {isOpenQuestion ? null : (
@@ -191,7 +191,7 @@ export function ApprovalInbox() {
                               ) : null}
                               {isOpenQuestion ? (
                                 <textarea
-                                  className="type-body-sm mt-3 min-h-24 w-full resize-y rounded-md border border-border bg-surface-2 px-3 py-2 text-ink outline-none focus:border-accent"
+                                  className="control-field type-body-sm mt-3 min-h-24 w-full resize-y rounded-lg border border-border bg-surface-2 px-3 py-2 text-ink outline-none"
                                   value={questionAnswers[item.approval_id] ?? ""}
                                   aria-label={formatTemplate(t("approvals.inbox.answerFor"), {
                                     summary: item.summary
@@ -305,7 +305,7 @@ export function ApprovalInbox() {
               <div className="rounded-md border border-border bg-surface-2 p-3">
                 <p className="type-title-sm text-ink">{rollbackItem.summary}</p>
                 <p className="type-code-sm mt-1 break-all text-muted">{rollbackItem.checkpoint_id}</p>
-                <pre className="type-code-sm mt-3 max-h-40 overflow-auto rounded border border-border bg-surface p-2 text-muted">
+                <pre className="type-code-sm mt-3 max-h-40 overflow-auto rounded border border-border bg-surface-1 p-2 text-muted">
                   {rollbackItem.detail}
                 </pre>
               </div>

@@ -456,7 +456,6 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       selectedModel: restoredSelection.selectedModel,
       selectedThinkingMode: restoredSelection.selectedThinkingMode,
       eventUnlisten: null,
-      transcript: [],
       events: [],
       currentGoal: null,
       currentGoalMode: "standard",
@@ -600,7 +599,10 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         ...inspectorLiveEvents
       ]);
       try {
-        agents = agentForestFromTreeResponse(await exagentClient.agentTree(projectId, sessionId));
+        agents = applyAgentTokenUsageMap(
+          agentForestFromTreeResponse(await exagentClient.agentTree(projectId, sessionId)),
+          tokenUsageByThreadId
+        );
         if (!isCurrentOpen()) {
           cleanupUnlisten();
           return;
@@ -738,7 +740,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   },
 
   async startPersonalSession() {
-    set({ loading: true, error: null });
+    set({ error: null });
     try {
       const project = await exagentClient.getOrCreatePersonalProject();
       const projects = await exagentClient.listProjects();
@@ -746,7 +748,6 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         projects: projects.map((item) => projectRecordToSummary(item, item.id === project.id)),
         activeProjectId: project.id,
         cwd: project.path,
-        loading: false,
         error: null
       });
       return await get().startSession(project.id);
@@ -1629,6 +1630,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         agents = buildAgentForest(activeThreadId, rootStatus, agentRecords);
       }
     }
+    agents = applyAgentTokenUsageMap(agents, tokenUsageByThreadId);
 
     set({
       transcript,
@@ -1761,6 +1763,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         },
         selectedAgentAppliedEventIds: appliedEventIds,
         tokenUsageByThreadId,
+        agents: applyAgentTokenUsageMap(get().agents, tokenUsageByThreadId),
         selectedAgentUnlisten: unlisten ? cleanupUnlisten : null
       });
       if (threadViewHasFailedTurn(read.thread) || replay.events.some((event) => event.kind.type === "runtime_error")) {
@@ -1833,6 +1836,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         loading: false,
         error: null
       },
+      agents: applyAgentTokenUsageMap(current.agents, tokenUsageByThreadId),
       tokenUsageByThreadId,
       selectedAgentAppliedEventIds: appliedEventIds
     });
@@ -2078,7 +2082,7 @@ async function refreshAgentTreeForContext(
   try {
     const agents = agentForestFromTreeResponse(await exagentClient.agentTree(context.projectId, context.threadId));
     if (isActiveAgentTreeRefreshContext(get, context)) {
-      set({ agents });
+      set({ agents: applyAgentTokenUsageMap(agents, get().tokenUsageByThreadId) });
     }
   } catch {
     // Keep the local event-derived tree when the app-server projection is unavailable.
@@ -2720,6 +2724,44 @@ function applyTokenUsageEvents(
   }
 
   return next;
+}
+
+function applyAgentTokenUsageMap(
+  agents: AgentNode[],
+  tokenUsageByThreadId: Record<string, ThreadTokenUsage>
+): AgentNode[] {
+  if (Object.keys(tokenUsageByThreadId).length === 0 || agents.length === 0) {
+    return agents;
+  }
+
+  let changed = false;
+
+  const visit = (node: AgentNode): AgentNode => {
+    let childrenChanged = false;
+    const children = node.children.map((child) => {
+      const nextChild = visit(child);
+      if (nextChild !== child) {
+        childrenChanged = true;
+      }
+      return nextChild;
+    });
+    const tokenUsage = tokenUsageByThreadId[node.threadId];
+    const tokensUsed = tokenUsage ? tokenUsage.total.total_tokens : node.tokensUsed;
+
+    if (!childrenChanged && tokensUsed === node.tokensUsed) {
+      return node;
+    }
+
+    changed = true;
+    return {
+      ...node,
+      tokensUsed,
+      children: childrenChanged ? children : node.children
+    };
+  };
+
+  const nextAgents = agents.map(visit);
+  return changed ? nextAgents : agents;
 }
 
 function applyGoalRuntimeEvent(goal: ThreadGoal | null, event: BackendRuntimeEvent): ThreadGoal | null {

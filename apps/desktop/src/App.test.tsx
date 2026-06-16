@@ -285,6 +285,11 @@ describe("AppShell", () => {
       (await screen.findAllByText("Desktop GUI workbench"))[0],
     ).toBeInTheDocument();
     expect(screen.getByText("Project")).toBeInTheDocument();
+    const sidebar = screen.getByRole("complementary", {
+      name: "Projects and sessions",
+    });
+    expect(within(sidebar).queryByText("Cmd N")).not.toBeInTheDocument();
+    expect(within(sidebar).queryByText("idle")).not.toBeInTheDocument();
     const projectButton = screen.getByRole("button", { name: /^ExAgent$/ });
     expect(projectButton).toHaveAttribute("aria-expanded", "true");
     act(() => {
@@ -1654,6 +1659,7 @@ describe("AppShell", () => {
     expect(within(userMessage).queryByRole("button", { name: "Fork from this reply" })).not.toBeInTheDocument();
 
     await user.hover(screen.getByRole("article", { name: "Assistant message" }));
+    expect(screen.getByRole("button", { name: "Copy reply" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Fork from this reply" }));
 
     expect(forkThread).toHaveBeenCalledWith("project-exagent", {
@@ -3985,9 +3991,12 @@ describe("AppShell", () => {
 
     await screen.findByText("Session restored");
     await user.click(
-      screen.getByRole("button", { name: "Open composer actions" }),
+      screen.getByRole("button", { name: "打开输入区操作" }),
     );
 
+    expect(screen.getByRole("button", { name: "新对话" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "搜索会话" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开设置" })).toBeInTheDocument();
     expect(
       screen.getByRole("menuitem", { name: "添加照片" }),
     ).toBeInTheDocument();
@@ -4042,6 +4051,69 @@ describe("AppShell", () => {
         },
       );
     });
+  });
+
+  it("grows the composer textarea until its height limit", () => {
+    vi.spyOn(exagentClient, "subscribeImageDragDrop").mockResolvedValue(
+      () => undefined,
+    );
+    const scrollHeightDescriptor = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      "scrollHeight",
+    );
+    Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", {
+      configurable: true,
+      get() {
+        return (this as HTMLTextAreaElement).value.includes("Long prompt")
+          ? 340
+          : 144;
+      },
+    });
+
+    try {
+      const state = {
+        ...useWorkbenchStore.getInitialState(),
+        loading: false,
+        activeProjectId: "project-exagent",
+        activeSessionId: "session-desktop",
+        composerValue: "Short prompt",
+      };
+      const { rerender } = render(
+        <I18nProvider>
+          <Composer state={state} />
+        </I18nProvider>,
+      );
+      const composer = screen.getByLabelText(
+        "Message ExAgent",
+      ) as HTMLTextAreaElement;
+
+      expect(composer.style.height).toBe("144px");
+      expect(composer.style.overflowY).toBe("hidden");
+
+      rerender(
+        <I18nProvider>
+          <Composer
+            state={{
+              ...state,
+              composerValue: `Long prompt ${"line\n".repeat(40)}`,
+            }}
+          />
+        </I18nProvider>,
+      );
+
+      expect(composer.style.height).toBe("220px");
+      expect(composer.style.overflowY).toBe("auto");
+    } finally {
+      if (scrollHeightDescriptor) {
+        Object.defineProperty(
+          HTMLTextAreaElement.prototype,
+          "scrollHeight",
+          scrollHeightDescriptor,
+        );
+      } else {
+        Reflect.deleteProperty(HTMLTextAreaElement.prototype, "scrollHeight");
+      }
+    }
   });
 
   it("sends selected photos as structured local image input", async () => {
@@ -6979,7 +7051,7 @@ describe("AppShell", () => {
     ).not.toContain("old transcript");
   });
 
-  it("keeps session switches loading until the resumed transcript arrives", async () => {
+  it("keeps the previous transcript visible until the resumed session arrives", async () => {
     let resolveResume: (
       value: Awaited<ReturnType<typeof exagentClient.resumeThread>>,
     ) => void = () => {};
@@ -7014,7 +7086,9 @@ describe("AppShell", () => {
     await Promise.resolve();
 
     expect(useWorkbenchStore.getState().loading).toBe(true);
-    expect(useWorkbenchStore.getState().transcript).toEqual([]);
+    expect(
+      useWorkbenchStore.getState().transcript.map((message) => message.body),
+    ).toEqual(["old transcript"]);
 
     resolveResume({
       thread: {

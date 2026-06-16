@@ -322,6 +322,7 @@ function AgentThreadTabPanel({
         emptyLabel="No conversation recorded for this agent."
         className="gap-4"
         groupTurnActivity={false}
+        readOnly
       />
     );
   }
@@ -334,6 +335,7 @@ function AgentThreadTabPanel({
         emptyLabel="No reasoning recorded for this agent."
         className="gap-4"
         groupTurnActivity={false}
+        readOnly
       />
     );
   }
@@ -346,6 +348,7 @@ function AgentThreadTabPanel({
         emptyLabel="No tool activity recorded for this agent."
         className="gap-4"
         groupTurnActivity={false}
+        readOnly
       />
     );
   }

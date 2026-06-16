@@ -76,7 +76,7 @@ export function QuestionCard({ message, readOnly = false }: { message: Transcrip
                         return (
                           <label
                             key={option.label}
-                            className="type-body-md flex items-start gap-2 rounded-md border border-border bg-surface px-3 py-2 text-ink"
+                            className="type-body-md flex items-start gap-2 rounded-lg border border-border bg-surface-1 px-3 py-2 text-ink"
                           >
                             <input
                               type={inputType}
@@ -103,7 +103,7 @@ export function QuestionCard({ message, readOnly = false }: { message: Transcrip
                     </div>
                   ) : readOnly || !pending ? null : (
                     <input
-                      className="mt-2 w-full rounded-md border border-border bg-surface px-3 py-2 type-body-md text-ink outline-none focus:border-accent"
+                      className="control-field mt-2 w-full rounded-lg border border-border bg-surface-1 px-3 py-2 type-body-md text-ink outline-none"
                       value={answers[index]?.[0] ?? ""}
                       onChange={(event) => setTextAnswer(index, event.target.value)}
                     />

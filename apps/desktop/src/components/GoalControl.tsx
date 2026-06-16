@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { useI18n, type TranslationKey } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import type { DraftThreadGoal, ThreadGoal, ThreadGoalMode, ThreadGoalStatus } from "@/types";
 
@@ -25,6 +26,7 @@ export function GoalControl({
   state: WorkbenchState;
   variant?: GoalControlVariant;
 }) {
+  const { t } = useI18n();
   const goal = state.currentGoal;
   const draftGoal = state.draftGoal;
   const [editing, setEditing] = useState(false);
@@ -88,7 +90,7 @@ export function GoalControl({
       <div className={variant === "hero" ? "mt-3 flex justify-start" : "mb-2 flex justify-start"}>
         <Button type="button" variant="secondary" className="px-2.5" onClick={openEditor}>
           <Target className="h-4 w-4" />
-          <span>Goal</span>
+          <span>{t("goal.action")}</span>
         </Button>
       </div>
     );
@@ -111,8 +113,8 @@ export function GoalControl({
             className="min-h-10 flex-1 resize-none border-transparent bg-transparent px-1 py-1 focus:border-transparent focus:ring-0"
             value={objective}
             onChange={(event) => setObjective(event.target.value)}
-            placeholder="Goal objective"
-            aria-label="Goal objective"
+            placeholder={t("goal.objective")}
+            aria-label={t("goal.objective")}
           />
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -125,15 +127,15 @@ export function GoalControl({
               type="number"
               value={tokenBudget}
               onChange={(event) => setTokenBudget(event.target.value)}
-              placeholder="Token budget"
-              aria-label="Goal token budget"
+              placeholder={t("goal.tokenBudget")}
+              aria-label={t("goal.tokenBudget")}
             />
             <div className="flex items-center gap-1">
               <Button
                 type="button"
                 variant="ghost"
                 size="icon"
-                aria-label="Cancel goal edit"
+                aria-label={t("goal.cancelEdit")}
                 onClick={() => {
                   setEditing(false);
                   closeThreadGoalEditor();
@@ -141,7 +143,7 @@ export function GoalControl({
               >
                 <X className="h-4 w-4" />
               </Button>
-              <Button type="submit" size="icon" aria-label="Save goal" disabled={!objective.trim()}>
+              <Button type="submit" size="icon" aria-label={t("goal.save")} disabled={!objective.trim()}>
                 <Check className="h-4 w-4" />
               </Button>
             </div>
@@ -156,34 +158,34 @@ export function GoalControl({
   if (!visibleObjective) {
     return null;
   }
-  const usageLabel = visibleGoal ? goalUsageLabel(visibleGoal) : draftGoalUsageLabel(draftGoal);
+  const usageLabel = visibleGoal ? goalUsageLabel(visibleGoal, t) : draftGoalUsageLabel(draftGoal, t);
   const visibleMode = visibleGoal ? state.currentGoalMode : draftGoal?.mode ?? "standard";
-  const modeBadge = goalModeBadge(visibleMode);
+  const modeBadge = goalModeBadge(visibleMode, t);
 
   return (
     <div className={variant === "hero" ? "mt-3 rounded-lg border border-border bg-surface-1 p-2" : "mb-2 rounded-lg border border-border bg-surface-1 p-2"}>
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <Target className="h-4 w-4 shrink-0 text-muted" />
         <Badge variant={visibleGoal ? goalStatusBadge(visibleGoal.status) : "neutral"}>
-          {visibleGoal ? goalStatusLabel(visibleGoal.status) : "draft"}
+          {visibleGoal ? goalStatusLabel(visibleGoal.status, t) : t("goal.status.draft")}
         </Badge>
         {modeBadge ? <Badge variant={modeBadge.variant}>{modeBadge.label}</Badge> : null}
         <div className="type-body-sm min-w-[160px] flex-1 truncate text-ink">{visibleObjective}</div>
         {usageLabel ? <div className="type-label-sm shrink-0 text-subtle">{usageLabel}</div> : null}
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {visibleGoal?.status === "active" ? (
-            <Button type="button" variant="ghost" size="icon" aria-label="Pause goal" onClick={() => void setThreadGoalStatus("paused")}>
+            <Button type="button" variant="ghost" size="icon" aria-label={t("goal.pause")} onClick={() => void setThreadGoalStatus("paused")}>
               <Pause className="h-4 w-4" />
             </Button>
           ) : visibleGoal?.status === "paused" ? (
-            <Button type="button" variant="ghost" size="icon" aria-label="Resume goal" onClick={() => void setThreadGoalStatus("active")}>
+            <Button type="button" variant="ghost" size="icon" aria-label={t("goal.resume")} onClick={() => void setThreadGoalStatus("active")}>
               <Play className="h-4 w-4" />
             </Button>
           ) : null}
-          <Button type="button" variant="ghost" size="icon" aria-label="Edit goal" onClick={openEditor}>
+          <Button type="button" variant="ghost" size="icon" aria-label={t("goal.edit")} onClick={openEditor}>
             <Pencil className="h-4 w-4" />
           </Button>
-          <Button type="button" variant="ghost" size="icon" aria-label="Clear goal" onClick={() => void clearThreadGoal()}>
+          <Button type="button" variant="ghost" size="icon" aria-label={t("goal.clear")} onClick={() => void clearThreadGoal()}>
             <Trash2 className="h-4 w-4" />
           </Button>
         </div>
@@ -192,31 +194,33 @@ export function GoalControl({
   );
 }
 
-const goalModeOptions: Array<{
+function goalModeOptions(t: (key: TranslationKey) => string): Array<{
   id: ThreadGoalMode;
   label: string;
   title: string;
   icon: LucideIcon;
-}> = [
-  {
-    id: "standard",
-    label: "Standard",
-    title: "Standard goal mode",
-    icon: Gauge
-  },
-  {
-    id: "reviewed",
-    label: "Reviewed",
-    title: "Reviewer-gated goal mode",
-    icon: ShieldCheck
-  },
-  {
-    id: "intensive",
-    label: "Intensive",
-    title: "Intensive reviewer-gated goal mode",
-    icon: Zap
-  }
-];
+}> {
+  return [
+    {
+      id: "standard",
+      label: t("goal.mode.standard"),
+      title: t("goal.mode.standardTitle"),
+      icon: Gauge
+    },
+    {
+      id: "reviewed",
+      label: t("goal.mode.reviewed"),
+      title: t("goal.mode.reviewedTitle"),
+      icon: ShieldCheck
+    },
+    {
+      id: "intensive",
+      label: t("goal.mode.intensive"),
+      title: t("goal.mode.intensiveTitle"),
+      icon: Zap
+    }
+  ];
+}
 
 function GoalModeControl({
   mode,
@@ -225,13 +229,16 @@ function GoalModeControl({
   mode: ThreadGoalMode;
   onChange: (mode: ThreadGoalMode) => void;
 }) {
+  const { t } = useI18n();
+  const options = goalModeOptions(t);
+
   return (
     <div
       className="grid h-8 w-full max-w-[22rem] grid-cols-3 overflow-hidden rounded-md border border-border bg-surface-2 sm:w-[21rem]"
       role="radiogroup"
-      aria-label="Goal mode"
+      aria-label={t("goal.mode")}
     >
-      {goalModeOptions.map((option) => {
+      {options.map((option) => {
         const Icon = option.icon;
         const selected = mode === option.id;
         return (
@@ -240,7 +247,7 @@ function GoalModeControl({
             type="button"
             role="radio"
             aria-checked={selected}
-            aria-label={`Goal mode ${option.label}`}
+            aria-label={t("goal.modeFor").replace("{mode}", option.label)}
             title={option.title}
             className={cn(
               "type-label-sm inline-flex h-full min-w-0 items-center justify-center gap-1.5 border-r border-border px-2 text-muted transition-colors last:border-r-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus",
@@ -270,31 +277,49 @@ function formatTokenBudget(value: number | null) {
   return value ? String(value) : "";
 }
 
-function goalUsageLabel(goal: ThreadGoal) {
+function goalUsageLabel(goal: ThreadGoal, t: (key: TranslationKey) => string) {
   if (!goal.token_budget) {
-    return `${goal.tokens_used} tokens`;
+    return t("goal.usage.tokens").replace("{count}", String(goal.tokens_used));
   }
   const remaining = Math.max(goal.token_budget - goal.tokens_used, 0);
-  return `${remaining}/${goal.token_budget} left`;
+  return t("goal.usage.left").replace("{remaining}", String(remaining)).replace("{budget}", String(goal.token_budget));
 }
 
-function draftGoalUsageLabel(goal: DraftThreadGoal | null) {
-  return goal?.token_budget ? `0/${goal.token_budget} left` : "";
+function draftGoalUsageLabel(goal: DraftThreadGoal | null, t: (key: TranslationKey) => string) {
+  return goal?.token_budget
+    ? t("goal.usage.left").replace("{remaining}", "0").replace("{budget}", String(goal.token_budget))
+    : "";
 }
 
-function goalModeBadge(mode: ThreadGoalMode): { label: string; variant: "info" | "primary" } | null {
+function goalModeBadge(
+  mode: ThreadGoalMode,
+  t: (key: TranslationKey) => string
+): { label: string; variant: "info" | "primary" } | null {
   switch (mode) {
     case "reviewed":
-      return { label: "reviewed", variant: "info" };
+      return { label: t("goal.mode.reviewed").toLowerCase(), variant: "info" };
     case "intensive":
-      return { label: "intensive", variant: "primary" };
+      return { label: t("goal.mode.intensive").toLowerCase(), variant: "primary" };
     case "standard":
       return null;
   }
 }
 
-function goalStatusLabel(status: ThreadGoalStatus) {
-  return status.replace("_", " ");
+function goalStatusLabel(status: ThreadGoalStatus, t: (key: TranslationKey) => string) {
+  switch (status) {
+    case "active":
+      return t("goal.status.active");
+    case "complete":
+      return t("goal.status.complete");
+    case "blocked":
+      return t("goal.status.blocked");
+    case "budget_limited":
+      return t("goal.status.budgetLimited");
+    case "usage_limited":
+      return t("goal.status.usageLimited");
+    case "paused":
+      return t("goal.status.paused");
+  }
 }
 
 function goalStatusBadge(status: ThreadGoalStatus): "neutral" | "success" | "info" | "warning" | "danger" | "primary" {

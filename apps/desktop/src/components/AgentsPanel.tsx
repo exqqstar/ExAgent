@@ -2,16 +2,8 @@ import { ChevronRight, CircleAlert, MessageSquareText } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import type { AgentNode, AgentRunStatus } from "@/types";
+import { useI18n, type TranslationKey } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
-
-const statusLabel: Record<AgentRunStatus, string> = {
-  running: "running",
-  spawning: "spawning",
-  waiting_approval: "needs approval",
-  done: "done",
-  idle: "idle",
-  failed: "failed"
-};
 
 const statusBadgeVariant: Record<AgentRunStatus, "success" | "info" | "neutral" | "warning" | "danger"> = {
   running: "success",
@@ -42,8 +34,10 @@ export function AgentsPanel({
   onSelectAgent?: (threadId: string) => void;
   expandWaitingSignal?: number;
 }) {
+  const { t } = useI18n();
+
   return (
-    <ul role="tree" aria-label="Running agents" className="min-w-0 space-y-1 overflow-hidden">
+    <ul role="tree" aria-label={t("agents.treeLabel")} className="min-w-0 space-y-1 overflow-hidden">
       <AgentTreeItem
         node={root}
         level={1}
@@ -68,6 +62,7 @@ function AgentTreeItem({
   onSelectAgent?: (threadId: string) => void;
   expandWaitingSignal: number;
 }) {
+  const { t } = useI18n();
   const sortedChildren = useMemo(() => sortChildrenForPanel(node.children), [node.children]);
   const descendantWaitingIds = useMemo(() => collectWaitingApprovalIds(sortedChildren), [sortedChildren]);
   const descendantWaitingKey = descendantWaitingIds.join("|");
@@ -76,7 +71,7 @@ function AgentTreeItem({
   const previousWaitingIds = useRef(new Set(descendantWaitingIds));
   const activity = getNodeActivity(node);
   const tokenCount = formatCompactTokenCount(node.tokensUsed);
-  const ariaLabel = agentAriaLabel(node, activity, tokenCount);
+  const ariaLabel = agentAriaLabel(node, activity, tokenCount, t);
 
   useEffect(() => {
     if (!hasChildren) {
@@ -141,7 +136,7 @@ function AgentTreeItem({
         {hasChildren ? (
           <button
             type="button"
-            aria-label={`${open ? "Collapse" : "Expand"} ${node.name}`}
+            aria-label={(open ? t("agents.collapse") : t("agents.expand")).replace("{name}", node.name)}
             onClick={() => setOpen((value) => !value)}
             className="mt-0.5 flex h-6 w-5 shrink-0 items-center justify-center rounded text-subtle transition-colors hover:bg-surface-2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus"
           >
@@ -155,7 +150,7 @@ function AgentTreeItem({
         )}
         <button
           type="button"
-          aria-label={openAgentLabel(node, activity, tokenCount)}
+          aria-label={openAgentLabel(node, activity, tokenCount, t)}
           onClick={() => {
             setOpen(true);
             onSelectAgent?.(node.threadId);
@@ -187,7 +182,7 @@ function AgentTreeItem({
           </span>
           {tokenCount ? (
             <span
-              title={`${node.tokensUsed?.toLocaleString() ?? tokenCount} tokens`}
+              title={`${node.tokensUsed?.toLocaleString() ?? tokenCount} ${t("agents.tokens")}`}
               className="type-code-sm mt-0.5 w-[3.5rem] shrink-0 text-right text-muted"
             >
               {tokenCount}
@@ -196,7 +191,7 @@ function AgentTreeItem({
         </button>
         <button
           type="button"
-          aria-label={`Inspect ${node.name}`}
+          aria-label={t("agents.inspect").replace("{name}", node.name)}
           onClick={() => onSelectAgent?.(node.threadId)}
           className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-subtle transition-colors hover:bg-surface-2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus"
         >
@@ -250,13 +245,14 @@ function StatusDot({ status, className }: { status: AgentRunStatus; className?: 
 }
 
 function StatusBadge({ status }: { status: AgentRunStatus }) {
+  const { t } = useI18n();
   const needsApproval = status === "waiting_approval";
   return (
     <Badge variant={statusBadgeVariant[status]} className={needsApproval ? "gap-1" : undefined}>
       {needsApproval ? (
         <CircleAlert aria-hidden data-testid="waiting-approval-icon" className="h-3 w-3 shrink-0" />
       ) : null}
-      <span>{statusLabel[status]}</span>
+      <span>{agentStatusLabel(status, t)}</span>
     </Badge>
   );
 }
@@ -293,21 +289,27 @@ function normalizedText(value: string | null | undefined): string | null {
 function agentAriaLabel(
   node: AgentNode,
   activity: NodeActivity | null,
-  tokenCount: string | null
+  tokenCount: string | null,
+  t: (key: TranslationKey) => string
 ) {
-  const parts = [`${node.name}, ${statusLabel[node.status]}`];
+  const parts = [`${node.name}, ${agentStatusLabel(node.status, t)}`];
   if (activity) {
-    parts.push(`${activity.kind} ${activity.text}`);
+    parts.push(`${activity.kind === "tool" ? t("agents.tool") : t("agents.activity")} ${activity.text}`);
   }
   if (tokenCount) {
-    parts.push(`${tokenCount} tokens`);
+    parts.push(`${tokenCount} ${t("agents.tokens")}`);
   }
   return parts.join(", ");
 }
 
-function openAgentLabel(node: AgentNode, activity: NodeActivity | null, tokenCount: string | null) {
-  const details = agentAriaLabel(node, activity, tokenCount);
-  return `Open ${node.name} agent thread, ${details}`;
+function openAgentLabel(
+  node: AgentNode,
+  activity: NodeActivity | null,
+  tokenCount: string | null,
+  t: (key: TranslationKey) => string
+) {
+  const details = agentAriaLabel(node, activity, tokenCount, t);
+  return t("agents.openThread").replace("{name}", node.name).replace("{details}", details);
 }
 
 function formatCompactTokenCount(tokensUsed: number | null | undefined): string | null {
@@ -344,4 +346,22 @@ function collectWaitingApprovalIds(nodes: AgentNode[]): string[] {
   };
   nodes.forEach(visit);
   return ids.sort();
+}
+
+function agentStatusLabel(status: AgentRunStatus, t: (key: TranslationKey) => string) {
+  switch (status) {
+    case "running":
+      return t("status.agent.running");
+    case "spawning":
+      return t("status.agent.spawning");
+    case "waiting_approval":
+      return t("status.agent.waitingApproval");
+    case "done":
+      return t("status.agent.done");
+    case "failed":
+      return t("status.agent.failed");
+    case "idle":
+    default:
+      return t("status.agent.idle");
+  }
 }

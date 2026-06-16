@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   ArrowUp,
@@ -48,7 +48,7 @@ import {
 import type { getWorkbenchState } from "@/stores/workbenchStore";
 import { exagentClient } from "@/api/exagentClient";
 import type { ComposerAttachment, ModelCapabilities, ModelRef, ProviderModelView, ThinkingMode } from "@/types";
-import { useI18n } from "@/lib/i18n";
+import { useI18n, type TranslationKey } from "@/lib/i18n";
 import { localFileAssetSrc } from "@/lib/media";
 import { cn } from "@/lib/utils";
 
@@ -57,16 +57,12 @@ type NonDefaultThinkingMode = Exclude<ThinkingMode, "auto">;
 type ThinkingModeOption = { value: ThinkingMode | null; label: string; aria: string };
 type ComposerVariant = "dock" | "hero";
 type SlashCommandId = "compact" | "goal" | "plan";
+type ComposerTextareaSize = { min: number; max: number };
 
-const defaultThinkingModeOption: ThinkingModeOption = { value: null, label: "Default", aria: "Thinking default" };
-const backendThinkingModeOptions: Array<{ value: NonDefaultThinkingMode; label: string; aria: string }> = [
-  { value: "off", label: "Off", aria: "Thinking off" },
-  { value: "minimal", label: "Minimal", aria: "Thinking minimal" },
-  { value: "low", label: "Low", aria: "Thinking low" },
-  { value: "medium", label: "Medium", aria: "Thinking medium" },
-  { value: "high", label: "High", aria: "Thinking high" },
-  { value: "x_high", label: "XHigh", aria: "Thinking xhigh" }
-];
+const composerTextareaSizes: Record<ComposerVariant, ComposerTextareaSize> = {
+  dock: { min: 88, max: 220 },
+  hero: { min: 96, max: 260 }
+};
 const menuControlKeys = new Set(["Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "Tab"]);
 
 const unsupportedCapabilities: ModelCapabilities = {
@@ -198,6 +194,7 @@ type SlashCommand = {
 
 export function Composer({ state, variant = "dock" }: { state: WorkbenchState; variant?: ComposerVariant }) {
   const { t } = useI18n();
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
   const [slashDismissedValue, setSlashDismissedValue] = useState<string | null>(null);
@@ -210,17 +207,18 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
   const busy = activeSession?.status === "running" || activeSession?.status === "awaiting_approval";
   const providerConfigurationRequired = isProviderConfigurationRequired(state.providerSettings);
   const modelOptions = useMemo(
-    () => buildModelOptions(state),
-    [state.providerSettings, state.runtimeSettings, state.activeProviderId, state.selectedModel]
+    () => buildModelOptions(state, t),
+    [state.providerSettings, state.runtimeSettings, state.activeProviderId, state.selectedModel, t]
   );
   const selectedModelRef = state.selectedModel;
   const selectedOption =
-    !providerConfigurationRequired && selectedModelRef ? modelOptionForRef(modelOptions, selectedModelRef) : null;
+    !providerConfigurationRequired && selectedModelRef ? modelOptionForRef(modelOptions, selectedModelRef, t) : null;
   const selectedThinkingMode = normalizedThinkingSelection(state.selectedThinkingMode ?? null);
   const thinkingSupported = selectedOption?.capabilities.thinking.supported ?? false;
   const availableThinkingModes = selectedOption?.capabilities.thinking.modes ?? [];
-  const nonDefaultThinkingModes = backendThinkingModeOptions.filter((mode) => availableThinkingModes.includes(mode.value));
-  const thinkingMenuOptions: ThinkingModeOption[] = [defaultThinkingModeOption, ...nonDefaultThinkingModes];
+  const backendThinkingOptions = backendThinkingModeOptions(t);
+  const nonDefaultThinkingModes = backendThinkingOptions.filter((mode) => availableThinkingModes.includes(mode.value));
+  const thinkingMenuOptions: ThinkingModeOption[] = [defaultThinkingModeOption(t), ...nonDefaultThinkingModes];
   const filteredModelOptions = filterModelOptions(modelOptions, modelSearch);
   const groupedModelOptions = groupModelOptions(filteredModelOptions);
   const hasComposerContent = state.composerValue.trim().length > 0 || state.composerAttachments.length > 0;
@@ -238,7 +236,8 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
     activeProjectId: state.activeProjectId,
     activeSessionId: state.activeSessionId,
     busy,
-    planMode: state.composerPlanMode
+    planMode: state.composerPlanMode,
+    t
   });
   const filteredSlashCommands =
     slashQuery !== null
@@ -254,7 +253,7 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
     : undefined;
   const modelButtonLabel = providerConfigurationRequired
     ? t("composer.model.configureProvider")
-    : selectedOption?.label ?? selectedModelRef?.model_id ?? "Choose model";
+    : selectedOption?.label ?? selectedModelRef?.model_id ?? t("composer.model.choose");
 
   useEffect(() => {
     if (imageInputSupported) {
@@ -386,14 +385,34 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
     setSelectedSlashCommandIndex(firstEnabledSlashCommandIndex(filteredSlashCommands));
   }, [slashMenuOpen, slashQuery]);
 
+  useLayoutEffect(() => {
+    resizeComposerTextarea(textareaRef.current, variant);
+  }, [state.composerValue, variant]);
+
+  useEffect(() => {
+    const resizeTextarea = () => resizeComposerTextarea(textareaRef.current, variant);
+    window.addEventListener("resize", resizeTextarea);
+    const resizeObserver =
+      typeof ResizeObserver === "undefined" || !textareaRef.current?.parentElement
+        ? null
+        : new ResizeObserver(resizeTextarea);
+    if (textareaRef.current?.parentElement) {
+      resizeObserver?.observe(textareaRef.current.parentElement);
+    }
+    return () => {
+      window.removeEventListener("resize", resizeTextarea);
+      resizeObserver?.disconnect();
+    };
+  }, [variant]);
+
   return (
     <form
       className={cn(
         "composer-shell",
-        variant === "hero" ? "rounded-xl p-3" : "rounded-lg p-2",
+        variant === "hero" ? "rounded-2xl p-3" : "rounded-xl p-2.5",
         draggingImages && "ring-2 ring-focus"
       )}
-      aria-label="Prompt composer"
+      aria-label={t("composer.aria.promptComposer")}
       onPaste={(event) => {
         const files = imageFilesFromFileList(event.clipboardData?.files ?? null);
         if (files.length === 0) {
@@ -416,7 +435,11 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
     >
       <div className="relative">
         <Textarea
-          className={variant === "hero" ? "min-h-[96px] border-transparent bg-transparent px-2 py-1 focus:border-transparent focus:ring-0" : undefined}
+          ref={textareaRef}
+          className={cn(
+            "composer-textarea overflow-hidden border-transparent bg-transparent px-2 py-1 shadow-none",
+            variant === "hero" ? "min-h-[96px]" : "min-h-[88px]"
+          )}
           value={state.composerValue}
           onChange={(event) => {
             setSlashDismissedValue(null);
@@ -458,8 +481,8 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
             }
             void sendPrompt();
           }}
-          placeholder={variant === "hero" ? "Ask ExAgent to build, fix, or explain..." : "Message ExAgent"}
-          aria-label="Message ExAgent"
+          placeholder={variant === "hero" ? t("composer.placeholder.hero") : t("composer.placeholder.dock")}
+          aria-label={t("composer.aria.message")}
           aria-haspopup={slashQuery !== null ? "menu" : undefined}
           aria-expanded={slashQuery !== null ? slashMenuOpen : undefined}
           aria-controls={slashMenuOpen ? slashMenuId : undefined}
@@ -484,7 +507,7 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
       ) : null}
       {imageInputWarningVisible ? (
         <div
-          className="mt-2 flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-2.5 py-2 text-warning"
+          className="mt-2 flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-2 text-warning"
           role="alert"
         >
           <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
@@ -505,18 +528,18 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
               type="button"
               variant="secondary"
               className="px-2"
-              aria-label="Plan mode enabled"
+              aria-label={t("composer.plan.enabled")}
               onClick={() => setComposerPlanMode(false)}
             >
               <ListChecks className="h-4 w-4" />
-              <span>Plan</span>
+              <span>{t("composer.plan.short")}</span>
             </Button>
           ) : null}
 
           {state.runtimeSettings?.presets.length ? (
             <select
-              aria-label="Runtime preset"
-              className="type-label-md h-8 max-w-[120px] rounded-md border border-transparent bg-transparent px-2 text-muted outline-none transition-colors hover:bg-surface-2 hover:text-ink focus:ring-2 focus:ring-focus"
+              aria-label={t("composer.runtimePreset")}
+              className="control-field type-label-md h-8 max-w-[120px] rounded-lg border border-transparent bg-transparent px-2 text-muted outline-none transition-colors hover:bg-surface-2 hover:text-ink"
               defaultValue=""
               onChange={(event) => {
                 if (event.target.value) {
@@ -524,7 +547,7 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
                 }
               }}
             >
-              <option value="">Build</option>
+              <option value="">{t("composer.runtimePreset.default")}</option>
               {state.runtimeSettings.presets.map((preset) => (
                 <option key={preset.id} value={preset.id}>
                   {preset.name}
@@ -539,7 +562,7 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
                 type="button"
                 variant="ghost"
                 className="max-w-[260px] justify-start px-2 text-muted hover:text-ink"
-                aria-label="Composer model"
+                aria-label={t("composer.model.button")}
               >
                 <Bot className="h-4 w-4 shrink-0" />
                 <span className="truncate">{modelButtonLabel}</span>
@@ -551,13 +574,13 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
               side="top"
               className="max-h-[360px] w-[min(520px,calc(100vw-32px))] overflow-hidden p-2"
             >
-              <div className="flex h-10 items-center gap-2 rounded-md bg-surface-1 px-2">
+              <div className="flex h-10 items-center gap-2 rounded-lg bg-surface-1 px-2">
                 <Search className="h-4 w-4 shrink-0 text-subtle" />
                 <Input
-                  aria-label="Search models"
+                  aria-label={t("composer.model.search")}
                   className="type-body-md h-8 border-transparent bg-transparent px-0"
                   value={modelSearch}
-                  placeholder="Search models"
+                  placeholder={t("composer.model.search")}
                   onChange={(event) => setModelSearch(event.target.value)}
                   onKeyDown={(event) => {
                     if (!menuControlKeys.has(event.key)) {
@@ -596,7 +619,7 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
                   </DropdownMenuRadioGroup>
                 ) : (
                   <div className="type-body-md px-2 py-8 text-center text-subtle">
-                    {providerConfigurationRequired ? t("composer.model.configureProviderDescription") : "No models found"}
+                    {providerConfigurationRequired ? t("composer.model.configureProviderDescription") : t("composer.model.noModels")}
                   </div>
                 )}
               </div>
@@ -606,9 +629,9 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
           {thinkingSupported ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button type="button" variant="secondary" className="px-2" aria-label="Thinking mode">
+                <Button type="button" variant="secondary" className="px-2" aria-label={t("composer.thinking.mode")}>
                   <Brain className="h-4 w-4" />
-                  {thinkingLabel(selectedThinkingMode)}
+                  {thinkingLabel(selectedThinkingMode, t)}
                   <ChevronDown className="h-3.5 w-3.5 text-subtle" />
                 </Button>
               </DropdownMenuTrigger>
@@ -636,7 +659,7 @@ export function Composer({ state, variant = "dock" }: { state: WorkbenchState; v
             variant={busy ? "secondary" : "default"}
             className="rounded-full shadow-[0_8px_22px_rgb(0_0_0_/_0.28)]"
             disabled={!busy && (!hasComposerContent || imageInputBlocked)}
-            aria-label={busy ? "Interrupt" : "Send"}
+            aria-label={busy ? t("composer.interrupt") : t("composer.send")}
             onClick={busy ? () => void interruptActiveTurn() : undefined}
           >
             {busy ? <Square className="h-3.5 w-3.5" /> : <ArrowUp className="h-4 w-4" />}
@@ -660,12 +683,14 @@ function SlashCommandMenu({
   onSelect: (command: SlashCommand) => void;
   onHighlight: (command: SlashCommand) => void;
 }) {
+  const { t } = useI18n();
+
   return (
     <div
       id={id}
       role="menu"
-      aria-label="Slash commands"
-      className="absolute bottom-full left-0 z-40 mb-2 w-[min(360px,calc(100vw-32px))] rounded-md border border-border bg-surface-2 p-1.5 text-ink shadow-panel"
+      aria-label={t("composer.slash.label")}
+      className="absolute bottom-full left-0 z-40 mb-2 w-[min(360px,calc(100vw-32px))] rounded-xl border border-border bg-surface-2 p-1.5 text-ink shadow-panel"
     >
       {commands.map((command) => {
         const Icon = command.icon;
@@ -677,7 +702,7 @@ function SlashCommandMenu({
             role="menuitem"
             disabled={command.disabled}
             data-highlighted={command.id === activeCommandId ? "true" : undefined}
-            className="flex min-h-11 w-full items-center gap-3 rounded px-2.5 py-2 text-left outline-none transition-colors hover:bg-surface-3 focus:bg-surface-3 data-[highlighted=true]:bg-surface-3 disabled:pointer-events-none disabled:opacity-45"
+            className="flex min-h-11 w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left outline-none transition-colors hover:bg-surface-3 focus:bg-surface-3 data-[highlighted=true]:bg-surface-3 disabled:pointer-events-none disabled:opacity-45"
             onClick={() => onSelect(command)}
             onMouseEnter={() => onHighlight(command)}
           >
@@ -715,36 +740,38 @@ function buildSlashCommands({
   activeProjectId,
   activeSessionId,
   busy,
-  planMode
+  planMode,
+  t
 }: {
   activeProjectId: string | null;
   activeSessionId: string | null;
   busy: boolean;
   planMode: boolean;
+  t: (key: TranslationKey) => string;
 }): SlashCommand[] {
   const hasActiveThread = Boolean(activeProjectId && activeSessionId);
   return [
     {
       id: "compact",
       command: "/compact",
-      label: "Compact conversation",
-      detail: busy ? "Available when the thread is idle" : "Summarize history and shrink context",
+      label: t("composer.slash.compact.label"),
+      detail: busy ? t("composer.slash.compact.busyDetail") : t("composer.slash.compact.detail"),
       icon: Database,
       disabled: !hasActiveThread || busy
     },
     {
       id: "goal",
       command: "/goal",
-      label: "Set goal",
-      detail: "Create or edit the thread goal",
+      label: t("composer.slash.goal.label"),
+      detail: t("composer.slash.goal.detail"),
       icon: Target,
       disabled: !activeProjectId
     },
     {
       id: "plan",
       command: "/plan",
-      label: planMode ? "Disable plan mode" : "Enable plan mode",
-      detail: "Toggle planning for the next prompt",
+      label: planMode ? t("composer.slash.plan.disable") : t("composer.slash.plan.enable"),
+      detail: t("composer.slash.plan.detail"),
       icon: ListChecks,
       disabled: false
     }
@@ -780,6 +807,19 @@ function nextEnabledSlashCommandIndex(commands: SlashCommand[], currentIndex: nu
   return currentIndex;
 }
 
+function resizeComposerTextarea(textarea: HTMLTextAreaElement | null, variant: ComposerVariant) {
+  if (!textarea) {
+    return;
+  }
+
+  const { min, max } = composerTextareaSizes[variant];
+  textarea.style.height = `${min}px`;
+  const contentHeight = Math.max(min, textarea.scrollHeight);
+  const nextHeight = Math.min(max, contentHeight);
+  textarea.style.height = `${nextHeight}px`;
+  textarea.style.overflowY = contentHeight > max ? "auto" : "hidden";
+}
+
 const supportedImageExtensions = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
 const supportedImageMimeTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
@@ -804,12 +844,14 @@ function errorMessage(error: unknown) {
 }
 
 function AttachmentTray({ attachments, label }: { attachments: ComposerAttachment[]; label: string }) {
+  const { t } = useI18n();
+
   return (
     <div className="mt-2 flex flex-wrap gap-2 px-1" aria-label={label}>
       {attachments.map((attachment) => (
         <div
           key={attachment.id}
-          className="group flex h-14 w-[min(100%,17rem)] items-center gap-2 rounded-md border border-border bg-surface-1 p-1.5 text-muted transition-colors hover:border-border-strong hover:bg-surface-2"
+          className="group flex h-14 w-[min(100%,17rem)] items-center gap-2 rounded-lg border border-border bg-surface-1 p-1.5 text-muted transition-colors hover:border-border-strong hover:bg-surface-2"
         >
           <LocalImageThumbnail path={attachment.path} name={attachment.name} />
           <div className="min-w-0 flex-1">
@@ -821,7 +863,7 @@ function AttachmentTray({ attachments, label }: { attachments: ComposerAttachmen
             variant="ghost"
             size="icon"
             className="h-6 w-6 shrink-0"
-            aria-label={`Remove ${attachment.name}`}
+            aria-label={t("composer.attachments.removeFor").replace("{name}", attachment.name)}
             onClick={() => removeComposerAttachment(attachment.id)}
           >
             <X className="h-3.5 w-3.5" />
@@ -869,7 +911,7 @@ function ComposerActionsMenu({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button type="button" variant="ghost" size="icon" aria-label="Open composer actions">
+        <Button type="button" variant="ghost" size="icon" aria-label={t("composer.aria.openActions")}>
           <Plus className="h-4 w-4" />
         </Button>
       </DropdownMenuTrigger>
@@ -944,7 +986,7 @@ function PlannedActionItem({
   );
 }
 
-function buildModelOptions(state: WorkbenchState): ComposerModelOption[] {
+function buildModelOptions(state: WorkbenchState, t: (key: TranslationKey) => string): ComposerModelOption[] {
   const options: ComposerModelOption[] = [];
   const seen = new Set<string>();
 
@@ -955,7 +997,13 @@ function buildModelOptions(state: WorkbenchState): ComposerModelOption[] {
 
   if (settings?.model_options.length) {
     settings.model_options.forEach((model) => {
-      addModelOptionFromView(options, seen, model, providerNameFor(settings, model.provider_id), detailForModelOption(settings, model));
+      addModelOptionFromView(
+        options,
+        seen,
+        model,
+        providerNameFor(settings, model.provider_id),
+        detailForModelOption(settings, model, t)
+      );
     });
   } else {
     const configuredProviders = settings?.configured_providers.length
@@ -971,7 +1019,7 @@ function buildModelOptions(state: WorkbenchState): ComposerModelOption[] {
         provider.provider_id,
         providerNameFor(settings, provider.provider_id),
         provider.model,
-        "Configured"
+        t("composer.model.configured")
       );
     });
   }
@@ -989,7 +1037,7 @@ function buildModelOptions(state: WorkbenchState): ComposerModelOption[] {
       selected.provider_id,
       providerNameFor(settings, selected.provider_id),
       selected.model_id,
-      "Selected"
+      t("composer.model.selected")
     );
   }
 
@@ -1087,7 +1135,7 @@ function filterModelOptions(options: ComposerModelOption[], query: string) {
   );
 }
 
-function modelOptionForRef(options: ComposerModelOption[], model: ModelRef) {
+function modelOptionForRef(options: ComposerModelOption[], model: ModelRef, t: (key: TranslationKey) => string) {
   return (
     options.find((option) => option.providerId === model.provider_id && option.modelId === model.model_id) ?? {
       key: `${model.provider_id}:${model.model_id}`,
@@ -1095,21 +1143,25 @@ function modelOptionForRef(options: ComposerModelOption[], model: ModelRef) {
       providerName: model.provider_id,
       modelId: model.model_id,
       label: model.model_id,
-      detail: "Selected",
+      detail: t("composer.model.selected"),
       capabilities: unsupportedCapabilities
     }
   );
 }
 
-function detailForModelOption(settings: WorkbenchState["providerSettings"], model: ProviderModelView) {
+function detailForModelOption(
+  settings: WorkbenchState["providerSettings"],
+  model: ProviderModelView,
+  t: (key: TranslationKey) => string
+) {
   if (settings?.config.provider_id === model.provider_id && settings.config.model === model.id) {
-    return "Configured";
+    return t("composer.model.configured");
   }
   const provider = settings?.providers.find((item) => item.id === model.provider_id);
   if (provider?.default_model === model.id) {
-    return "Provider default";
+    return t("composer.model.providerDefault");
   }
-  return "Available";
+  return t("composer.model.available");
 }
 
 function providerNameFor(settings: WorkbenchState["providerSettings"], providerId: string) {
@@ -1120,8 +1172,28 @@ function normalizedThinkingSelection(mode: ThinkingMode | null): ThinkingMode | 
   return mode === "auto" ? null : mode;
 }
 
-function thinkingLabel(mode: ThinkingMode | null) {
-  return [defaultThinkingModeOption, ...backendThinkingModeOptions].find((item) => item.value === mode)?.label ?? "Default";
+function defaultThinkingModeOption(t: (key: TranslationKey) => string): ThinkingModeOption {
+  return { value: null, label: t("composer.thinking.default"), aria: t("composer.thinking.defaultAria") };
+}
+
+function backendThinkingModeOptions(t: (key: TranslationKey) => string): Array<{
+  value: NonDefaultThinkingMode;
+  label: string;
+  aria: string;
+}> {
+  return [
+    { value: "off", label: t("composer.thinking.off"), aria: t("composer.thinking.offAria") },
+    { value: "minimal", label: t("composer.thinking.minimal"), aria: t("composer.thinking.minimalAria") },
+    { value: "low", label: t("composer.thinking.low"), aria: t("composer.thinking.lowAria") },
+    { value: "medium", label: t("composer.thinking.medium"), aria: t("composer.thinking.mediumAria") },
+    { value: "high", label: t("composer.thinking.high"), aria: t("composer.thinking.highAria") },
+    { value: "x_high", label: t("composer.thinking.xHigh"), aria: t("composer.thinking.xHighAria") }
+  ];
+}
+
+function thinkingLabel(mode: ThinkingMode | null, t: (key: TranslationKey) => string) {
+  return [defaultThinkingModeOption(t), ...backendThinkingModeOptions(t)].find((item) => item.value === mode)?.label
+    ?? t("composer.thinking.default");
 }
 
 function thinkingRadioValue(mode: ThinkingMode | null) {

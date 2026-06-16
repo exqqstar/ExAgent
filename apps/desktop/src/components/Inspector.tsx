@@ -7,6 +7,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { countAgents, countLiveAgents } from "@/lib/agentTree";
 import type { getWorkbenchState } from "@/stores/workbenchStore";
 import type { AgentNode } from "@/types";
+import { useI18n, type TranslationKey } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 type WorkbenchState = ReturnType<typeof getWorkbenchState>;
@@ -21,6 +22,7 @@ const eventVariant = {
 } as const;
 
 export function Inspector({ state, variant = "sheet" }: { state: WorkbenchState; variant?: InspectorVariant }) {
+  const { t } = useI18n();
   const rootTokenUsage = state.activeSessionId ? state.tokenUsageByThreadId[state.activeSessionId] : null;
   const contextWindow = rootTokenUsage?.modelContextWindow ?? null;
   const contextUsed = rootTokenUsage?.last.total_tokens ?? null;
@@ -38,7 +40,11 @@ export function Inspector({ state, variant = "sheet" }: { state: WorkbenchState;
   const liveAgents = agentRoot ? countLiveAgents(state.agents) : 0;
   const totalAgents = agentRoot ? countAgents(state.agents) : 0;
   const agentSummary =
-    liveAgents > 0 ? `${liveAgents} running` : `${totalAgents} ${totalAgents === 1 ? "agent" : "agents"}`;
+    liveAgents > 0
+      ? t("inspector.agentSummary.running").replace("{count}", String(liveAgents))
+      : totalAgents === 1
+        ? t("inspector.agentSummary.singular")
+        : t("inspector.agentSummary.plural").replace("{count}", String(totalAgents));
   const waitingApprovalAgents = agentRoot ? countWaitingApproval(agentRoot) : 0;
   const [expandWaitingSignal, setExpandWaitingSignal] = useState(0);
 
@@ -47,10 +53,10 @@ export function Inspector({ state, variant = "sheet" }: { state: WorkbenchState;
       <InspectorSection
         defaultOpen
         icon={Activity}
-        title="Progress"
+        title={t("inspector.sections.progress")}
         accessory={
           <Badge variant={activeStatus === "failed" ? "danger" : activeStatus === "awaiting_approval" ? "warning" : activeStatus === "running" ? "success" : "neutral"}>
-            {activeStatus.replace("_", " ")}
+            {sessionStatusLabel(activeStatus, t)}
           </Badge>
         }
       >
@@ -64,7 +70,7 @@ export function Inspector({ state, variant = "sheet" }: { state: WorkbenchState;
           defaultOpen={liveAgents > 0}
           icon={Bot}
           openSignal={expandWaitingSignal}
-          title="Agents"
+          title={t("inspector.sections.agents")}
           summary={agentSummary}
           accessory={
             waitingApprovalAgents > 0 ? (
@@ -84,27 +90,34 @@ export function Inspector({ state, variant = "sheet" }: { state: WorkbenchState;
         </InspectorSection>
       ) : null}
 
-      <InspectorSection icon={HardDrive} title="Environment" summary={compactPath(state.cwd)}>
+      <InspectorSection icon={HardDrive} title={t("inspector.sections.environment")} summary={compactPath(state.cwd)}>
         <KeyValue label="cwd" value={compactPath(state.cwd)} title={state.cwd} mono />
         <KeyValue label="policy" value={state.policy} />
       </InspectorSection>
 
-      <InspectorSection defaultOpen icon={Cpu} title="Runtime" summary={runtimeModel}>
+      <InspectorSection defaultOpen icon={Cpu} title={t("inspector.sections.runtime")} summary={runtimeModel}>
         <KeyValue label="model" value={runtimeModel} mono />
         <KeyValue label="thinking" value={thinkingMode} />
-        <KeyValue label="MCP servers" value={`${enabledMcpServers} enabled`} />
-        <KeyValue label="Skill roots" value={`${enabledSkillRoots} enabled`} />
+        <KeyValue label="MCP servers" value={t("inspector.enabledCount").replace("{count}", String(enabledMcpServers))} />
+        <KeyValue label="Skill roots" value={t("inspector.enabledCount").replace("{count}", String(enabledSkillRoots))} />
       </InspectorSection>
 
-      <InspectorSection defaultOpen icon={Gauge} title="Token Usage" summary={tokenUsageSummary(rootTokenUsage)}>
+      <InspectorSection
+        defaultOpen
+        icon={Gauge}
+        title={t("inspector.sections.tokenUsage")}
+        summary={tokenUsageSummary(rootTokenUsage, t)}
+      >
         <TokenUsagePanel usage={rootTokenUsage} />
       </InspectorSection>
 
       <InspectorSection
         defaultOpen
         icon={Database}
-        title="Context Window"
-        summary={contextPercent != null ? `${contextPercent}% used` : "not reported"}
+        title={t("inspector.sections.contextWindow")}
+        summary={contextPercent != null
+          ? t("inspector.context.percentUsed").replace("{percent}", String(contextPercent))
+          : t("inspector.context.notReported")}
       >
         {contextWindow && contextWindow > 0 ? (
           <div className="space-y-2">
@@ -115,18 +128,20 @@ export function Inspector({ state, variant = "sheet" }: { state: WorkbenchState;
             </div>
           </div>
         ) : (
-          <p className="type-body-md text-muted">No context window reported for this thread.</p>
+          <p className="type-body-md text-muted">{t("inspector.context.empty")}</p>
         )}
       </InspectorSection>
 
       <InspectorSection
         icon={FileText}
-        title="Changed Files"
-        summary={state.changedFiles.length === 0 ? "none" : `${state.changedFiles.length} changed`}
+        title={t("inspector.sections.changedFiles")}
+        summary={state.changedFiles.length === 0
+          ? t("inspector.changedFiles.none")
+          : t("inspector.changedFiles.changed").replace("{count}", String(state.changedFiles.length))}
       >
         <div className="space-y-2">
           {state.changedFiles.length === 0 ? (
-            <p className="type-body-md text-muted">No changed files reported.</p>
+            <p className="type-body-md text-muted">{t("inspector.changedFiles.empty")}</p>
           ) : (
             state.changedFiles.map((file) => (
               <div key={file.path} className="flex items-center gap-2 rounded-md bg-surface-2 px-2 py-1.5">
@@ -140,10 +155,14 @@ export function Inspector({ state, variant = "sheet" }: { state: WorkbenchState;
         </div>
       </InspectorSection>
 
-      <InspectorSection icon={ShieldCheck} title="Events" summary={`${state.events.length} recorded`}>
+      <InspectorSection
+        icon={ShieldCheck}
+        title={t("inspector.sections.events")}
+        summary={t("inspector.events.recorded").replace("{count}", String(state.events.length))}
+      >
         <div className="space-y-2.5">
           {state.events.length === 0 ? (
-            <p className="type-body-md text-muted">No runtime events yet.</p>
+            <p className="type-body-md text-muted">{t("inspector.events.empty")}</p>
           ) : (
             state.events.map((event) => (
               <div key={event.id} className="min-w-0 border-l border-border pl-3">
@@ -240,17 +259,27 @@ function InspectorSection({
 }
 
 function WaitingApprovalHeaderButton({ count, onClick }: { count: number; onClick: () => void }) {
+  const { t } = useI18n();
+
   return (
     <button
       type="button"
-      aria-label={expandWaitingApprovalLabel(count)}
+      aria-label={
+        count === 1
+          ? t("inspector.waitingApproval.expandSingular")
+          : t("inspector.waitingApproval.expandPlural").replace("{count}", String(count))
+      }
       onClick={onClick}
       className="shrink-0 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus"
     >
       <Badge variant="warning" className="gap-1">
         <CircleAlert aria-hidden className="h-3 w-3 shrink-0" />
         <span>{count}</span>
-        <span>{count === 1 ? "approval" : "approvals"}</span>
+        <span>
+          {count === 1
+            ? t("inspector.waitingApproval.approvalSingular")
+            : t("inspector.waitingApproval.approvalPlural")}
+        </span>
       </Badge>
     </button>
   );
@@ -281,6 +310,17 @@ function countWaitingApproval(node: AgentNode): number {
   return self + node.children.reduce((count, child) => count + countWaitingApproval(child), 0);
 }
 
-function expandWaitingApprovalLabel(count: number) {
-  return `Expand ${count} waiting approval ${count === 1 ? "agent" : "agents"}`;
+function sessionStatusLabel(status: string, t: (key: TranslationKey) => string) {
+  switch (status) {
+    case "running":
+      return t("status.session.running");
+    case "awaiting_approval":
+      return t("status.session.awaitingApproval");
+    case "failed":
+      return t("status.session.failed");
+    case "archived":
+      return t("status.session.archived");
+    default:
+      return t("status.session.idle");
+  }
 }

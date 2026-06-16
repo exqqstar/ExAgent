@@ -7,11 +7,14 @@ import { GoalControl } from "@/components/GoalControl";
 import { TranscriptList } from "@/components/TranscriptList";
 import { setComposerValue } from "@/stores/workbenchStore";
 import type { getWorkbenchState } from "@/stores/workbenchStore";
+import { useI18n, type TranslationKey } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 type WorkbenchState = ReturnType<typeof getWorkbenchState>;
 
 export function ChatView({ state }: { state: WorkbenchState }) {
+  const { t } = useI18n();
+
   if (state.compareView) {
     return <BranchCompareView state={state} compare={state.compareView} />;
   }
@@ -27,7 +30,7 @@ export function ChatView({ state }: { state: WorkbenchState }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {state.error ? <ChatError message={state.error} /> : null}
-      <div className="min-h-0 flex-1 px-2 py-2">
+      <div className="min-h-0 flex-1 px-3 py-3">
         <div className="grid h-full w-full grid-cols-1 gap-3 2xl:grid-cols-[minmax(0,1fr)_360px] 2xl:items-start">
           <div className="flex h-full min-h-0 min-w-0 flex-col">
             {empty ? (
@@ -38,7 +41,7 @@ export function ChatView({ state }: { state: WorkbenchState }) {
                   <div className="mx-auto flex w-full max-w-[920px] flex-col gap-5 pb-5 pt-1">
                     <TranscriptList
                       messages={state.transcript}
-                      loading={state.loading}
+                      loading={state.loading && state.transcript.length === 0}
                       forkDisabled={forkDisabled}
                       onForkFromTurn={state.forkThreadFromTurn}
                       groupTurnActivity
@@ -57,8 +60,8 @@ export function ChatView({ state }: { state: WorkbenchState }) {
           </div>
 
           <aside
-            className="inspector-panel hidden h-fit max-h-[calc(100dvh-4rem)] w-full min-w-0 overflow-x-hidden overflow-y-auto rounded-xl border border-border 2xl:block"
-            aria-label="Inspector"
+            className="inspector-panel hidden h-fit max-h-[calc(100dvh-4rem)] w-full min-w-0 overflow-x-hidden overflow-y-auto rounded-2xl border border-border 2xl:block"
+            aria-label={t("chat.inspector")}
           >
             <Inspector state={state} variant="panel" />
           </aside>
@@ -75,43 +78,46 @@ function BranchCompareView({
   state: WorkbenchState;
   compare: NonNullable<WorkbenchState["compareView"]>;
 }) {
+  const { t } = useI18n();
   const sharedTurnLabel =
-    compare.sharedTurnCount === 1 ? "1 shared turn" : `${compare.sharedTurnCount} shared turns`;
+    compare.sharedTurnCount === 1
+      ? t("chat.compare.sharedTurnSingular")
+      : t("chat.compare.sharedTurnPlural").replace("{count}", String(compare.sharedTurnCount));
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {state.error ? <ChatError message={state.error} /> : null}
-      <div className="min-h-0 flex-1 px-2 py-2">
+      <div className="min-h-0 flex-1 px-3 py-3">
         <div className="mx-auto flex h-full w-full max-w-[1280px] flex-col gap-3">
-          <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-surface-1 px-4 py-3">
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-surface-1 px-4 py-3">
             <p className="type-label-md text-ink">{sharedTurnLabel}</p>
             <Button
               type="button"
               variant="ghost"
               size="icon"
-              aria-label="Close branch compare"
+              aria-label={t("chat.compare.close")}
               onClick={state.closeCompareView}
             >
               <X className="h-4 w-4" />
             </Button>
           </div>
           {compare.error ? (
-            <div role="alert" className="rounded-lg border border-danger/30 bg-danger/8 px-4 py-3 text-danger">
+            <div role="alert" className="rounded-xl border border-danger/30 bg-danger/8 px-4 py-3 text-danger">
               <p className="type-body-sm break-words">{compare.error}</p>
             </div>
           ) : null}
           <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 xl:grid-cols-2">
             <ComparePane
-              label="Parent branch transcript"
+              label={t("chat.compare.parentLabel")}
               title={compare.parentTitle}
-              eyebrow="Parent branch"
+              eyebrow={t("chat.compare.parentEyebrow")}
               messages={compare.parentTranscript}
               loading={compare.loading}
             />
             <ComparePane
-              label="Fork branch transcript"
+              label={t("chat.compare.forkLabel")}
               title={compare.childTitle}
-              eyebrow="Fork branch"
+              eyebrow={t("chat.compare.forkEyebrow")}
               messages={compare.childTranscript}
               loading={compare.loading}
             />
@@ -135,8 +141,10 @@ function ComparePane({
   messages: WorkbenchState["transcript"];
   loading: boolean;
 }) {
+  const { t } = useI18n();
+
   return (
-    <section aria-label={label} className="flex min-h-0 min-w-0 flex-col rounded-lg border border-border bg-surface-1">
+    <section aria-label={label} className="flex min-h-0 min-w-0 flex-col rounded-xl border border-border bg-surface-1">
       <div className="border-b border-border px-4 py-3">
         <p className="type-label-sm text-muted">{eyebrow}</p>
         <h2 className="type-title-md truncate text-ink">{title}</h2>
@@ -146,7 +154,7 @@ function ComparePane({
           <TranscriptList
             messages={messages}
             loading={loading}
-            emptyLabel="No post-fork turns in this branch."
+            emptyLabel={t("chat.compare.empty")}
             readOnly
             groupTurnActivity
           />
@@ -168,29 +176,33 @@ function ChatError({ message }: { message: string }) {
 }
 
 function NewSessionState({ state }: { state: WorkbenchState }) {
+  const { t } = useI18n();
   const project = state.projects.find((item) => item.id === state.activeProjectId);
   if (!project) {
     return <NoProjectState state={state} />;
   }
   const projectName = project.name;
+  const prompts = newSessionPrompts(t);
 
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center px-4 py-8">
       <div className="w-full max-w-[820px]">
         <div className="mb-8 text-center">
-          <h2 className="type-empty-title text-ink">What should we build in {projectName}?</h2>
+          <h2 className="type-empty-title text-ink">
+            {t("chat.empty.title").replace("{project}", projectName)}
+          </h2>
         </div>
 
         <Composer state={state} variant="hero" />
         <GoalControl state={state} variant="hero" />
 
         <div className="mt-7 grid gap-3 sm:grid-cols-[1.08fr_0.92fr]">
-          {newSessionPrompts.map((prompt, index) => (
+          {prompts.map((prompt, index) => (
             <button
               key={prompt.title}
               type="button"
               className={cn(
-                "prompt-card group rounded-lg p-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus",
+                "prompt-card group rounded-xl p-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus",
                 index === 0 ? "min-h-[150px] sm:row-span-2" : "min-h-[92px]"
               )}
               onClick={() => setComposerValue(prompt.value)}
@@ -212,20 +224,22 @@ function NewSessionState({ state }: { state: WorkbenchState }) {
 }
 
 function NoProjectState({ state }: { state: WorkbenchState }) {
+  const { t } = useI18n();
+
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center px-4 py-8">
       <div className="w-full max-w-[520px] text-center">
-        <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-surface-1 text-muted">
+        <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-surface-1 text-muted">
           <FolderPlus className="h-5 w-5" />
         </div>
-        <h2 className="type-empty-title mt-5 text-ink">Add a project</h2>
+        <h2 className="type-empty-title mt-5 text-ink">{t("chat.empty.addProject.title")}</h2>
         <p className="type-body-md mx-auto mt-2 max-w-[360px] text-muted">
-          Choose a folder before starting a session.
+          {t("chat.empty.addProject.description")}
         </p>
         <div className="mt-5 flex justify-center">
           <Button type="button" onClick={() => void state.addProject()}>
             <FolderPlus className="h-4 w-4" />
-            <span>Add project</span>
+            <span>{t("chat.empty.addProject.action")}</span>
           </Button>
         </div>
       </div>
@@ -233,23 +247,25 @@ function NoProjectState({ state }: { state: WorkbenchState }) {
   );
 }
 
-const newSessionPrompts = [
-  {
-    icon: Blocks,
-    title: "Build a feature",
-    description: "Describe the product behavior you want",
-    value: "Build "
-  },
-  {
-    icon: Bug,
-    title: "Fix a problem",
-    description: "Point ExAgent at a bug or rough edge",
-    value: "Fix "
-  },
-  {
-    icon: FileText,
-    title: "Review the code",
-    description: "Ask for risks, regressions, and tests",
-    value: "Review "
-  }
-];
+function newSessionPrompts(t: (key: TranslationKey) => string) {
+  return [
+    {
+      icon: Blocks,
+      title: t("chat.prompt.buildFeature.title"),
+      description: t("chat.prompt.buildFeature.description"),
+      value: t("chat.prompt.buildFeature.value")
+    },
+    {
+      icon: Bug,
+      title: t("chat.prompt.fixProblem.title"),
+      description: t("chat.prompt.fixProblem.description"),
+      value: t("chat.prompt.fixProblem.value")
+    },
+    {
+      icon: FileText,
+      title: t("chat.prompt.reviewCode.title"),
+      description: t("chat.prompt.reviewCode.description"),
+      value: t("chat.prompt.reviewCode.value")
+    }
+  ];
+}

@@ -1,15 +1,15 @@
 @import "tailwindcss";
 
 @theme {
-  --color-bg: oklch(0.092 0.006 260);
-  --color-surface-1: oklch(0.130 0.007 260);
-  --color-surface-2: oklch(0.178 0.008 260);
-  --color-surface-3: oklch(0.245 0.009 260);
-  --color-border: oklch(0.292 0.010 260);
-  --color-border-strong: oklch(0.430 0.014 260);
+  --color-bg: oklch(0.110 0.006 260);
+  --color-surface-1: oklch(0.155 0.007 260);
+  --color-surface-2: oklch(0.205 0.008 260);
+  --color-surface-3: oklch(0.275 0.009 260);
+  --color-border: oklch(0.325 0.010 260);
+  --color-border-strong: oklch(0.455 0.014 260);
   --color-ink: oklch(0.935 0.006 250);
-  --color-muted: oklch(0.720 0.010 250);
-  --color-subtle: oklch(0.585 0.010 250);
+  --color-muted: oklch(0.735 0.010 250);
+  --color-subtle: oklch(0.605 0.010 250);
   --color-primary: oklch(0.760 0.052 58);
   --color-primary-hover: oklch(0.835 0.056 58);
   --color-primary-muted: oklch(0.305 0.030 58);
@@ -21,7 +21,7 @@
   --color-focus: oklch(0.760 0.056 82);
   --font-ui: "Geist", "Satoshi", "Avenir Next", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, monospace;
-  --shadow-panel: 0 18px 46px rgb(0 0 0 / 0.38), 0 1px 0 rgb(255 255 255 / 0.035) inset;
+  --shadow-panel: 0 18px 46px rgb(0 0 0 / 0.32), 0 1px 0 rgb(255 255 255 / 0.040) inset;
 }
 
 :root {
@@ -48,15 +48,15 @@
   --color-ink: oklch(0.230 0.014 255);
   --color-muted: oklch(0.430 0.014 255);
   --color-subtle: oklch(0.575 0.012 255);
-  --color-primary: oklch(0.500 0.095 145);
-  --color-primary-hover: oklch(0.440 0.105 145);
-  --color-primary-muted: oklch(0.928 0.030 145);
+  --color-primary: oklch(0.500 0.055 145);
+  --color-primary-hover: oklch(0.455 0.065 145);
+  --color-primary-muted: oklch(0.942 0.018 145);
   --color-primary-foreground: oklch(1 0 0);
   --color-info: oklch(0.520 0.105 245);
   --color-warning: oklch(0.610 0.115 78);
   --color-danger: oklch(0.535 0.150 28);
-  --color-success: oklch(0.500 0.105 145);
-  --color-focus: oklch(0.560 0.105 145);
+  --color-success: oklch(0.500 0.070 145);
+  --color-focus: oklch(0.520 0.065 145);
   --shadow-panel: 0 16px 42px rgb(0 0 0 / 0.10), 0 2px 8px rgb(0 0 0 / 0.05), 0 1px 0 rgb(255 255 255 / 1) inset;
 }
 
@@ -72,15 +72,15 @@
     --color-ink: oklch(0.230 0.014 255);
     --color-muted: oklch(0.430 0.014 255);
     --color-subtle: oklch(0.575 0.012 255);
-    --color-primary: oklch(0.500 0.095 145);
-    --color-primary-hover: oklch(0.440 0.105 145);
-    --color-primary-muted: oklch(0.928 0.030 145);
+    --color-primary: oklch(0.500 0.055 145);
+    --color-primary-hover: oklch(0.455 0.065 145);
+    --color-primary-muted: oklch(0.942 0.018 145);
     --color-primary-foreground: oklch(1 0 0);
     --color-info: oklch(0.520 0.105 245);
     --color-warning: oklch(0.610 0.115 78);
     --color-danger: oklch(0.535 0.150 28);
-    --color-success: oklch(0.500 0.105 145);
-    --color-focus: oklch(0.560 0.105 145);
+    --color-success: oklch(0.500 0.070 145);
+    --color-focus: oklch(0.520 0.065 145);
     --shadow-panel: 0 16px 42px rgb(0 0 0 / 0.10), 0 2px 8px rgb(0 0 0 / 0.05), 0 1px 0 rgb(255 255 255 / 1) inset;
   }
 }
@@ -103,7 +103,7 @@ body {
   background:
     radial-gradient(circle at 28% 12%, rgb(199 183 142 / 0.075), transparent 34rem),
     radial-gradient(circle at 76% 8%, rgb(184 194 206 / 0.055), transparent 30rem),
-    linear-gradient(180deg, oklch(0.108 0.008 260), var(--color-bg) 34rem);
+    linear-gradient(180deg, oklch(0.128 0.008 260), var(--color-bg) 34rem);
 }
 
 :root[data-theme="light"] body {
@@ -236,19 +236,47 @@ button {
 }
 
 .window-chrome {
-  background:
-    linear-gradient(180deg, color-mix(in oklch, var(--color-surface-2) 40%, transparent), transparent),
-    color-mix(in oklch, var(--color-bg) 92%, var(--color-surface-2));
-  border-bottom: 1px solid color-mix(in oklch, var(--color-border) 68%, transparent);
+  background: color-mix(in oklch, var(--color-surface-1) 74%, var(--color-bg));
+  border-bottom: 0;
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.035);
 }
 
 .workspace-body {
-  background: color-mix(in oklch, var(--color-bg) 96%, black);
+  background: color-mix(in oklch, var(--color-surface-1) 74%, var(--color-bg));
+}
+
+.workspace-main {
+  position: relative;
+  overflow: hidden;
+  border-left: 1px solid color-mix(in oklch, var(--color-border) 58%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in oklch, var(--color-surface-1) 58%, transparent), transparent 16rem),
+    color-mix(in oklch, var(--color-bg) 90%, var(--color-surface-1));
+  box-shadow: inset 1px 1px 0 rgb(255 255 255 / 0.026);
+}
+
+.workspace-main-full {
+  border-left-color: transparent;
 }
 
 .window-chrome-sidebar {
-  border-right: 1px solid color-mix(in oklch, var(--color-border) 74%, transparent);
+  border-right: 0;
+}
+
+.window-chrome-main {
+  position: relative;
+  overflow: hidden;
+  border-left: 1px solid color-mix(in oklch, var(--color-border) 58%, transparent);
+  border-top-left-radius: 1rem;
+  background:
+    linear-gradient(180deg, color-mix(in oklch, var(--color-surface-1) 58%, transparent), transparent 16rem),
+    color-mix(in oklch, var(--color-bg) 90%, var(--color-surface-1));
+  box-shadow: inset 1px 1px 0 rgb(255 255 255 / 0.026);
+}
+
+.window-chrome-main-full {
+  border-left-color: transparent;
+  border-top-left-radius: 0;
 }
 
 .traffic-light-space {
@@ -265,7 +293,7 @@ button {
 .window-chrome-action {
   height: 1.625rem;
   width: 1.625rem;
-  transform: translateY(0.1875rem);
+  margin-top: 0.1875rem;
 }
 
 .window-session-title {
@@ -284,6 +312,14 @@ button {
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.025);
 }
 
+.control-field:focus {
+  border-color: color-mix(in oklch, var(--color-border-strong) 58%, transparent) !important;
+  background: color-mix(in oklch, var(--color-surface-1) 54%, var(--color-surface-2)) !important;
+  box-shadow:
+    0 0 0 3px color-mix(in oklch, var(--color-border) 36%, transparent),
+    inset 0 1px 0 rgb(255 255 255 / 0.045) !important;
+}
+
 [data-tauri-drag-region] {
   user-select: none;
   -webkit-user-select: none;
@@ -291,15 +327,19 @@ button {
 
 .sidebar-surface {
   background:
-    linear-gradient(180deg, color-mix(in oklch, var(--color-surface-2) 22%, transparent), transparent 16rem),
-    color-mix(in oklch, var(--color-surface-1) 88%, var(--color-bg));
-  box-shadow: inset -1px 0 0 rgb(255 255 255 / 0.024);
+    linear-gradient(180deg, color-mix(in oklch, var(--color-surface-2) 14%, transparent), transparent 15rem),
+    color-mix(in oklch, var(--color-surface-1) 96%, var(--color-bg));
+  box-shadow: inset -1px 0 0 rgb(255 255 255 / 0.018);
 }
 
 .sidebar-quick-actions {
   display: grid;
   gap: 0.125rem;
-  background: color-mix(in oklch, var(--color-surface-1) 30%, transparent);
+  background: transparent;
+}
+
+.sidebar-footer {
+  background: transparent;
 }
 
 .sidebar-action-row {
@@ -308,7 +348,7 @@ button {
   width: 100%;
   align-items: center;
   gap: 0.625rem;
-  border-radius: 0.5rem;
+  border-radius: 0.6875rem;
   padding: 0.375rem 0.5625rem;
   color: var(--color-ink);
   font-size: 0.8125rem;
@@ -321,13 +361,8 @@ button {
     box-shadow 160ms ease;
 }
 
-.sidebar-action-row:first-child {
-  background: color-mix(in oklch, var(--color-surface-2) 58%, transparent);
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.025);
-}
-
 .sidebar-action-row:hover {
-  background: var(--color-surface-2);
+  background: color-mix(in oklch, var(--color-surface-2) 74%, var(--color-surface-1));
 }
 
 .sidebar-action-row:active {
@@ -341,65 +376,56 @@ button {
     0 0 0 2px color-mix(in oklch, var(--color-focus) 24%, transparent);
 }
 
-.sidebar-shortcut {
-  display: inline-flex;
-  min-width: 2rem;
-  height: 1.125rem;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid color-mix(in oklch, var(--color-border-strong) 62%, transparent);
-  border-radius: 0.3125rem;
-  background: color-mix(in oklch, var(--color-bg) 34%, transparent);
-  padding-inline: 0.25rem;
-  color: var(--color-muted);
-  font-family: var(--font-ui);
-  font-size: 0.625rem;
-  font-weight: 600;
-  line-height: 1;
-}
-
 .sidebar-search {
   background: color-mix(in oklch, var(--color-surface-1) 22%, transparent);
 }
 
 :root[data-theme="light"] .sidebar-surface {
-  background: oklch(0.936 0.002 255);
-  box-shadow: inset -1px 0 0 rgb(255 255 255 / 0.82);
+  background: oklch(0.958 0.002 255);
+  box-shadow: inset -1px 0 0 rgb(255 255 255 / 0.78);
 }
 
 :root[data-theme="light"] .sidebar-quick-actions {
-  background: oklch(0.936 0.002 255);
-}
-
-:root[data-theme="light"] .sidebar-action-row:first-child {
-  background: oklch(0.970 0.001 255);
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.86);
+  background: transparent;
 }
 
 :root[data-theme="light"] .sidebar-action-row:hover {
-  background: oklch(0.985 0.001 255);
-}
-
-:root[data-theme="light"] .sidebar-shortcut {
-  background: oklch(0.950 0.002 255);
-  border-color: color-mix(in oklch, var(--color-border-strong) 55%, white);
+  background: oklch(0.988 0.001 255);
 }
 
 :root[data-theme="light"] .window-chrome {
-  background:
-    linear-gradient(180deg, rgb(255 255 255 / 0.96), rgb(250 250 251 / 0.92)),
-    white;
-  border-bottom-color: color-mix(in oklch, var(--color-border) 72%, transparent);
+  background: oklch(0.958 0.002 255);
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.95);
 }
 
 :root[data-theme="light"] .workspace-body {
-  background: var(--color-bg);
+  background: oklch(0.958 0.002 255);
+}
+
+:root[data-theme="light"] .workspace-main {
+  border-left-color: color-mix(in oklch, var(--color-border) 74%, white);
+  background: oklch(0.996 0 0);
+  box-shadow: inset 1px 1px 0 rgb(255 255 255 / 0.94);
+}
+
+:root[data-theme="light"] .window-chrome-main {
+  border-left-color: color-mix(in oklch, var(--color-border) 74%, white);
+  background: oklch(0.996 0 0);
+  box-shadow: inset 1px 1px 0 rgb(255 255 255 / 0.94);
 }
 
 :root[data-theme="light"] .window-status-pill {
   background: color-mix(in oklch, var(--color-surface-2) 68%, white);
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.95);
+}
+
+:root[data-theme="light"] .control-field:focus {
+  border-color: color-mix(in oklch, var(--color-border-strong) 54%, white) !important;
+  background: color-mix(in oklch, white 72%, var(--color-surface-2)) !important;
+  box-shadow:
+    0 0 0 3px rgb(0 0 0 / 0.035),
+    0 1px 2px rgb(0 0 0 / 0.035),
+    inset 0 1px 0 rgb(255 255 255 / 0.95) !important;
 }
 
 :root[data-theme="light"] .sidebar-search {
@@ -408,43 +434,51 @@ button {
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) .sidebar-surface {
-    background: oklch(0.936 0.002 255);
-    box-shadow: inset -1px 0 0 rgb(255 255 255 / 0.82);
+    background: oklch(0.958 0.002 255);
+    box-shadow: inset -1px 0 0 rgb(255 255 255 / 0.78);
   }
 
   :root:not([data-theme="dark"]) .sidebar-quick-actions {
-    background: oklch(0.936 0.002 255);
-  }
-
-  :root:not([data-theme="dark"]) .sidebar-action-row:first-child {
-    background: oklch(0.970 0.001 255);
-    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.86);
+    background: transparent;
   }
 
   :root:not([data-theme="dark"]) .sidebar-action-row:hover {
-    background: oklch(0.985 0.001 255);
-  }
-
-  :root:not([data-theme="dark"]) .sidebar-shortcut {
-    background: oklch(0.950 0.002 255);
-    border-color: color-mix(in oklch, var(--color-border-strong) 55%, white);
+    background: oklch(0.988 0.001 255);
   }
 
   :root:not([data-theme="dark"]) .window-chrome {
-    background:
-      linear-gradient(180deg, rgb(255 255 255 / 0.96), rgb(250 250 251 / 0.92)),
-      white;
-    border-bottom-color: color-mix(in oklch, var(--color-border) 72%, transparent);
+    background: oklch(0.958 0.002 255);
     box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.95);
   }
 
   :root:not([data-theme="dark"]) .workspace-body {
-    background: var(--color-bg);
+    background: oklch(0.958 0.002 255);
+  }
+
+  :root:not([data-theme="dark"]) .workspace-main {
+    border-left-color: color-mix(in oklch, var(--color-border) 74%, white);
+    background: oklch(0.996 0 0);
+    box-shadow: inset 1px 1px 0 rgb(255 255 255 / 0.94);
+  }
+
+  :root:not([data-theme="dark"]) .window-chrome-main {
+    border-left-color: color-mix(in oklch, var(--color-border) 74%, white);
+    background: oklch(0.996 0 0);
+    box-shadow: inset 1px 1px 0 rgb(255 255 255 / 0.94);
   }
 
   :root:not([data-theme="dark"]) .window-status-pill {
     background: color-mix(in oklch, var(--color-surface-2) 68%, white);
     box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.95);
+  }
+
+  :root:not([data-theme="dark"]) .control-field:focus {
+    border-color: color-mix(in oklch, var(--color-border-strong) 54%, white) !important;
+    background: color-mix(in oklch, white 72%, var(--color-surface-2)) !important;
+    box-shadow:
+      0 0 0 3px rgb(0 0 0 / 0.035),
+      0 1px 2px rgb(0 0 0 / 0.035),
+      inset 0 1px 0 rgb(255 255 255 / 0.95) !important;
   }
 
   :root:not([data-theme="dark"]) .sidebar-search {
@@ -470,24 +504,38 @@ button {
 }
 
 .composer-shell {
-  border: 1px solid color-mix(in oklch, var(--color-border) 84%, var(--color-primary));
+  border: 1px solid color-mix(in oklch, var(--color-border) 88%, var(--color-surface-3));
   background:
-    linear-gradient(180deg, color-mix(in oklch, var(--color-surface-2) 72%, transparent), color-mix(in oklch, var(--color-surface-1) 94%, black)),
+    linear-gradient(180deg, color-mix(in oklch, var(--color-surface-2) 72%, transparent), color-mix(in oklch, var(--color-surface-1) 94%, var(--color-bg))),
     var(--color-surface-1);
-  box-shadow: var(--shadow-panel);
+  box-shadow:
+    0 16px 40px rgb(0 0 0 / 0.24),
+    inset 0 1px 0 rgb(255 255 255 / 0.045);
+}
+
+.composer-shell .composer-textarea {
+  border-color: transparent !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.composer-shell .composer-textarea:focus {
+  border-color: transparent !important;
+  background: transparent !important;
+  box-shadow: none !important;
 }
 
 :root[data-theme="light"] .composer-shell {
-  border-color: color-mix(in oklch, var(--color-border) 82%, var(--color-primary));
+  border-color: color-mix(in oklch, var(--color-border) 86%, var(--color-border-strong));
   background: white;
-  box-shadow: 0 18px 44px rgb(0 0 0 / 0.105), 0 2px 8px rgb(0 0 0 / 0.045), inset 0 1px 0 rgb(255 255 255 / 1);
+  box-shadow: 0 18px 44px rgb(0 0 0 / 0.085), 0 2px 8px rgb(0 0 0 / 0.035), inset 0 1px 0 rgb(255 255 255 / 1);
 }
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) .composer-shell {
-    border-color: color-mix(in oklch, var(--color-border) 82%, var(--color-primary));
+    border-color: color-mix(in oklch, var(--color-border) 86%, var(--color-border-strong));
     background: white;
-    box-shadow: 0 18px 44px rgb(0 0 0 / 0.105), 0 2px 8px rgb(0 0 0 / 0.045), inset 0 1px 0 rgb(255 255 255 / 1);
+    box-shadow: 0 18px 44px rgb(0 0 0 / 0.085), 0 2px 8px rgb(0 0 0 / 0.035), inset 0 1px 0 rgb(255 255 255 / 1);
   }
 }
 
@@ -495,7 +543,7 @@ button {
   border-color: color-mix(in oklch, var(--color-primary) 52%, var(--color-border-strong));
   box-shadow:
     0 0 0 1px color-mix(in oklch, var(--color-primary) 22%, transparent),
-    0 20px 58px rgb(0 0 0 / 0.46),
+    0 20px 58px rgb(0 0 0 / 0.38),
     inset 0 1px 0 rgb(255 255 255 / 0.055);
 }
 
@@ -522,10 +570,10 @@ button {
   overflow: hidden;
   border: 1px solid color-mix(in oklch, var(--color-border) 86%, transparent);
   background:
-    linear-gradient(145deg, color-mix(in oklch, var(--color-surface-2) 54%, transparent), color-mix(in oklch, var(--color-bg) 82%, black)),
+    linear-gradient(145deg, color-mix(in oklch, var(--color-surface-2) 54%, transparent), color-mix(in oklch, var(--color-bg) 84%, var(--color-surface-1))),
     var(--color-surface-1);
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.040);
-  transition: border-color 180ms ease, background-color 180ms ease, transform 180ms ease, box-shadow 180ms ease;
+  transition: border-color 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
 }
 
 .prompt-card::before {
@@ -543,19 +591,31 @@ button {
 
 .prompt-card:hover {
   border-color: color-mix(in oklch, var(--color-primary) 36%, var(--color-border-strong));
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.060), 0 14px 34px rgb(0 0 0 / 0.24);
-  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.060), 0 12px 28px rgb(0 0 0 / 0.18);
 }
 
 .prompt-card:hover::before {
   opacity: 1;
 }
 
+:root[data-theme="light"] .prompt-card {
+  border-color: color-mix(in oklch, var(--color-border) 78%, white);
+  background:
+    linear-gradient(145deg, oklch(0.988 0.001 255), oklch(0.958 0.002 255)),
+    var(--color-surface-1);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.92);
+}
+
+:root[data-theme="light"] .prompt-card:hover {
+  border-color: color-mix(in oklch, var(--color-border-strong) 58%, white);
+  box-shadow: 0 10px 24px rgb(0 0 0 / 0.07), inset 0 1px 0 rgb(255 255 255 / 0.96);
+}
+
 .inspector-panel {
   background:
-    linear-gradient(180deg, color-mix(in oklch, var(--color-surface-2) 48%, transparent), color-mix(in oklch, var(--color-surface-1) 92%, black)),
+    linear-gradient(180deg, color-mix(in oklch, var(--color-surface-2) 48%, transparent), color-mix(in oklch, var(--color-surface-1) 92%, var(--color-bg))),
     var(--color-surface-1);
-  box-shadow: 0 18px 54px rgb(0 0 0 / 0.30), inset 0 1px 0 rgb(255 255 255 / 0.035);
+  box-shadow: 0 18px 54px rgb(0 0 0 / 0.26), inset 0 1px 0 rgb(255 255 255 / 0.040);
   scrollbar-width: none;
 }
 
@@ -593,9 +653,9 @@ button {
 
 .message-card {
   background:
-    linear-gradient(180deg, color-mix(in oklch, var(--color-surface-1) 88%, transparent), color-mix(in oklch, var(--color-bg) 80%, black)),
+    linear-gradient(180deg, color-mix(in oklch, var(--color-surface-1) 88%, transparent), color-mix(in oklch, var(--color-bg) 84%, var(--color-surface-1))),
     var(--color-surface-1);
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.035);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.040);
 }
 
 :root[data-theme="light"] .message-card {
@@ -631,17 +691,54 @@ button {
 }
 
 .active-rail {
-  box-shadow: inset 2px 0 0 color-mix(in oklch, var(--color-primary) 72%, var(--color-border-strong));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in oklch, var(--color-border-strong) 62%, transparent),
+    inset 0 1px 0 rgb(255 255 255 / 0.030);
 }
 
 :root[data-theme="light"] .active-rail {
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.035), inset 2px 0 0 color-mix(in oklch, var(--color-primary) 58%, var(--color-border-strong));
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 0.030),
+    inset 0 0 0 1px color-mix(in oklch, var(--color-border-strong) 38%, white),
+    inset 0 1px 0 rgb(255 255 255 / 0.92);
 }
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) .active-rail {
-    box-shadow: 0 1px 2px rgb(0 0 0 / 0.035), inset 2px 0 0 color-mix(in oklch, var(--color-primary) 58%, var(--color-border-strong));
+    box-shadow:
+      0 1px 2px rgb(0 0 0 / 0.030),
+      inset 0 0 0 1px color-mix(in oklch, var(--color-border-strong) 38%, white),
+      inset 0 1px 0 rgb(255 255 255 / 0.92);
   }
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .prompt-card {
+    border-color: color-mix(in oklch, var(--color-border) 78%, white);
+    background:
+      linear-gradient(145deg, oklch(0.988 0.001 255), oklch(0.958 0.002 255)),
+      var(--color-surface-1);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.92);
+  }
+
+  :root:not([data-theme="dark"]) .prompt-card:hover {
+    border-color: color-mix(in oklch, var(--color-border-strong) 58%, white);
+    box-shadow: 0 10px 24px rgb(0 0 0 / 0.07), inset 0 1px 0 rgb(255 255 255 / 0.96);
+  }
+}
+
+@media (max-width: 767px) {
+  .window-chrome-main,
+  .workspace-main {
+    border-left-color: transparent;
+    border-top-left-radius: 0;
+  }
+}
+
+.window-chrome-main.window-chrome-main-full,
+.workspace-main.workspace-main-full {
+  border-left-color: transparent;
+  border-top-left-radius: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {

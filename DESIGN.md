@@ -8,31 +8,31 @@ Physical scene: a developer is working late in a local project, with an editor, 
 
 ## Color Strategy
 
-Use a restrained dark product palette. Neutral surfaces carry most of the interface. A moss-green primary color is used sparingly for active selections, primary actions, and agent-ready states. Blue, amber, and red are reserved for info, warning, and danger semantics.
+Use a restrained neutral product palette across dark and light mode. Neutral surfaces carry most of the interface. Light mode should read as a soft gray project sidebar transitioning into a white main conversation canvas; dark mode should keep the same surface hierarchy without a hard black split. The primary accent is an action/status color, not a brand wash: use it sparingly for primary actions, send/ready states, and focus, while selection states stay mostly neutral. Blue, amber, and red are reserved for info, warning, and danger semantics.
 
 Use OKLCH tokens only.
 
 ```css
 :root {
-  --color-bg: oklch(0.105 0 0);
-  --color-surface-1: oklch(0.145 0.004 260);
-  --color-surface-2: oklch(0.185 0.006 260);
-  --color-surface-3: oklch(0.235 0.008 260);
-  --color-border: oklch(0.300 0.008 260);
-  --color-border-strong: oklch(0.410 0.010 260);
+  --color-bg: oklch(0.110 0.006 260);
+  --color-surface-1: oklch(0.155 0.007 260);
+  --color-surface-2: oklch(0.205 0.008 260);
+  --color-surface-3: oklch(0.275 0.009 260);
+  --color-border: oklch(0.325 0.010 260);
+  --color-border-strong: oklch(0.455 0.014 260);
 
   --color-ink: oklch(0.930 0.004 260);
-  --color-muted: oklch(0.700 0.008 260);
-  --color-subtle: oklch(0.550 0.008 260);
+  --color-muted: oklch(0.735 0.010 260);
+  --color-subtle: oklch(0.605 0.010 260);
 
-  --color-primary: oklch(0.620 0.130 132);
-  --color-primary-hover: oklch(0.680 0.140 132);
-  --color-primary-muted: oklch(0.290 0.055 132);
+  --color-primary: oklch(0.500 0.055 145);
+  --color-primary-hover: oklch(0.455 0.065 145);
+  --color-primary-muted: oklch(0.942 0.018 145);
 
   --color-info: oklch(0.760 0.110 245);
   --color-warning: oklch(0.760 0.140 75);
   --color-danger: oklch(0.620 0.160 28);
-  --color-success: oklch(0.660 0.140 145);
+  --color-success: oklch(0.500 0.070 145);
 
   --color-focus: oklch(0.760 0.110 245);
 }
@@ -41,8 +41,9 @@ Use OKLCH tokens only.
 Rules:
 
 - Body text must meet at least 4.5:1 contrast against its surface.
-- Primary color is not decoration. Use it for selection, primary actions, and focused agent states.
+- Primary color is not decoration. Use it for primary actions, focus, and focused agent states.
 - Inactive UI should stay neutral. Do not tint every card or panel.
+- Current sidebar selections use clear neutral backgrounds and subtle rings, not colored side stripes.
 - Use semantic color with text labels or icons, never color alone.
 
 ## Typography
@@ -132,7 +133,8 @@ Inputs:
 
 Cards and blocks:
 
-- Cards max out at `8px` radius unless a native control requires otherwise.
+- Dense cards and list rows should stay compact, usually `8px-12px` radius.
+- The prompt composer, main workspace transition, and modal-scale surfaces may use `16px` radius when it makes the desktop UI feel more native and less brittle.
 - Do not nest cards inside cards.
 - Tool output uses expandable blocks, not decorative cards.
 
@@ -175,7 +177,7 @@ Motion is functional and brief.
 - No gradient text.
 - No decorative gradient blobs, bokeh, or orbs.
 - No glassmorphism as the default surface.
-- No oversized rounded cards or inputs.
+- No ballooned, pill-like cards or inputs.
 - No broad decorative shadows on bordered cards.
 - No landing-page hero sections in the app shell.
 - No custom scrollbars unless native behavior is insufficient.

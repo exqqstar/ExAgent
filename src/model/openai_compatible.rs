@@ -752,6 +752,8 @@ fn build_request_tools(tools: &[ToolSpec]) -> Result<Vec<ChatRequestTool>> {
     tools
         .iter()
         .map(|tool| match &tool.kind {
+            // Only input_schema is sent; `tool.output_schema`/`tool.strict` are
+            // internal contracts and intentionally not serialized (ADR-0042).
             ToolSpecKind::Function { input_schema } => Ok(ChatRequestTool {
                 kind: "function",
                 function: ChatRequestFunction {

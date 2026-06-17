@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::model::{image_input::load_local_image_for_prompt, multimodal};
 use crate::registry::ToolContext;
-use crate::tools::{Tool, ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
-use crate::types::{ConversationContentPart, ImageDetail, ToolCall, ToolResult, ToolStatus};
+use crate::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
+use crate::types::{ConversationContentPart, ImageDetail, ToolResult, ToolStatus};
 use crate::workspace::{resolve_workspace_path, ResolvedWorkspacePath};
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -66,29 +66,6 @@ impl ToolHandler for ViewImageTool {
             }),
             Err(err) => view_image_error(call.id, call.name, err),
         }
-    }
-}
-
-#[async_trait]
-impl Tool for ViewImageTool {
-    fn name(&self) -> &'static str {
-        "view_image"
-    }
-
-    fn description(&self) -> &'static str {
-        "View a local image from the workspace and make it available to the model"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::to_value(schemars::schema_for!(ViewImageArgs)).unwrap()
-    }
-
-    async fn execute(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
-        let invocation = ToolInvocation {
-            invocation_id: format!("inv_{}", call.id),
-            call,
-        };
-        self.handle(invocation, ctx).await.model_result
     }
 }
 

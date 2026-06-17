@@ -7,9 +7,9 @@ use crate::policy::{QuestionOption, QuestionPrompt};
 use crate::registry::ToolContext;
 use crate::session::ApprovalId;
 use crate::tools::{
-    Tool, ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolRuntimeEffect, ToolSpec,
+    ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolRuntimeEffect, ToolSpec,
 };
-use crate::types::{ToolCall, ToolResult, ToolStatus};
+use crate::types::{ToolResult, ToolStatus};
 
 const MAX_QUESTIONS: usize = 4;
 const MAX_OPTIONS_PER_QUESTION: usize = 6;
@@ -17,8 +17,11 @@ const MAX_HEADER_CHARS: usize = 24;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AskUserArgs {
+    /// Questions to ask the user (1-4) when initiating a request. Omit when answering with `request_id`.
     pub questions: Option<Vec<QuestionPrompt>>,
+    /// Identifier of a pending ask_user request being resolved.
     pub request_id: Option<String>,
+    /// Resolution for `request_id`: "answered" or "dismissed".
     pub decision: Option<String>,
 }
 
@@ -61,29 +64,6 @@ impl ToolHandler for AskUserTool {
             .with_effects(result.effects),
             Err(err) => ask_user_error(call.id, call.name, err),
         }
-    }
-}
-
-#[async_trait]
-impl Tool for AskUserTool {
-    fn name(&self) -> &'static str {
-        "ask_user"
-    }
-
-    fn description(&self) -> &'static str {
-        "Ask the user one or more questions and wait for their answers; use only when a decision genuinely belongs to the user"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::to_value(schemars::schema_for!(AskUserArgs)).unwrap()
-    }
-
-    async fn execute(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
-        let invocation = ToolInvocation {
-            invocation_id: format!("inv_{}", call.id),
-            call,
-        };
-        self.handle(invocation, ctx).await.model_result
     }
 }
 
@@ -310,7 +290,7 @@ mod tests {
     use crate::exec_session::ExecSessionManager;
     use crate::policy::PolicyManager;
     use crate::runtime::agent_profile::AgentToolPolicy;
-    use crate::types::{ThreadId, TurnId};
+    use crate::types::{ThreadId, ToolCall, TurnId};
     use tempfile::tempdir;
 
     fn question(text: &str) -> QuestionPrompt {

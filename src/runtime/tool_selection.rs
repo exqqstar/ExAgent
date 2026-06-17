@@ -12,21 +12,6 @@ use crate::runtime::goal::GoalToolApi;
 use crate::runtime::memory::MemoryToolApi;
 use crate::runtime::subagent::AgentControl;
 use crate::runtime::tool_resolver::ToolResolver;
-use crate::tools::close_agent::CloseAgentTool;
-use crate::tools::defer_question::DeferQuestionTool;
-use crate::tools::followup_task::FollowupTaskTool;
-use crate::tools::goal::{CreateGoalTool, GetGoalTool, UpdateGoalTool};
-use crate::tools::list_agents::ListAgentsTool;
-use crate::tools::memory_forget::MemoryForgetTool;
-use crate::tools::memory_list::MemoryListTool;
-use crate::tools::memory_recall::MemoryRecallTool;
-use crate::tools::memory_save::MemorySaveTool;
-use crate::tools::memory_update::MemoryUpdateTool;
-use crate::tools::send_message::SendMessageTool;
-use crate::tools::spawn_agent::SpawnAgentTool;
-use crate::tools::submit_review::SubmitReviewTool;
-use crate::tools::wait_agent::WaitAgentTool;
-use crate::tools::web_search::{BraveSearchProvider, WebSearchTool};
 use crate::tools::ToolSpec;
 
 pub(crate) struct ToolSelection {
@@ -88,58 +73,28 @@ pub(crate) async fn build_tool_selection(input: ToolSelectionInput<'_>) -> Resul
 async fn assemble_tool_registry(input: &ToolSelectionInput<'_>) -> Result<ToolRegistry> {
     let mut registry = input.base_registry.clone();
 
-    if let Some(control) = input.subagent_control.clone() {
-        registry.register_handler(SpawnAgentTool::new(control.clone()));
-        registry.register_handler(ListAgentsTool::new(control.clone()));
-        registry.register_handler(CloseAgentTool::new(control.clone()));
-        registry.register_handler(SendMessageTool::new(control.clone()));
-        registry.register_handler(FollowupTaskTool::new(control));
-        registry.register_handler(WaitAgentTool);
-    }
+    // MCP handlers resolve asynchronously; fetch them here, then hand all
+    // dependencies to the single registration point in `tools::plan`.
+    let mcp_handlers = if input.config.model.capabilities.supports_tools {
+        input.mcp_runtime.handlers().await?
+    } else {
+        Vec::new()
+    };
 
-    if let Some(goal_api) = input.goal_api.clone() {
-        registry.register_handler(GetGoalTool::new(goal_api.clone()));
-        registry.register_handler(CreateGoalTool::new_with_forge_modes(
-            goal_api.clone(),
-            input.config.forge_review_gate_enabled,
-        ));
-        registry.register_handler(UpdateGoalTool::new(goal_api));
-    }
-
-    if input.config.memory_enabled && input.memory_api.is_some() {
-        registry.register_handler(MemoryRecallTool);
-        registry.register_handler(MemorySaveTool);
-        registry.register_handler(MemoryUpdateTool);
-        registry.register_handler(MemoryForgetTool);
-        registry.register_handler(MemoryListTool);
-    }
-
-    if input.config.forge_review_gate_enabled {
-        if let Some(review_store) = input.forge_review_store.clone() {
-            registry.register_handler(SubmitReviewTool::new(review_store.clone()));
-            if input.active_goal_mode.is_review_gated() {
-                registry.register_handler(DeferQuestionTool::new(
-                    crate::runtime::forge::open_questions::OpenQuestionStore::new(
-                        review_store.db(),
-                    ),
-                ));
-            }
-        }
-    }
-
-    if let Some(web_search) = &input.config.web_search {
-        if web_search.provider == "brave" {
-            registry.register_handler(WebSearchTool::new(Arc::new(BraveSearchProvider::new(
-                web_search.api_key.clone(),
-            ))));
-        }
-    }
-
-    if input.config.model.capabilities.supports_tools {
-        for handler in input.mcp_runtime.handlers().await? {
-            registry.register_handler(handler);
-        }
-    }
+    crate::tools::plan::register_dynamic_tools(
+        &mut registry,
+        crate::tools::plan::DynamicToolDeps {
+            subagent_control: input.subagent_control.clone(),
+            goal_api: input.goal_api.clone(),
+            forge_review_gate_enabled: input.config.forge_review_gate_enabled,
+            memory_enabled: input.config.memory_enabled,
+            memory_api: input.memory_api.clone(),
+            forge_review_store: input.forge_review_store.clone(),
+            active_goal_mode: input.active_goal_mode,
+            web_search: input.config.web_search.clone(),
+            mcp_handlers,
+        },
+    );
 
     Ok(registry)
 }

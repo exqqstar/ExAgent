@@ -4,14 +4,17 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::registry::ToolContext;
-use crate::tools::{Tool, ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
-use crate::types::{ToolCall, ToolResult, ToolStatus};
+use crate::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
+use crate::types::{ToolResult, ToolStatus};
 use crate::workspace::{resolve_readable_path, ResolvedWorkspacePath};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadFileArgs {
+    /// Workspace-relative (or workspace-scoped absolute) path to the UTF-8 text file to read.
     pub path: String,
+    /// Optional 1-based line number to start from, inclusive. Defaults to the first line.
     pub start_line: Option<usize>,
+    /// Optional 1-based line number to stop at, inclusive. Defaults to the last line.
     pub end_line: Option<usize>,
 }
 
@@ -25,6 +28,20 @@ impl ToolHandler for ReadFileTool {
             "Read a UTF-8 text file from the workspace or a configured skill root",
             serde_json::to_value(schemars::schema_for!(ReadFileArgs)).unwrap(),
         )
+        // Internal contract: describes the structured `meta` side-channel this
+        // tool emits (model-facing content is the file text). See ADR-0042.
+        .with_output_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Canonical resolved path of the file that was read." },
+                "requested_path": { "type": "string", "description": "Path exactly as requested by the caller." },
+                "normalized_path": { "type": "string", "description": "Normalized form of the requested path." },
+                "canonical_path": { "type": "string", "description": "Fully canonicalized filesystem path." },
+                "was_absolute": { "type": "boolean", "description": "Whether the requested path was absolute." }
+            },
+            "required": ["path", "requested_path", "normalized_path", "canonical_path", "was_absolute"],
+            "additionalProperties": false
+        }))
     }
 
     fn capabilities(&self) -> ToolCapabilities {
@@ -72,29 +89,6 @@ impl ToolHandler for ReadFileTool {
     }
 }
 
-#[async_trait]
-impl Tool for ReadFileTool {
-    fn name(&self) -> &'static str {
-        "read_file"
-    }
-
-    fn description(&self) -> &'static str {
-        "Read a UTF-8 text file from the workspace or a configured skill root"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::to_value(schemars::schema_for!(ReadFileArgs)).unwrap()
-    }
-
-    async fn execute(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
-        let invocation = ToolInvocation {
-            invocation_id: format!("inv_{}", call.id),
-            call,
-        };
-        self.handle(invocation, ctx).await.model_result
-    }
-}
-
 fn read_file(
     workspace_root: &std::path::Path,
     extra_read_roots: &[std::path::PathBuf],
@@ -127,4 +121,54 @@ fn workspace_path_meta(resolved: &ResolvedWorkspacePath) -> Value {
         "canonical_path": resolved.canonical_path,
         "was_absolute": resolved.was_absolute,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_schema_carries_per_field_descriptions() {
+        let spec = ReadFileTool.spec();
+        let crate::tools::ToolSpecKind::Function { input_schema } = &spec.kind;
+        let props = input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("schema has properties");
+        for field in ["path", "start_line", "end_line"] {
+            let desc = props
+                .get(field)
+                .and_then(|f| f.get("description"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            assert!(
+                !desc.is_empty(),
+                "field `{field}` should carry a description in the derived schema"
+            );
+        }
+    }
+
+    #[test]
+    fn output_schema_required_matches_emitted_meta_keys() {
+        let spec = ReadFileTool.spec();
+        let output_schema = spec.output_schema.expect("read_file declares output_schema");
+        let required: Vec<&str> = output_schema["required"]
+            .as_array()
+            .expect("required is an array")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        // Keys the handler actually emits in `meta` (workspace_path_meta).
+        let mut expected = vec![
+            "path",
+            "requested_path",
+            "normalized_path",
+            "canonical_path",
+            "was_absolute",
+        ];
+        let mut got = required.clone();
+        got.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(got, expected);
+    }
 }

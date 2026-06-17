@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::registry::ToolContext;
-use crate::tools::{Tool, ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
-use crate::types::{ToolCall, ToolResult, ToolStatus};
+use crate::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
+use crate::types::{ToolResult, ToolStatus};
 
 const DEFAULT_COUNT: usize = 5;
 const MAX_COUNT: usize = 10;
@@ -175,29 +175,6 @@ impl ToolHandler for WebSearchTool {
             }),
             Err(err) => web_search_error(call.id, call.name, err),
         }
-    }
-}
-
-#[async_trait]
-impl Tool for WebSearchTool {
-    fn name(&self) -> &'static str {
-        "web_search"
-    }
-
-    fn description(&self) -> &'static str {
-        "Search the web; returns result titles, URLs, and snippets"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::to_value(schemars::schema_for!(WebSearchArgs)).unwrap()
-    }
-
-    async fn execute(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
-        let invocation = ToolInvocation {
-            invocation_id: format!("inv_{}", call.id),
-            call,
-        };
-        self.handle(invocation, ctx).await.model_result
     }
 }
 

@@ -16,9 +16,9 @@ use crate::registry::ToolContext;
 use crate::session::{ApprovalId, ApprovalStatus};
 use crate::tools::output_projection::{output_projection_meta, project_output};
 use crate::tools::{
-    Tool, ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolRuntimeEffect, ToolSpec,
+    ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolRuntimeEffect, ToolSpec,
 };
-use crate::types::{ToolCall, ToolResult, ToolStatus};
+use crate::types::{ToolResult, ToolStatus};
 
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -77,29 +77,6 @@ impl ToolHandler for WebFetchTool {
             .with_effects(result.effects),
             Err(err) => web_fetch_error(call.id, call.name, err),
         }
-    }
-}
-
-#[async_trait]
-impl Tool for WebFetchTool {
-    fn name(&self) -> &'static str {
-        "web_fetch"
-    }
-
-    fn description(&self) -> &'static str {
-        "Fetch a URL and return its readable text content (requires approval)"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::to_value(schemars::schema_for!(WebFetchArgs)).unwrap()
-    }
-
-    async fn execute(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
-        let invocation = ToolInvocation {
-            invocation_id: format!("inv_{}", call.id),
-            call,
-        };
-        self.handle(invocation, ctx).await.model_result
     }
 }
 

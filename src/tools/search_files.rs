@@ -6,11 +6,11 @@ use ignore::WalkBuilder;
 use regex::RegexBuilder;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::registry::ToolContext;
-use crate::tools::{Tool, ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
-use crate::types::{ToolCall, ToolResult, ToolStatus};
+use crate::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
+use crate::types::{ToolResult, ToolStatus};
 use crate::workspace::{
     canonical_read_roots, path_stays_within_roots, resolve_readable_path, ResolvedWorkspacePath,
 };
@@ -26,11 +26,13 @@ const OUTPUT_TRUNCATED_MARKER: &str = "[output truncated]";
 pub struct SearchFilesArgs {
     /// Regex query to match against UTF-8 text lines; invalid regexes fall back to literal text.
     pub query: String,
+    /// Optional workspace-relative directory or file to scope the search. Defaults to the workspace root.
     pub path: Option<String>,
     /// Glob filter on the displayed file path, e.g. "*.rs" or "src/**/*.ts".
     pub glob: Option<String>,
     /// Run a case-insensitive search.
     pub case_insensitive: Option<bool>,
+    /// Maximum number of matches to return. Defaults to 50; capped at 200.
     pub max_results: Option<usize>,
 }
 
@@ -44,6 +46,22 @@ impl ToolHandler for SearchFilesTool {
             "Search UTF-8 text files in the workspace or configured skill roots using regex, gitignore-aware traversal, optional glob filtering, and case-insensitive matching",
             serde_json::to_value(schemars::schema_for!(SearchFilesArgs)).unwrap(),
         )
+        // Internal contract: describes the structured `meta` side-channel this
+        // tool emits (model-facing content is the formatted matches). ADR-0042.
+        .with_output_schema(json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "The query that was searched for." },
+                "path": { "type": "string", "description": "Canonical path that was searched." },
+                "match_count": { "type": "integer", "description": "Number of matching lines returned." },
+                "truncated": { "type": "boolean", "description": "Whether the result set was truncated." },
+                "query_mode": { "type": "string", "description": "Whether the query ran as regex or literal text." },
+                "glob": { "type": ["string", "null"], "description": "Glob filter applied to file paths, if any." },
+                "case_insensitive": { "type": "boolean", "description": "Whether matching was case-insensitive." }
+            },
+            "required": ["query", "path", "match_count", "truncated", "query_mode", "glob", "case_insensitive"],
+            "additionalProperties": false
+        }))
     }
 
     fn capabilities(&self) -> ToolCapabilities {
@@ -99,29 +117,6 @@ impl ToolHandler for SearchFilesTool {
                 parts: Vec::new(),
             }),
         }
-    }
-}
-
-#[async_trait]
-impl Tool for SearchFilesTool {
-    fn name(&self) -> &'static str {
-        "search_files"
-    }
-
-    fn description(&self) -> &'static str {
-        "Search UTF-8 text files in the workspace or configured skill roots using regex, gitignore-aware traversal, optional glob filtering, and case-insensitive matching"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::to_value(schemars::schema_for!(SearchFilesArgs)).unwrap()
-    }
-
-    async fn execute(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
-        let invocation = ToolInvocation {
-            invocation_id: format!("inv_{}", call.id),
-            call,
-        };
-        self.handle(invocation, ctx).await.model_result
     }
 }
 

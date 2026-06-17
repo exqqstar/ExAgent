@@ -19,7 +19,7 @@ use crate::session::{ApprovalId, ApprovalStatus};
 use crate::session::{ExecSessionId, ExecSessionStatus};
 use crate::tools::output_projection::{output_projection_meta, project_output};
 use crate::tools::{
-    Tool, ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolRuntimeEffect, ToolSpec,
+    ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolRuntimeEffect, ToolSpec,
 };
 use crate::types::{ToolCall, ToolResult, ToolStatus};
 use crate::workspace::resolve_workspace_path;
@@ -27,14 +27,24 @@ use crate::workspace_checkpoint::create_checkpoint;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunCommandArgs {
+    /// Shell command line to run. Required for a new command; omit when answering an
+    /// approval (`approval_id`) or driving an existing session (`exec_session_id`).
     pub command: Option<String>,
+    /// Working directory for the command, relative to the workspace root. Defaults to the workspace root.
     pub cwd: Option<String>,
+    /// Maximum seconds to wait before the command is timed out. Defaults to the configured command timeout.
     pub timeout_secs: Option<u64>,
+    /// When true, start a long-lived session and return an `exec_session_id` instead of blocking until exit.
     pub persistent: Option<bool>,
+    /// Target an existing persistent session (from a previous `persistent` run) instead of starting a new command.
     pub exec_session_id: Option<String>,
+    /// Text to write to the session's stdin (used with `exec_session_id`).
     pub stdin: Option<String>,
+    /// When true, terminate the targeted `exec_session_id`.
     pub terminate: Option<bool>,
+    /// Approval id being answered when a prior run required approval.
     pub approval_id: Option<String>,
+    /// Approval decision for `approval_id`: "approved" or "denied".
     pub decision: Option<String>,
 }
 
@@ -71,29 +81,6 @@ impl ToolHandler for RunCommandTool {
         };
 
         handle_run_command_args(call, args, ctx, "run_command").await
-    }
-}
-
-#[async_trait]
-impl Tool for RunCommandTool {
-    fn name(&self) -> &'static str {
-        "run_command"
-    }
-
-    fn description(&self) -> &'static str {
-        "Run a shell command inside the workspace"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::to_value(schemars::schema_for!(RunCommandArgs)).unwrap()
-    }
-
-    async fn execute(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
-        let invocation = ToolInvocation {
-            invocation_id: format!("inv_{}", call.id),
-            call,
-        };
-        self.handle(invocation, ctx).await.model_result
     }
 }
 

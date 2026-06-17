@@ -115,6 +115,22 @@ impl ToolHandler for SpawnAgentTool {
                 "required": ["task_name", "message"]
             }),
         )
+        // Internal contract: describes the JSON object this tool returns as its
+        // model-facing `content`. See ADR-0042.
+        .with_output_schema(json!({
+            "type": "object",
+            "properties": {
+                "thread_id": { "type": "string", "description": "Thread id of the spawned agent." },
+                "parent_thread_id": { "type": "string", "description": "Thread id of the spawning (parent) agent." },
+                "root_thread_id": { "type": "string", "description": "Root thread id of the agent tree." },
+                "task_name": { "type": "string", "description": "Canonical task name assigned to the spawned agent." },
+                "turn_id": { "type": "string", "description": "Turn id started for the spawned agent." },
+                "fork_turns": { "type": "string", "description": "How much parent history was forked into the child." },
+                "status": { "type": "string", "description": "Status of the spawned agent (e.g. running)." }
+            },
+            "required": ["thread_id", "parent_thread_id", "root_thread_id", "task_name", "turn_id", "fork_turns", "status"],
+            "additionalProperties": false
+        }))
     }
 
     fn capabilities(&self) -> ToolCapabilities {

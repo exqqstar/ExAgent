@@ -37,6 +37,17 @@ impl ToolHandler for WaitAgentTool {
                 "required": []
             }),
         )
+        // Internal contract: describes the JSON object this tool returns as its
+        // model-facing `content`. See ADR-0042.
+        .with_output_schema(json!({
+            "type": "object",
+            "properties": {
+                "message": { "type": "string", "description": "Human-readable summary of the wait result." },
+                "timed_out": { "type": "boolean", "description": "Whether the wait returned because the timeout elapsed." }
+            },
+            "required": ["message", "timed_out"],
+            "additionalProperties": false
+        }))
     }
 
     fn capabilities(&self) -> ToolCapabilities {
@@ -181,6 +192,15 @@ mod tests {
             schema["input_schema"]["properties"]["timeout_ms"]["maximum"],
             MAX_TIMEOUT_MS
         );
+    }
+
+    #[test]
+    fn wait_agent_output_schema_matches_emitted_content() {
+        let spec = WaitAgentTool.spec();
+        let output_schema = spec.output_schema.expect("wait_agent declares output_schema");
+        // Keys the handler actually emits in the result `content` JSON.
+        assert_eq!(output_schema["required"], json!(["message", "timed_out"]));
+        assert_eq!(output_schema["additionalProperties"], json!(false));
     }
 
     #[tokio::test]

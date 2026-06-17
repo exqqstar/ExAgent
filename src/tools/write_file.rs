@@ -4,8 +4,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::registry::ToolContext;
-use crate::tools::{Tool, ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
-use crate::types::{ToolCall, ToolResult, ToolStatus};
+use crate::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
+use crate::types::{ToolResult, ToolStatus};
 use crate::workspace::{resolve_workspace_path, ResolvedWorkspacePath};
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -64,29 +64,6 @@ impl ToolHandler for WriteFileTool {
                 parts: Vec::new(),
             }),
         }
-    }
-}
-
-#[async_trait]
-impl Tool for WriteFileTool {
-    fn name(&self) -> &'static str {
-        "write_file"
-    }
-
-    fn description(&self) -> &'static str {
-        "Write a UTF-8 text file in the workspace"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::to_value(schemars::schema_for!(WriteFileArgs)).unwrap()
-    }
-
-    async fn execute(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
-        let invocation = ToolInvocation {
-            invocation_id: format!("inv_{}", call.id),
-            call,
-        };
-        self.handle(invocation, ctx).await.model_result
     }
 }
 

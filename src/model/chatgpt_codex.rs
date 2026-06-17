@@ -378,6 +378,9 @@ fn build_chatgpt_codex_responses_request(
     let request_tools = tools
         .iter()
         .map(|tool| match &tool.kind {
+            // `output_schema` is an internal contract and is not sent. `strict`
+            // stays hardcoded false on the wire in this slice; `tool.strict` is
+            // not yet plumbed through to provider requests (ADR-0042).
             ToolSpecKind::Function { input_schema } => json!({
                 "type": "function",
                 "name": tool.name,

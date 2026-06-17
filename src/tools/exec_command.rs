@@ -1,11 +1,10 @@
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::Value;
 
 use crate::registry::ToolContext;
 use crate::tools::run_command::{handle_run_command_args, RunCommandArgs};
-use crate::tools::{Tool, ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
+use crate::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
 use crate::types::{ToolCall, ToolResult};
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -52,29 +51,6 @@ impl ToolHandler for ExecCommandTool {
         };
 
         handle_run_command_args(call, run_args, ctx, "exec_command").await
-    }
-}
-
-#[async_trait]
-impl Tool for ExecCommandTool {
-    fn name(&self) -> &'static str {
-        "exec_command"
-    }
-
-    fn description(&self) -> &'static str {
-        "Run a shell command inside the workspace"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::to_value(schemars::schema_for!(ExecCommandArgs)).unwrap()
-    }
-
-    async fn execute(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
-        let invocation = ToolInvocation {
-            invocation_id: format!("inv_{}", call.id),
-            call,
-        };
-        self.handle(invocation, ctx).await.model_result
     }
 }
 

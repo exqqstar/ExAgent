@@ -5,11 +5,11 @@ use globset::{GlobBuilder, GlobMatcher};
 use ignore::WalkBuilder;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::registry::ToolContext;
-use crate::tools::{Tool, ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
-use crate::types::{ToolCall, ToolResult, ToolStatus};
+use crate::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
+use crate::types::{ToolResult, ToolStatus};
 use crate::workspace::{
     canonical_read_roots, path_stays_within_roots, resolve_readable_path, ResolvedWorkspacePath,
 };
@@ -41,6 +41,20 @@ impl ToolHandler for ListDirTool {
             "List files and directories in the workspace or configured skill roots (gitignore-aware); supports glob find-by-name",
             serde_json::to_value(schemars::schema_for!(ListDirArgs)).unwrap(),
         )
+        // Internal contract: describes the structured `meta` side-channel this
+        // tool emits (model-facing content is the formatted listing). ADR-0042.
+        .with_output_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Canonical path that was listed." },
+                "entry_count": { "type": "integer", "description": "Number of entries returned." },
+                "truncated": { "type": "boolean", "description": "Whether the listing was truncated." },
+                "depth": { "type": "integer", "description": "Traversal depth used for the listing." },
+                "glob": { "type": ["string", "null"], "description": "Glob find-by-name filter applied, if any." }
+            },
+            "required": ["path", "entry_count", "truncated", "depth", "glob"],
+            "additionalProperties": false
+        }))
     }
 
     fn capabilities(&self) -> ToolCapabilities {
@@ -91,29 +105,6 @@ impl ToolHandler for ListDirTool {
                 parts: Vec::new(),
             }),
         }
-    }
-}
-
-#[async_trait]
-impl Tool for ListDirTool {
-    fn name(&self) -> &'static str {
-        "list_dir"
-    }
-
-    fn description(&self) -> &'static str {
-        "List files and directories in the workspace or configured skill roots"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::to_value(schemars::schema_for!(ListDirArgs)).unwrap()
-    }
-
-    async fn execute(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
-        let invocation = ToolInvocation {
-            invocation_id: format!("inv_{}", call.id),
-            call,
-        };
-        self.handle(invocation, ctx).await.model_result
     }
 }
 

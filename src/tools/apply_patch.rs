@@ -5,14 +5,16 @@ use std::path::{Component, Path, PathBuf};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::registry::ToolContext;
-use crate::tools::{Tool, ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
-use crate::types::{ToolCall, ToolResult, ToolStatus};
+use crate::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
+use crate::types::{ToolResult, ToolStatus};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ApplyPatchArgs {
+    /// Structured patch beginning with `*** Begin Patch` and ending with `*** End Patch`,
+    /// containing `*** Add File:`, `*** Update File:`, or `*** Delete File:` sections.
     pub patch: String,
 }
 
@@ -66,29 +68,6 @@ impl ToolHandler for ApplyPatchTool {
                 parts: Vec::new(),
             }),
         }
-    }
-}
-
-#[async_trait]
-impl Tool for ApplyPatchTool {
-    fn name(&self) -> &'static str {
-        "apply_patch"
-    }
-
-    fn description(&self) -> &'static str {
-        "Apply a structured patch to files inside the workspace"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::to_value(schemars::schema_for!(ApplyPatchArgs)).unwrap()
-    }
-
-    async fn execute(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
-        let invocation = ToolInvocation {
-            invocation_id: format!("inv_{}", call.id),
-            call,
-        };
-        self.handle(invocation, ctx).await.model_result
     }
 }
 

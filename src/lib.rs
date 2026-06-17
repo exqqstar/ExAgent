@@ -27,17 +27,6 @@ pub use state::transcript;
 pub use tools::registry;
 
 pub fn default_tool_registry() -> tools::registry::ToolRegistry {
-    let mut registry = tools::registry::ToolRegistry::new();
-    registry.register(tools::read_file::ReadFileTool);
-    registry.register(tools::search_files::SearchFilesTool);
-    registry.register(tools::list_dir::ListDirTool);
-    registry.register(tools::view_image::ViewImageTool);
-    registry.register(tools::web_fetch::WebFetchTool);
-    registry.register(tools::ask_user::AskUserTool);
-    registry.register(tools::apply_patch::ApplyPatchTool);
-    registry.register(tools::write_file::WriteFileTool);
-    registry.register(tools::exec_command::ExecCommandTool);
-    registry.register(tools::write_stdin::WriteStdinTool);
-    registry.register(tools::run_command::RunCommandTool);
-    registry
+    // Single source of truth for the base tool catalog lives in `tools::plan`.
+    tools::plan::base_tool_registry()
 }

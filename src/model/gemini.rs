@@ -691,6 +691,8 @@ fn build_gemini_tools(tools: &[ToolSpec]) -> Result<Vec<GeminiTool>> {
     let function_declarations = tools
         .iter()
         .map(|tool| match &tool.kind {
+            // Only input_schema is sent; `tool.output_schema`/`tool.strict` are
+            // internal contracts and intentionally not serialized (ADR-0042).
             ToolSpecKind::Function { input_schema } => Ok(GeminiFunctionDeclaration {
                 name: tool.name.clone(),
                 description: tool.description.clone(),

@@ -495,6 +495,9 @@ fn build_anthropic_tools(tools: &[ToolSpec]) -> Result<Vec<AnthropicRequestTool>
     tools
         .iter()
         .map(|tool| match &tool.kind {
+            // Only input_schema is sent. `tool.output_schema`/`tool.strict` are
+            // internal contracts; the Anthropic tools wire has no output_schema
+            // field, so they are intentionally not serialized here (ADR-0042).
             ToolSpecKind::Function { input_schema } => Ok(AnthropicRequestTool {
                 name: tool.name.clone(),
                 description: tool.description.clone(),

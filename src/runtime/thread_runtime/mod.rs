@@ -6,6 +6,6 @@ mod reservation;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use facade::WorkspaceRuntimeOpPermit;
-pub use facade::{AgentFactory, ThreadRuntime, ThreadRuntimeOptions, WorkspaceRuntimeOpGate};
+pub use facade::{AgentFactory, ThreadRuntime, ThreadRuntimeOptions};
+pub(crate) use facade::{WorkspaceRuntimeOpGate, WorkspaceRuntimeOpPermit};
 pub use op::{ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus, ThreadTurnContext};

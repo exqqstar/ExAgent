@@ -27,7 +27,7 @@ const THREAD_EVENT_CHANNEL_CAPACITY: usize = 256;
 pub type AgentFactory = Arc<dyn Fn(AgentConfig) -> Result<Agent> + Send + Sync>;
 pub(crate) type WorkspaceRuntimeOpPermit = Box<dyn Send + 'static>;
 
-pub trait WorkspaceRuntimeOpGate: Send + Sync {
+pub(crate) trait WorkspaceRuntimeOpGate: Send + Sync {
     fn begin_runtime_op(&self, workspace_root: &Path) -> Result<WorkspaceRuntimeOpPermit>;
 }
 pub struct ThreadRuntimeOptions {

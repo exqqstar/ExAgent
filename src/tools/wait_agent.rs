@@ -197,7 +197,9 @@ mod tests {
     #[test]
     fn wait_agent_output_schema_matches_emitted_content() {
         let spec = WaitAgentTool.spec();
-        let output_schema = spec.output_schema.expect("wait_agent declares output_schema");
+        let output_schema = spec
+            .output_schema
+            .expect("wait_agent declares output_schema");
         // Keys the handler actually emits in the result `content` JSON.
         assert_eq!(output_schema["required"], json!(["message", "timed_out"]));
         assert_eq!(output_schema["additionalProperties"], json!(false));

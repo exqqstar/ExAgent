@@ -151,7 +151,9 @@ mod tests {
     #[test]
     fn output_schema_required_matches_emitted_meta_keys() {
         let spec = ReadFileTool.spec();
-        let output_schema = spec.output_schema.expect("read_file declares output_schema");
+        let output_schema = spec
+            .output_schema
+            .expect("read_file declares output_schema");
         let required: Vec<&str> = output_schema["required"]
             .as_array()
             .expect("required is an array")

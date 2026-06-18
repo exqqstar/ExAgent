@@ -8,7 +8,7 @@ use crate::session::{
 };
 use crate::types::EventId;
 
-use crate::runtime::tool::orchestrator::ExecSessionUpdate;
+use crate::runtime::tool::effects::ExecSessionUpdate;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct RuntimeOverlay {

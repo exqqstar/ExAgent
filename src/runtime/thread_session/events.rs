@@ -9,7 +9,7 @@ use tokio::sync::broadcast;
 use crate::config::PermissionProfile;
 use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::exec_session::{ExecOutputEvent, ExecOutputEventSink};
-use crate::runtime::tool::orchestrator::ExecSessionUpdate;
+use crate::runtime::tool::effects::ExecSessionUpdate;
 use crate::session::ApprovalId;
 use crate::session::ThreadSnapshot;
 use crate::state::rollout::{RolloutItem, RolloutStore};

@@ -1,17 +1,12 @@
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Result};
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 
 use super::actor::{spawn_runtime_loop, ThreadRuntimeLoop, ThreadSubmission};
-use super::op::{
-    ThreadOp, ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus, ThreadTurnContext,
-};
-use super::reservation::{
-    reserve_next_turn_from_state, reserve_turn_record_from_state, ActiveRuntimeTurnGuard,
-    TurnReservationState,
-};
+use super::op::{ThreadOp, ThreadOpResult, ThreadRuntimeStatus, ThreadTurnContext};
+use super::reservation::{ActiveRuntimeTurnGuard, TurnReservations};
 use crate::agent::Agent;
 use crate::config::AgentConfig;
 use crate::events::RuntimeEvent;
@@ -101,7 +96,7 @@ pub struct ThreadRuntime {
     op_tx: mpsc::Sender<ThreadSubmission>,
     event_tx: broadcast::Sender<RuntimeEvent>,
     status_rx: watch::Receiver<ThreadRuntimeStatus>,
-    turn_reservation: Arc<Mutex<TurnReservationState>>,
+    turn_reservation: TurnReservations,
     live_state: Arc<RwLock<ThreadSessionLiveState>>,
     inbox: Arc<ThreadInbox>,
     goal_runtime: Option<Arc<GoalRuntime>>,
@@ -134,10 +129,7 @@ impl ThreadRuntime {
             op_tx,
             event_tx: event_tx.clone(),
             status_rx,
-            turn_reservation: Arc::new(Mutex::new(TurnReservationState {
-                next_turn_index,
-                active_turn: None,
-            })),
+            turn_reservation: TurnReservations::new(next_turn_index),
             live_state,
             inbox,
             goal_runtime,
@@ -173,7 +165,7 @@ impl ThreadRuntime {
         *self.status_rx.borrow()
     }
 
-    async fn submit_control_and_wait(&self, op: ThreadOp) -> Result<ThreadOpResult> {
+    pub(super) async fn submit_control_and_wait(&self, op: ThreadOp) -> Result<ThreadOpResult> {
         self.submit_and_wait_internal(op, None).await
     }
 
@@ -354,12 +346,7 @@ impl ThreadRuntime {
     }
 
     pub(crate) fn active_turn_id(&self) -> Option<TurnId> {
-        self.turn_reservation.lock().ok().and_then(|state| {
-            state
-                .active_turn
-                .as_ref()
-                .and_then(|record| record.public_turn_id.clone())
-        })
+        self.turn_reservation.active_turn_id()
     }
 
     pub(crate) async fn apply_goal_runtime_event(
@@ -376,46 +363,9 @@ impl ThreadRuntime {
         &self,
         requested_turn_id: Option<&TurnId>,
     ) -> Result<TurnId> {
-        let record = self
-            .turn_reservation
-            .lock()
-            .ok()
-            .and_then(|state| state.active_turn.clone())
-            .ok_or_else(|| anyhow!("thread has no active turn"))?;
-        let public_turn_id =
-            record
-                .public_turn_id
-                .clone()
-                .ok_or_else(|| ThreadRuntimeError::TurnRejected {
-                    thread_id: self.thread_id.clone(),
-                    reason: "active operation is not interruptible".to_string(),
-                })?;
-        if let Some(requested_turn_id) = requested_turn_id {
-            if requested_turn_id != &public_turn_id {
-                return Err(ThreadRuntimeError::TurnRejected {
-                    thread_id: self.thread_id.clone(),
-                    reason: format!("active turn is {}", public_turn_id.as_str()),
-                }
-                .into());
-            }
-        }
-
-        let did_send_interrupt = record
-            .interrupt_tx
-            .lock()
-            .expect("active turn interrupt mutex poisoned")
-            .take()
-            .map(|interrupt_tx| interrupt_tx.send(()).is_ok())
-            .unwrap_or(false);
-        if !did_send_interrupt {
-            return Err(ThreadRuntimeError::TurnRejected {
-                thread_id: self.thread_id.clone(),
-                reason: "active turn is already interrupting or completed".to_string(),
-            }
-            .into());
-        }
-        record.interrupted.notified().await;
-        Ok(public_turn_id)
+        self.turn_reservation
+            .signal_interrupt(&self.thread_id, requested_turn_id)
+            .await
     }
 
     pub(crate) async fn interrupt_waiting_approval_turn(
@@ -480,18 +430,13 @@ impl ThreadRuntime {
         interrupt_tx: oneshot::Sender<()>,
         interrupted: Arc<Notify>,
     ) -> Result<(TurnId, ActiveRuntimeTurnGuard)> {
-        reserve_next_turn_from_state(
-            &self.turn_reservation,
-            &self.thread_id,
-            interrupt_tx,
-            interrupted,
-        )
+        self.turn_reservation
+            .reserve_next(&self.thread_id, interrupt_tx, interrupted)
     }
 
     fn reserve_manual_compaction_turn(&self) -> Result<ActiveRuntimeTurnGuard> {
         let (interrupt_tx, _interrupt_rx) = oneshot::channel();
-        reserve_turn_record_from_state(
-            &self.turn_reservation,
+        self.turn_reservation.reserve_record(
             &self.thread_id,
             None,
             interrupt_tx,

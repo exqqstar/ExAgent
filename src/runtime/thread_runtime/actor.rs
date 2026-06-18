@@ -1,20 +1,19 @@
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use super::facade::{WorkspaceRuntimeOpGate, WorkspaceRuntimeOpPermit};
 use super::op::{ThreadOp, ThreadOpResult, ThreadRuntimeError};
-use super::reservation::{
-    reserve_next_turn_from_state, ActiveRuntimeTurnGuard, TurnReservationState,
-};
+use super::reservation::{ActiveRuntimeTurnGuard, TurnReservations};
 use crate::runtime::goal::runtime::{GoalRuntime, GoalRuntimeEffect, GoalRuntimeEvent};
 use crate::runtime::subagent::AgentTurnTerminalStatus;
 use crate::runtime::thread_session::{RuntimeInterrupt, ThreadSession};
 use crate::types::{ThreadId, TurnId, UserInput};
 
-const PENDING_MAIL_TURN_PROMPT: &str = "Process the pending inter-agent messages in your mailbox.";
+pub(super) const PENDING_MAIL_TURN_PROMPT: &str =
+    "Process the pending inter-agent messages in your mailbox.";
 pub(super) struct ThreadSubmission {
     pub(super) op: ThreadOp,
     pub(super) start_tx: Option<oneshot::Sender<Result<TurnId>>>,
@@ -48,7 +47,7 @@ pub(super) struct ThreadRuntimeLoop {
     pub(super) op_rx: mpsc::Receiver<ThreadSubmission>,
     pub(super) session: ThreadSession,
     pub(super) thread_id: ThreadId,
-    pub(super) turn_reservation: Arc<Mutex<TurnReservationState>>,
+    pub(super) turn_reservation: TurnReservations,
     pub(super) goal_runtime: Option<Arc<GoalRuntime>>,
     pub(super) workspace_runtime_op_gate: Option<Arc<dyn WorkspaceRuntimeOpGate>>,
 }
@@ -205,8 +204,7 @@ impl ThreadRuntimeLoop {
         };
         let (interrupt_tx, interrupt_rx) = oneshot::channel();
         let interrupted = Arc::new(Notify::new());
-        let (turn_id, guard) = reserve_next_turn_from_state(
-            &self.turn_reservation,
+        let (turn_id, guard) = self.turn_reservation.reserve_next(
             &self.thread_id,
             interrupt_tx,
             interrupted.clone(),
@@ -276,8 +274,7 @@ impl ThreadRuntimeLoop {
         }
         let (interrupt_tx, interrupt_rx) = oneshot::channel();
         let interrupted = Arc::new(Notify::new());
-        let (turn_id, guard) = reserve_next_turn_from_state(
-            &self.turn_reservation,
+        let (turn_id, guard) = self.turn_reservation.reserve_next(
             &self.thread_id,
             interrupt_tx,
             interrupted.clone(),
@@ -303,12 +300,7 @@ impl ThreadRuntimeLoop {
     }
 
     fn active_turn_id(&self) -> Option<TurnId> {
-        self.turn_reservation.lock().ok().and_then(|state| {
-            state
-                .active_turn
-                .as_ref()
-                .and_then(|record| record.public_turn_id.clone())
-        })
+        self.turn_reservation.active_turn_id()
     }
 }
 

@@ -421,11 +421,11 @@ It remains a facade control operation that submits `ThreadOp::Interrupt` to the 
 Run:
 
 ```bash
-cargo test --test thread_runtime rejected_busy_submit_does_not_consume_turn_id
-cargo test --test thread_runtime concurrent_submits_allocate_and_reserve_atomically
-cargo test --test thread_runtime manual_compaction_reservation_rejects_concurrent_submit
-cargo test --test thread_runtime interrupt_during_manual_compaction_is_rejected_without_sentinel
-cargo test --test thread_runtime compact_now_rejects_while_user_turn_running
+cargo test runtime::thread_runtime::tests::rejected_busy_submit_does_not_consume_turn_id
+cargo test runtime::thread_runtime::tests::concurrent_submits_allocate_and_reserve_atomically
+cargo test runtime::thread_runtime::tests::manual_compaction_reservation_rejects_concurrent_submit
+cargo test runtime::thread_runtime::tests::interrupt_during_manual_compaction_is_rejected_without_sentinel
+cargo test runtime::thread_runtime::tests::compact_now_rejects_while_user_turn_running
 ```
 
 Expected: each command passes.

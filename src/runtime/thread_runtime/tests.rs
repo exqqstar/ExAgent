@@ -1,8 +1,11 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use tempfile::tempdir;
+use tokio::sync::{broadcast, Notify};
 
 use crate::agent::Agent;
 use crate::app_server::protocol::{ThreadGoalReport, ThreadGoalStatus};
@@ -12,11 +15,17 @@ use crate::index_db::{IndexDb, ProjectUpsert};
 use crate::llm::{LlmClient, LlmRequestOptions, MockLlm};
 use crate::registry::ToolRegistry;
 use crate::resolved::{ResolvedCredential, ResolvedModelConfig};
-use crate::runtime::goal::runtime::GoalRuntime;
+use crate::runtime::goal::runtime::{GoalRuntime, GoalRuntimeEffect};
+use crate::runtime::subagent::InterAgentCommunication;
 use crate::runtime::turn_mode::TurnMode;
 use crate::state::rollout::{rollout_paths, RolloutItem, RolloutStore, ThreadMeta};
 use crate::tools::ToolSpec;
-use crate::types::{ConversationMessage, LlmCompletion, TokenUsage, ToolCall};
+use crate::types::{
+    AssistantTurn, ConversationMessage, LlmCompletion, ThreadId, TokenUsage, ToolCall, TurnId,
+};
+
+use super::actor::PENDING_MAIL_TURN_PROMPT;
+use super::op::ThreadOp;
 
 struct BlockingFirstLlm {
     calls: AtomicUsize,

@@ -26,7 +26,7 @@ use crate::runtime::skills::{
 use crate::runtime::thread_runtime::{
     ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus, ThreadTurnContext,
 };
-use crate::runtime::tool_orchestrator::ToolExecutionOutcome;
+use crate::runtime::tool::orchestrator::ToolExecutionOutcome;
 use crate::runtime::turn_mode::TurnMode;
 use crate::session::{ApprovalId, ApprovalStatus, CompactionSummary, ThreadSnapshot};
 use crate::state::memory::query::should_auto_recall;

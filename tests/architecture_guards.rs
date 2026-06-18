@@ -295,8 +295,7 @@ fn app_server_runtime_state_is_split_from_thread_manager() {
 
 #[test]
 fn tool_call_runtime_owns_selection_not_registry() {
-    let source = std::fs::read_to_string("src/runtime/tool_call_runtime.rs")
-        .expect("read tool_call_runtime");
+    let source = std::fs::read_to_string("src/runtime/tool/runtime.rs").expect("read tool runtime");
 
     assert!(
         source.contains("selection: ToolSelection"),
@@ -315,11 +314,11 @@ fn tool_call_runtime_owns_selection_not_registry() {
 #[test]
 fn tool_resolver_is_resolve_only() {
     let source =
-        std::fs::read_to_string("src/runtime/tool_resolver.rs").expect("read tool_resolver");
+        std::fs::read_to_string("src/runtime/tool/resolver.rs").expect("read tool resolver");
 
     assert!(
         source.contains("struct ToolResolver"),
-        "tool_resolver.rs should define ToolResolver"
+        "tool/resolver.rs should define ToolResolver"
     );
     for forbidden in [
         "permission_profile",

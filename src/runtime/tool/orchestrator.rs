@@ -7,9 +7,9 @@ use crate::config::PermissionProfile;
 use crate::events::RuntimeEventKind;
 use crate::registry::ToolContext;
 use crate::runtime::thread_session::{ActiveToolInvocation, LiveEventSink, ThreadEventRecorder};
-use crate::runtime::tool_hooks::{ToolHooks, ToolInvocationContext};
-use crate::runtime::tool_resolver::ToolResolver;
-use crate::runtime::tool_selection::authorize_tool;
+use crate::runtime::tool::hooks::{ToolHooks, ToolInvocationContext};
+use crate::runtime::tool::resolver::ToolResolver;
+use crate::runtime::tool::selection::authorize_tool;
 use crate::session::{ApprovalId, ApprovalStatus, ExecSessionId, ThreadSnapshot};
 use crate::tools::{ToolCapabilities, ToolInvocation, ToolOutcome, ToolRuntimeEffect};
 use crate::types::{ToolCall, ToolResult, ToolStatus, TurnId};
@@ -25,7 +25,7 @@ impl ToolOrchestrator {
     pub(crate) fn new(resolver: ToolResolver) -> Self {
         Self {
             resolver,
-            hooks: Arc::new(crate::runtime::tool_hooks::NoopToolHooks),
+            hooks: Arc::new(crate::runtime::tool::hooks::NoopToolHooks),
         }
     }
 

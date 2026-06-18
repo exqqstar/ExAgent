@@ -1,3 +1,20 @@
+fn read_thread_session_turn_sources() -> String {
+    [
+        "src/runtime/thread_session/turn/mod.rs",
+        "src/runtime/thread_session/turn/sampling.rs",
+        "src/runtime/thread_session/turn/context_start.rs",
+        "src/runtime/thread_session/turn/compaction_flow.rs",
+        "src/runtime/thread_session/turn/goal_effects.rs",
+        "src/runtime/thread_session/turn/external_input.rs",
+        "src/runtime/thread_session/turn/recording.rs",
+        "src/runtime/thread_session/turn/turn_config.rs",
+    ]
+    .into_iter()
+    .map(|path| std::fs::read_to_string(path).expect("read thread session turn source"))
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
 #[test]
 fn root_library_doctests_stay_disabled_until_examples_exist() {
     let manifest = std::fs::read_to_string("Cargo.toml").expect("read root manifest");
@@ -127,8 +144,7 @@ fn thread_goal_shape_has_no_forge_fields() {
 
 #[test]
 fn turn_loop_does_not_sample_from_session_snapshot_conversation() {
-    let source =
-        std::fs::read_to_string("src/runtime/thread_session/turn.rs").expect("read turn loop");
+    let source = read_thread_session_turn_sources();
 
     assert!(!source.contains("snapshot.conversation.clone()"));
     assert!(!source.contains("ContextManager::for_prompt(snapshot)"));
@@ -187,8 +203,7 @@ fn run_command_tool_does_not_bypass_rollout_with_transcript_writes() {
 
 #[test]
 fn turn_loop_does_not_mutate_snapshot_live_only_fields() {
-    let source =
-        std::fs::read_to_string("src/runtime/thread_session/turn.rs").expect("read turn loop");
+    let source = read_thread_session_turn_sources();
 
     assert!(!source.contains("snapshot.open_exec_sessions"));
     assert!(!source.contains("snapshot.pending_approvals"));

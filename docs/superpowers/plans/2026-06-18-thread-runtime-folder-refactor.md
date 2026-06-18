@@ -60,8 +60,14 @@ ThreadRuntimeError
 ThreadOpResult
 ThreadTurnContext
 AgentFactory
-WorkspaceRuntimeOpGate
 ThreadRuntimeOptions
+```
+
+Also confirm crate-internal consumers still resolve the workspace runtime gate symbols:
+
+```text
+WorkspaceRuntimeOpGate
+WorkspaceRuntimeOpPermit
 ```
 
 - [ ] **Step 2: Create module files by moving the existing code**
@@ -116,7 +122,8 @@ mod reservation;
 #[cfg(test)]
 mod tests;
 
-pub use facade::{AgentFactory, ThreadRuntime, ThreadRuntimeOptions, WorkspaceRuntimeOpGate};
+pub use facade::{AgentFactory, ThreadRuntime, ThreadRuntimeOptions};
+pub(crate) use facade::{WorkspaceRuntimeOpGate, WorkspaceRuntimeOpPermit};
 pub use op::{ThreadOpResult, ThreadRuntimeError, ThreadRuntimeStatus, ThreadTurnContext};
 ```
 

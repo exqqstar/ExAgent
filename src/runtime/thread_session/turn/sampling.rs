@@ -5,6 +5,7 @@ use anyhow::Result;
 
 use super::super::{LiveEventSink, ThreadEventRecorder, ThreadInbox};
 use super::compaction_flow::compact_after_context_window_error;
+use super::ctx::TurnCtx;
 use super::goal_effects::{apply_goal_effect, changed_files_for_goal_report};
 use super::recording::{
     current_token_usage, record_assistant_turn, record_token_count_event, record_tool_outcome,
@@ -18,7 +19,7 @@ use crate::events::RuntimeEventKind;
 use crate::llm::{LlmRequestOptions, LlmStreamEvent, LlmStreamSink};
 use crate::resolved::ResolvedModelConfig;
 use crate::runtime::context::ContextManager;
-use crate::runtime::goal::runtime::{GoalRuntime, GoalRuntimeEvent};
+use crate::runtime::goal::runtime::GoalRuntimeEvent;
 use crate::runtime::turn_mode::TurnMode;
 use crate::session::ThreadSnapshot;
 use crate::state::rollout::RolloutItem;
@@ -26,11 +27,7 @@ use crate::tools::ToolSpec;
 use crate::types::{AssistantTurn, ConversationMessage, InputModality, TurnId};
 
 pub(super) async fn run_session_turn(
-    agent: &Agent,
-    recorder: &mut ThreadEventRecorder,
-    rollout_store: &crate::state::rollout::RolloutStore,
-    context_manager: &mut ContextManager,
-    goal_runtime: Option<&GoalRuntime>,
+    turn_ctx: TurnCtx<'_>,
     snapshot: &mut ThreadSnapshot,
     runtime_turn_id: TurnId,
     turn_cwd: Option<PathBuf>,
@@ -39,6 +36,13 @@ pub(super) async fn run_session_turn(
     turn_mode: TurnMode,
     inbox: Arc<ThreadInbox>,
 ) -> Result<AssistantTurn> {
+    let TurnCtx {
+        agent,
+        recorder,
+        rollout_store,
+        context_manager,
+        goal_runtime,
+    } = turn_ctx;
     let cwd = turn_cwd.clone().unwrap_or_else(|| snapshot.cwd.clone());
     let effective_profile_agent_type = effective_profile_agent_type_for_turn(snapshot, turn_mode);
     let turn_config = config_for_turn(

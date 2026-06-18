@@ -1,16 +1,16 @@
 //! Turn execution for [`ThreadSession`], split across submodules by responsibility.
 //!
 //! Style note: functions that must mutate two or more `ThreadSession` fields at
-//! once (e.g. `recorder` and `context_manager` together) are free functions over
-//! destructured borrows rather than `&mut self` methods — see the
-//! `let Self { agent, recorder, .. } = self;` destructures in the dispatchers
-//! below. `&mut self` borrows the whole session, so it cannot express the
-//! field-disjoint borrows the sampling/tool loop needs; the borrow checker, not
-//! style preference, draws that line. Anything needing only `&self`/`&mut self`
-//! stays a method. Do not "unify" the hot-loop free fns back into methods.
+//! once (e.g. `recorder` and `context_manager` together) receive a `TurnCtx`
+//! borrow bundle rather than `&mut self`. `&mut self` borrows the whole session,
+//! so it cannot express the field-disjoint borrows the sampling/tool loop needs;
+//! the borrow checker, not style preference, draws that line. Anything needing
+//! only `&self`/`&mut self` stays a method. Do not "unify" the hot-loop free fns
+//! back into methods.
 
 mod compaction_flow;
 mod context_start;
+mod ctx;
 mod external_input;
 mod goal_effects;
 mod recording;
@@ -187,22 +187,11 @@ impl ThreadSession {
 
         let run_result = {
             let inbox = self.inbox.clone();
-            let Self {
-                agent,
-                recorder,
-                rollout_store,
-                context_manager,
-                goal_runtime,
-                ..
-            } = self;
             let runtime_turn_id = turn_id.clone();
+            let turn_ctx = self.turn_ctx();
             race_optional_interrupt(
                 run_session_turn(
-                    agent,
-                    recorder,
-                    rollout_store,
-                    context_manager,
-                    goal_runtime.as_deref(),
+                    turn_ctx,
                     &mut snapshot,
                     runtime_turn_id,
                     None,
@@ -355,22 +344,11 @@ impl ThreadSession {
 
         let run_result = {
             let inbox = self.inbox.clone();
-            let Self {
-                agent,
-                recorder,
-                rollout_store,
-                context_manager,
-                goal_runtime,
-                ..
-            } = self;
             let runtime_turn_id = turn_id.clone();
+            let turn_ctx = self.turn_ctx();
             race_optional_interrupt(
                 run_session_turn(
-                    agent,
-                    recorder,
-                    rollout_store,
-                    context_manager,
-                    goal_runtime.as_deref(),
+                    turn_ctx,
                     &mut snapshot,
                     runtime_turn_id,
                     runtime_turn_cwd,

@@ -422,6 +422,7 @@ async fn initialize_boundary_advertises_v2_protocol_surface() {
             BoundaryCapability::MemoryForget,
             BoundaryCapability::MemoryAudit,
             BoundaryCapability::MemoryListCandidates,
+            BoundaryCapability::MemoryListArchived,
             BoundaryCapability::MemoryPromote,
         ]
     );

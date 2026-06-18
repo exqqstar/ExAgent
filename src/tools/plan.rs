@@ -2,9 +2,9 @@
 //!
 //! `register_base_tools` covers the always-on, dependency-free tools.
 //! `register_dynamic_tools` covers the capability-gated tools that need runtime
-//! dependencies. The runtime layer (`tool_selection`) builds [`DynamicToolDeps`]
+//! dependencies. The runtime layer (`runtime::tool::selection`) builds [`DynamicToolDeps`]
 //! from its per-turn input and calls into here, so tool registration lives in
-//! one place instead of being split across `lib.rs` and `tool_selection.rs`.
+//! one place instead of being split across `lib.rs` and `tool/selection.rs`.
 //! See ADR-0042.
 
 use std::sync::Arc;

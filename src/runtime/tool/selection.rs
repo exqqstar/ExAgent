@@ -11,7 +11,7 @@ use crate::runtime::forge::review::ReviewStore;
 use crate::runtime::goal::GoalToolApi;
 use crate::runtime::memory::MemoryToolApi;
 use crate::runtime::subagent::AgentControl;
-use crate::runtime::tool_resolver::ToolResolver;
+use crate::runtime::tool::resolver::ToolResolver;
 use crate::tools::ToolSpec;
 
 pub(crate) struct ToolSelection {

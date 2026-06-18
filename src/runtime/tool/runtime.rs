@@ -11,9 +11,10 @@ use crate::runtime::goal::GoalToolApi;
 use crate::runtime::memory::MemoryToolApi;
 use crate::runtime::thread_session::ThreadEventRecorder;
 use crate::runtime::thread_session::ThreadInbox;
-use crate::runtime::tool_hooks::{NoopToolHooks, ToolHooks};
-use crate::runtime::tool_orchestrator::{ToolExecutionOutcome, ToolOrchestrator};
-use crate::runtime::tool_selection::ToolSelection;
+use crate::runtime::tool::effects::ToolExecutionOutcome;
+use crate::runtime::tool::hooks::{NoopToolHooks, ToolHooks};
+use crate::runtime::tool::orchestrator::ToolOrchestrator;
+use crate::runtime::tool::selection::ToolSelection;
 use crate::session::ThreadSnapshot;
 use crate::tools::ToolSpec;
 use crate::types::{ThreadId, ToolCall, TurnId};
@@ -128,8 +129,8 @@ impl ToolCallRuntime {
 mod tests {
     use super::*;
     use crate::registry::ToolRegistry;
-    use crate::runtime::tool_resolver::ToolResolver;
-    use crate::runtime::tool_selection::{select_visible_specs, ToolVisibilityContext};
+    use crate::runtime::tool::resolver::ToolResolver;
+    use crate::runtime::tool::selection::{select_visible_specs, ToolVisibilityContext};
     use crate::tools::read_file::ReadFileTool;
 
     fn selection_from_registry(

@@ -5,7 +5,7 @@ use serde_json::json;
 use crate::runtime::forge::goal_modes::ForgeGoalModeStore;
 use crate::runtime::forge::open_questions::{OpenQuestion, OpenQuestionStore};
 use crate::runtime::forge::review::ReviewStore;
-use crate::runtime::tool_hooks::{ToolHooks, ToolInvocationContext};
+use crate::runtime::tool::hooks::{ToolHooks, ToolInvocationContext};
 use crate::tools::ToolRuntimeEffect;
 use crate::types::ToolResult;
 use crate::types::ToolStatus;
@@ -170,7 +170,7 @@ mod tests {
     use crate::runtime::forge::goal_modes::ForgeGoalModeStore;
     use crate::runtime::forge::open_questions::OpenQuestionStore;
     use crate::runtime::forge::review::{ReviewStore, ReviewVerdict};
-    use crate::runtime::tool_hooks::{ToolHooks, ToolInvocationContext};
+    use crate::runtime::tool::hooks::{ToolHooks, ToolInvocationContext};
     use crate::tools::{ToolCapabilities, ToolRuntimeEffect};
     use crate::types::ThreadId;
 

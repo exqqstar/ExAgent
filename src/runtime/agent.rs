@@ -20,9 +20,9 @@ use crate::runtime::goal::GoalToolApi;
 use crate::runtime::memory::MemoryToolApi;
 use crate::runtime::subagent::AgentControl;
 use crate::runtime::thread_session::ThreadInbox;
-use crate::runtime::tool_call_runtime::ToolCallRuntime;
-use crate::runtime::tool_hooks::{NoopToolHooks, ToolHooks};
-use crate::runtime::tool_selection::{build_tool_selection, ToolSelectionInput};
+use crate::runtime::tool::hooks::{NoopToolHooks, ToolHooks};
+use crate::runtime::tool::runtime::ToolCallRuntime;
+use crate::runtime::tool::selection::{build_tool_selection, ToolSelectionInput};
 use crate::tools::ToolSpec;
 use crate::types::{ConversationMessage, LlmCompletion, ThreadId, TurnId};
 

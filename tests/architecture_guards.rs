@@ -196,7 +196,7 @@ fn rollout_reconstruction_does_not_restore_runtime_overlay_fields() {
 #[test]
 fn run_command_tool_does_not_bypass_rollout_with_transcript_writes() {
     let source =
-        std::fs::read_to_string("src/tools/run_command.rs").expect("read run command tool");
+        std::fs::read_to_string("src/tools/exec/run_command.rs").expect("read run command tool");
 
     assert!(!source.contains("transcript::append_json_line"));
 }

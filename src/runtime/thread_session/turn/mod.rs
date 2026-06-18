@@ -120,7 +120,7 @@ impl ThreadSession {
         &mut self,
         turn_id: TurnId,
         goal_id: String,
-        interrupt: Option<RuntimeInterrupt>,
+        mut interrupt: Option<RuntimeInterrupt>,
     ) -> Result<ThreadOpResult> {
         let mut snapshot = self
             .live_state
@@ -185,7 +185,7 @@ impl ThreadSession {
             },
         )?;
 
-        let final_turn = if let Some(mut interrupt) = interrupt {
+        let run_result = {
             let inbox = self.inbox.clone();
             let Self {
                 agent,
@@ -196,8 +196,8 @@ impl ThreadSession {
                 ..
             } = self;
             let runtime_turn_id = turn_id.clone();
-            tokio::select! {
-                result = run_session_turn(
+            race_optional_interrupt(
+                run_session_turn(
                     agent,
                     recorder,
                     rollout_store,
@@ -210,40 +210,25 @@ impl ThreadSession {
                     TurnThinkingModeOverride::Inherit,
                     TurnMode::Default,
                     inbox,
-                ) => result?,
-                _ = &mut interrupt.interrupt_rx => {
-                    self.record_turn_interrupted(&mut snapshot, &turn_id, &interrupt.interrupted)?;
-                    return Err(ThreadRuntimeError::TurnInterrupted {
-                        thread_id: self.thread_id.clone(),
-                        turn_id,
-                    }.into());
-                }
-            }
-        } else {
-            let inbox = self.inbox.clone();
-            let Self {
-                agent,
-                recorder,
-                rollout_store,
-                context_manager,
-                goal_runtime,
-                ..
-            } = self;
-            run_session_turn(
-                agent,
-                recorder,
-                rollout_store,
-                context_manager,
-                goal_runtime.as_deref(),
-                &mut snapshot,
-                turn_id.clone(),
-                None,
-                None,
-                TurnThinkingModeOverride::Inherit,
-                TurnMode::Default,
-                inbox,
+                ),
+                interrupt.as_mut(),
             )
-            .await?
+            .await
+        };
+        let final_turn = match run_result {
+            Ok(TurnOutcome::Completed(turn)) => turn,
+            Ok(TurnOutcome::Interrupted) => {
+                let interrupt = interrupt
+                    .as_ref()
+                    .expect("interrupted turn must have interrupt state");
+                self.record_turn_interrupted(&mut snapshot, &turn_id, &interrupt.interrupted)?;
+                return Err(ThreadRuntimeError::TurnInterrupted {
+                    thread_id: self.thread_id.clone(),
+                    turn_id,
+                }
+                .into());
+            }
+            Err(err) => return Err(err),
         };
 
         let effect = goal_runtime
@@ -281,7 +266,7 @@ impl ThreadSession {
         turn_id: TurnId,
         input: Vec<UserInput>,
         turn_context: Option<ThreadTurnContext>,
-        interrupt: Option<RuntimeInterrupt>,
+        mut interrupt: Option<RuntimeInterrupt>,
         mut start_tx: Option<oneshot::Sender<Result<TurnId>>>,
     ) -> Result<ThreadOpResult> {
         let turn_cwd = turn_context
@@ -327,18 +312,17 @@ impl ThreadSession {
             return Err(err);
         }
 
-        let final_turn = if let Some(mut interrupt) = interrupt {
-            let interrupted_during_compaction = tokio::select! {
-                result = self.compact_before_turn_if_needed(&turn_id, &mut snapshot) => {
-                    if let Err(err) = result {
-                        self.record_runtime_error(&snapshot, &turn_id, &err)?;
-                        return Err(err);
-                    }
-                    false
-                }
-                _ = &mut interrupt.interrupt_rx => true,
-            };
-            if interrupted_during_compaction {
+        match race_optional_interrupt(
+            self.compact_before_turn_if_needed(&turn_id, &mut snapshot),
+            interrupt.as_mut(),
+        )
+        .await
+        {
+            Ok(TurnOutcome::Completed(())) => {}
+            Ok(TurnOutcome::Interrupted) => {
+                let interrupt = interrupt
+                    .as_ref()
+                    .expect("interrupted turn must have interrupt state");
                 self.record_turn_interrupted(&mut snapshot, &turn_id, &interrupt.interrupted)?;
                 return Err(ThreadRuntimeError::TurnInterrupted {
                     thread_id: self.thread_id.clone(),
@@ -346,23 +330,30 @@ impl ThreadSession {
                 }
                 .into());
             }
-
-            let runtime_turn_cwd = turn_cwd.clone();
-            if let Err(err) = self
-                .record_user_turn_start(
-                    &turn_id,
-                    &input,
-                    turn_cwd,
-                    turn_resolved_model.as_ref(),
-                    turn_thinking_mode,
-                    turn_mode,
-                    &mut snapshot,
-                )
-                .await
-            {
+            Err(err) => {
                 self.record_runtime_error(&snapshot, &turn_id, &err)?;
                 return Err(err);
             }
+        }
+
+        let runtime_turn_cwd = turn_cwd.clone();
+        if let Err(err) = self
+            .record_user_turn_start(
+                &turn_id,
+                &input,
+                turn_cwd,
+                turn_resolved_model.as_ref(),
+                turn_thinking_mode,
+                turn_mode,
+                &mut snapshot,
+            )
+            .await
+        {
+            self.record_runtime_error(&snapshot, &turn_id, &err)?;
+            return Err(err);
+        }
+
+        let run_result = {
             let inbox = self.inbox.clone();
             let Self {
                 agent,
@@ -373,88 +364,46 @@ impl ThreadSession {
                 ..
             } = self;
             let runtime_turn_id = turn_id.clone();
-            tokio::select! {
-                result = run_session_turn(agent, recorder, rollout_store, context_manager, goal_runtime.as_deref(), &mut snapshot, runtime_turn_id, runtime_turn_cwd, turn_resolved_model.as_ref(), turn_thinking_mode, turn_mode, inbox) => {
-                    match result {
-                        Ok(turn) => turn,
-                        Err(err) => {
-                            let message = err.to_string();
-                            self.append_and_broadcast_snapshot(
-                                &snapshot,
-                                Some(&turn_id),
-                                RuntimeEventKind::RuntimeError { message },
-                            )?;
-                            return Err(err);
-                        }
-                    }
-                }
-                _ = &mut interrupt.interrupt_rx => {
-                    self.record_turn_interrupted(&mut snapshot, &turn_id, &interrupt.interrupted)?;
-                    return Err(ThreadRuntimeError::TurnInterrupted {
-                        thread_id: self.thread_id.clone(),
-                        turn_id,
-                    }.into());
-                }
-            }
-        } else {
-            if let Err(err) = self
-                .compact_before_turn_if_needed(&turn_id, &mut snapshot)
-                .await
-            {
-                self.record_runtime_error(&snapshot, &turn_id, &err)?;
-                return Err(err);
-            }
-            let runtime_turn_cwd = turn_cwd.clone();
-            if let Err(err) = self
-                .record_user_turn_start(
-                    &turn_id,
-                    &input,
-                    turn_cwd,
+            race_optional_interrupt(
+                run_session_turn(
+                    agent,
+                    recorder,
+                    rollout_store,
+                    context_manager,
+                    goal_runtime.as_deref(),
+                    &mut snapshot,
+                    runtime_turn_id,
+                    runtime_turn_cwd,
                     turn_resolved_model.as_ref(),
                     turn_thinking_mode,
                     turn_mode,
-                    &mut snapshot,
-                )
-                .await
-            {
-                self.record_runtime_error(&snapshot, &turn_id, &err)?;
-                return Err(err);
-            }
-            let inbox = self.inbox.clone();
-            let Self {
-                agent,
-                recorder,
-                rollout_store,
-                context_manager,
-                goal_runtime,
-                ..
-            } = self;
-            match run_session_turn(
-                agent,
-                recorder,
-                rollout_store,
-                context_manager,
-                goal_runtime.as_deref(),
-                &mut snapshot,
-                turn_id.clone(),
-                runtime_turn_cwd,
-                turn_resolved_model.as_ref(),
-                turn_thinking_mode,
-                turn_mode,
-                inbox,
+                    inbox,
+                ),
+                interrupt.as_mut(),
             )
             .await
-            {
-                Ok(turn) => turn,
-                Err(err) => {
-                    let message = err.to_string();
-                    self.append_and_broadcast_snapshot(
-                        &snapshot,
-                        Some(&turn_id),
-                        RuntimeEventKind::RuntimeError { message },
-                    )?;
-                    return Err(err);
+        };
+        let final_turn = match run_result {
+            Ok(TurnOutcome::Completed(turn)) => turn,
+            Ok(TurnOutcome::Interrupted) => {
+                let interrupt = interrupt
+                    .as_ref()
+                    .expect("interrupted turn must have interrupt state");
+                self.record_turn_interrupted(&mut snapshot, &turn_id, &interrupt.interrupted)?;
+                return Err(ThreadRuntimeError::TurnInterrupted {
+                    thread_id: self.thread_id.clone(),
+                    turn_id,
                 }
+                .into());
+            }
+            Err(err) => {
+                let message = err.to_string();
+                self.append_and_broadcast_snapshot(
+                    &snapshot,
+                    Some(&turn_id),
+                    RuntimeEventKind::RuntimeError { message },
+                )?;
+                return Err(err);
             }
         };
 

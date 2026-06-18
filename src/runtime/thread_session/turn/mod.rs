@@ -17,6 +17,8 @@ mod recording;
 mod sampling;
 mod turn_config;
 
+use std::future::Future;
+
 use anyhow::{anyhow, Result};
 use tokio::sync::oneshot;
 
@@ -497,6 +499,25 @@ impl ThreadSession {
             turn_id,
             final_turn,
         })
+    }
+}
+
+enum TurnOutcome<T> {
+    Completed(T),
+    Interrupted,
+}
+
+async fn race_optional_interrupt<T>(
+    fut: impl Future<Output = Result<T>>,
+    interrupt: Option<&mut RuntimeInterrupt>,
+) -> Result<TurnOutcome<T>> {
+    let Some(interrupt) = interrupt else {
+        return Ok(TurnOutcome::Completed(fut.await?));
+    };
+
+    tokio::select! {
+        result = fut => Ok(TurnOutcome::Completed(result?)),
+        _ = &mut interrupt.interrupt_rx => Ok(TurnOutcome::Interrupted),
     }
 }
 

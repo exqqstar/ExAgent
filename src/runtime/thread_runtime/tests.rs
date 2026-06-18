@@ -195,6 +195,24 @@ async fn wait_for_goal_continuation_started(
     .expect("goal continuation started")
 }
 
+async fn wait_for_turn_interrupted(
+    events: &mut broadcast::Receiver<RuntimeEvent>,
+    turn_id: &TurnId,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let event = events.recv().await.expect("runtime event");
+            if event.turn_id.as_ref() == Some(turn_id)
+                && matches!(event.kind, RuntimeEventKind::TurnInterrupted)
+            {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("turn interrupted event");
+}
+
 async fn wait_until_no_active_turn(runtime: &ThreadRuntime) {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
@@ -369,6 +387,80 @@ VALUES (?, ?, ?, 'Goal thread', 'Goal preview', 'test', 0, 'idle', 1, 1)
     wait_for_goal_status(&db, &thread_id, ThreadGoalStatus::Complete).await;
     let report = wait_for_goal_report(&mut events).await;
     assert_eq!(report.tokens_used, 55);
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn goal_continuation_interrupt_records_interrupted_event() {
+    let dir = tempdir().expect("tempdir");
+    let thread_id = ThreadId::new("thread_goal_continuation_interrupt");
+    let config = AgentConfig {
+        workspace_root: dir.path().to_path_buf(),
+        cwd: dir.path().to_path_buf(),
+        ..AgentConfig::default()
+    };
+    write_rollout_meta(&config, &thread_id);
+
+    let db = IndexDb::open(dir.path().join("index.sqlite"))
+        .await
+        .expect("index db");
+    let project = db
+        .upsert_project(ProjectUpsert {
+            name: "Goal Interrupt Project".to_string(),
+            path: dir.path().to_path_buf(),
+        })
+        .await
+        .expect("project");
+    sqlx::query(
+        r#"
+INSERT INTO threads (
+  id, project_id, rollout_path, fallback_title, preview, title_source,
+  pinned, status, created_at, updated_at
+)
+VALUES (?, ?, ?, 'Goal thread', 'Goal preview', 'test', 0, 'idle', 1, 1)
+        "#,
+    )
+    .bind(thread_id.as_str())
+    .bind(&project.id)
+    .bind(format!("/tmp/{}/rollout.jsonl", thread_id.as_str()))
+    .execute(db.pool())
+    .await
+    .expect("thread row");
+    db.insert_thread_goal(&thread_id, "continue until interrupted", None)
+        .await
+        .expect("insert goal")
+        .expect("new goal");
+
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let runtime = ThreadRuntime::spawn(
+        ThreadRuntimeOptions::new(
+            thread_id.clone(),
+            config,
+            blocking_agent_factory(started.clone(), release.clone()),
+        )
+        .with_goal_runtime(Arc::new(GoalRuntime::new(db.clone()))),
+    )
+    .expect("runtime");
+    let mut events = runtime.subscribe_events();
+
+    runtime
+        .enqueue_goal_runtime_effect(GoalRuntimeEffect::ScheduleContinuation)
+        .await
+        .expect("queue goal continuation");
+    let continuation_turn_id = wait_for_goal_continuation_started(&mut events).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+        .await
+        .expect("continuation llm call started");
+
+    let interrupted_turn_id = runtime
+        .interrupt_active_turn(Some(&continuation_turn_id))
+        .await
+        .expect("interrupt active goal continuation");
+    assert_eq!(interrupted_turn_id, continuation_turn_id);
+    wait_for_turn_interrupted(&mut events, &continuation_turn_id).await;
+    wait_until_no_active_turn(&runtime).await;
+
     runtime.shutdown().await.expect("shutdown");
 }
 

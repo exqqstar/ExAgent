@@ -99,43 +99,25 @@ describe("exagentClient", () => {
     });
   });
 
-  it("replays all runtime events by following the after-event cursor", async () => {
+  it("replays runtime events from a single snapshot without chasing newly appended events", async () => {
     const firstEvent = runtimeEvent("evt_1");
     const secondEvent = runtimeEvent("evt_2");
-    const thirdEvent = runtimeEvent("evt_3");
 
     tauriMocks.invoke.mockImplementation(async (_command, args) => {
       if (args?.afterEventId === null) {
         return { thread_id: "thread-root", events: [firstEvent, secondEvent] };
-      }
-      if (args?.afterEventId === "evt_2") {
-        return { thread_id: "thread-root", events: [thirdEvent] };
-      }
-      if (args?.afterEventId === "evt_3") {
-        return { thread_id: "thread-root", events: [] };
       }
       throw new Error(`unexpected cursor ${String(args?.afterEventId)}`);
     });
 
     const events = await replayAllEvents("project-exagent", "thread-root");
 
-    expect(events).toEqual([firstEvent, secondEvent, thirdEvent]);
-    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, "events_replay", {
+    expect(events).toEqual([firstEvent, secondEvent]);
+    expect(tauriMocks.invoke).toHaveBeenCalledTimes(1);
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("events_replay", {
       projectId: "project-exagent",
       threadId: "thread-root",
       afterEventId: null,
-      includeSnapshot: true
-    });
-    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, "events_replay", {
-      projectId: "project-exagent",
-      threadId: "thread-root",
-      afterEventId: "evt_2",
-      includeSnapshot: true
-    });
-    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(3, "events_replay", {
-      projectId: "project-exagent",
-      threadId: "thread-root",
-      afterEventId: "evt_3",
       includeSnapshot: true
     });
   });

@@ -364,9 +364,7 @@ impl GoalRuntime {
         let mode = ForgeGoalModeStore::new(self.db.clone())
             .mode_for_goal(thread_id, &goal.goal_id)
             .await?;
-        Ok(
-            crate::runtime::goal::prompts::active_goal_snapshot_prompt_for_mode(goal, mode),
-        )
+        Ok(crate::runtime::goal::prompts::active_goal_snapshot_prompt_for_mode(goal, mode))
     }
 
     #[cfg(test)]

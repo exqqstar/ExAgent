@@ -9,6 +9,7 @@ pub mod memory;
 pub mod policy;
 pub(crate) mod process_cleanup;
 pub(crate) mod project_docs;
+pub(crate) mod prompt;
 pub(crate) mod skills;
 pub mod subagent;
 pub mod thread_runtime;

@@ -112,6 +112,7 @@ WHERE thread_id = ? AND goal_id = ?
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn is_intensive(
         &self,
         thread_id: &ThreadId,

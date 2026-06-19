@@ -301,6 +301,7 @@ describe("AppShell", () => {
     });
     expect(projectButton).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByLabelText("Inspector")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open event log" })).toBeInTheDocument();
     expect(screen.getByLabelText("Prompt composer")).toBeInTheDocument();
   });
 
@@ -315,6 +316,33 @@ describe("AppShell", () => {
     expect(dialog).toBeInTheDocument();
     expect(within(dialog).getAllByRole("heading", { name: "Memory" })).toHaveLength(2);
     expect(within(dialog).getByText("No pending candidates.")).toBeInTheDocument();
+  });
+
+  it("opens the event log from the window chrome", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(exagentClient, "replayAllEvents").mockResolvedValue([
+      {
+        event_id: "evt_chrome_event",
+        thread_id: "session-desktop",
+        turn_id: "turn-1",
+        kind: {
+          type: "assistant_turn",
+          turn: {
+            text: "Chrome event log entry",
+            tool_calls: [],
+          },
+        },
+      },
+    ]);
+
+    render(<App />);
+
+    await screen.findByText("Session restored");
+    await user.click(screen.getByRole("button", { name: "Open event log" }));
+
+    expect(await screen.findByText("Event Log · 1")).toBeInTheDocument();
+    expect(screen.getAllByText("Chrome event log entry").length).toBeGreaterThan(0);
+    expect(exagentClient.replayAllEvents).toHaveBeenCalledWith("project-exagent", "session-desktop");
   });
 
   it("resizes and collapses the desktop project sidebar", async () => {
@@ -361,7 +389,7 @@ describe("AppShell", () => {
 
     expect(await screen.findByText("Session restored")).toBeInTheDocument();
     expect(screen.getByText("Changed Files")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Events/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open event log" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Token Usage/ })).toHaveTextContent("not reported");
     expect(screen.getByText("No token usage reported for this thread.")).toBeInTheDocument();
     expect(screen.getByLabelText("Message ExAgent")).toBeInTheDocument();
@@ -3931,19 +3959,32 @@ describe("AppShell", () => {
     render(<App />);
 
     await screen.findByText("Session restored");
-    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+    vi.spyOn(exagentClient, "replayEvents").mockImplementation(async (_projectId, _threadId, afterEventId) => ({
       thread_id: "session-desktop",
-      events: [
-        {
-          event_id: "evt-slash-compact",
-          thread_id: "session-desktop",
-          kind: {
-            type: "compaction_written",
-            summary: { summary: "Slash compact summary" },
-          },
+      events:
+        afterEventId == null
+          ? [
+              {
+                event_id: "evt-slash-compact",
+                thread_id: "session-desktop",
+                kind: {
+                  type: "compaction_written",
+                  summary: { summary: "Slash compact summary" },
+                },
+              },
+            ]
+          : [],
+    }));
+    vi.spyOn(exagentClient, "replayAllEvents").mockResolvedValue([
+      {
+        event_id: "evt-slash-compact",
+        thread_id: "session-desktop",
+        kind: {
+          type: "compaction_written",
+          summary: { summary: "Slash compact summary" },
         },
-      ],
-    });
+      },
+    ]);
     const composer = screen.getByLabelText("Message ExAgent");
     await user.type(composer, "/");
 
@@ -3954,8 +3995,8 @@ describe("AppShell", () => {
       "session-desktop",
     );
     expect(composer).toHaveValue("");
-    await user.click(await screen.findByRole("button", { name: /Events/ }));
-    expect(await screen.findByText("Slash compact summary")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Open event log" }));
+    expect((await screen.findAllByText("Slash compact summary")).length).toBeGreaterThan(0);
   });
 
   it("runs the visible slash command with Enter", async () => {

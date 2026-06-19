@@ -5,10 +5,12 @@ import {
   importImageFiles,
   listApprovals,
   pickImageFiles,
+  replayAllEvents,
   scanSkillCatalog,
   setThreadGoal,
   submitApprovalDecision
 } from "@/api/exagentClient";
+import type { BackendRuntimeEvent } from "@/types";
 
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn()
@@ -17,6 +19,15 @@ const tauriMocks = vi.hoisted(() => ({
 const dialogMocks = vi.hoisted(() => ({
   open: vi.fn()
 }));
+
+function runtimeEvent(eventId: string): BackendRuntimeEvent {
+  return {
+    event_id: eventId,
+    thread_id: "thread-root",
+    turn_id: "turn-1",
+    kind: { type: "turn_started" }
+  };
+}
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: tauriMocks.invoke
@@ -85,6 +96,47 @@ describe("exagentClient", () => {
     expect(response).toEqual({
       thread_id: "thread-root",
       latest_compaction: { summary: "manual compact summary" }
+    });
+  });
+
+  it("replays all runtime events by following the after-event cursor", async () => {
+    const firstEvent = runtimeEvent("evt_1");
+    const secondEvent = runtimeEvent("evt_2");
+    const thirdEvent = runtimeEvent("evt_3");
+
+    tauriMocks.invoke.mockImplementation(async (_command, args) => {
+      if (args?.afterEventId === null) {
+        return { thread_id: "thread-root", events: [firstEvent, secondEvent] };
+      }
+      if (args?.afterEventId === "evt_2") {
+        return { thread_id: "thread-root", events: [thirdEvent] };
+      }
+      if (args?.afterEventId === "evt_3") {
+        return { thread_id: "thread-root", events: [] };
+      }
+      throw new Error(`unexpected cursor ${String(args?.afterEventId)}`);
+    });
+
+    const events = await replayAllEvents("project-exagent", "thread-root");
+
+    expect(events).toEqual([firstEvent, secondEvent, thirdEvent]);
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, "events_replay", {
+      projectId: "project-exagent",
+      threadId: "thread-root",
+      afterEventId: null,
+      includeSnapshot: true
+    });
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, "events_replay", {
+      projectId: "project-exagent",
+      threadId: "thread-root",
+      afterEventId: "evt_2",
+      includeSnapshot: true
+    });
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(3, "events_replay", {
+      projectId: "project-exagent",
+      threadId: "thread-root",
+      afterEventId: "evt_3",
+      includeSnapshot: true
     });
   });
 

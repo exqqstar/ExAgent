@@ -1350,6 +1350,25 @@ export async function replayEvents(
   });
 }
 
+export async function replayAllEvents(projectId: string, threadId: string): Promise<BackendRuntimeEvent[]> {
+  const events: BackendRuntimeEvent[] = [];
+  let afterEventId: string | null = null;
+
+  while (true) {
+    const replay = await replayEvents(projectId, threadId, afterEventId);
+    if (replay.events.length === 0) {
+      return events;
+    }
+
+    events.push(...replay.events);
+    const nextAfterEventId = replay.events[replay.events.length - 1]?.event_id ?? null;
+    if (!nextAfterEventId || nextAfterEventId === afterEventId) {
+      return events;
+    }
+    afterEventId = nextAfterEventId;
+  }
+}
+
 export async function subscribeRuntimeEvents(
   projectId: string,
   threadId: string,
@@ -1763,6 +1782,7 @@ export const exagentClient = {
   renameThread,
   compactThread,
   forkThread,
+  replayAllEvents,
   replayEvents,
   resumeThread,
   saveProviderSettings,

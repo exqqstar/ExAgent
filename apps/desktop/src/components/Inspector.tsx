@@ -1,4 +1,4 @@
-import { Activity, Bot, ChevronRight, CircleAlert, Cpu, Database, FileText, Gauge, HardDrive, ShieldCheck } from "lucide-react";
+import { Activity, Bot, ChevronRight, CircleAlert, Cpu, Database, FileText, Gauge, HardDrive } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { AgentsPanel } from "@/components/AgentsPanel";
 import { TokenUsagePanel, tokenUsageSummary } from "@/components/TokenUsagePanel";
@@ -12,14 +12,6 @@ import { cn } from "@/lib/utils";
 
 type WorkbenchState = ReturnType<typeof getWorkbenchState>;
 type InspectorVariant = "sheet" | "panel";
-
-const eventVariant = {
-  neutral: "neutral",
-  info: "info",
-  warning: "warning",
-  danger: "danger",
-  success: "success"
-} as const;
 
 export function Inspector({ state, variant = "sheet" }: { state: WorkbenchState; variant?: InspectorVariant }) {
   const { t } = useI18n();
@@ -155,27 +147,6 @@ export function Inspector({ state, variant = "sheet" }: { state: WorkbenchState;
         </div>
       </InspectorSection>
 
-      <InspectorSection
-        icon={ShieldCheck}
-        title={t("inspector.sections.events")}
-        summary={t("inspector.events.recorded").replace("{count}", String(state.events.length))}
-      >
-        <div className="space-y-2.5">
-          {state.events.length === 0 ? (
-            <p className="type-body-md text-muted">{t("inspector.events.empty")}</p>
-          ) : (
-            state.events.map((event) => (
-              <div key={event.id} className="min-w-0 border-l border-border pl-3">
-                <div className="flex min-w-0 items-center justify-between gap-2">
-                  <span className="type-label-md min-w-0 truncate text-ink">{event.label}</span>
-                  <Badge variant={eventVariant[event.tone ?? "neutral"]}>{event.timestamp}</Badge>
-                </div>
-                <p className="type-body-sm mt-0.5 break-words text-muted">{event.detail}</p>
-              </div>
-            ))
-          )}
-        </div>
-      </InspectorSection>
     </div>
   );
 

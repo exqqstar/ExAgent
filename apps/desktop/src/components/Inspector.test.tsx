@@ -15,6 +15,7 @@ class ResizeObserverMock {
 }
 
 beforeEach(() => {
+  vi.restoreAllMocks();
   vi.stubGlobal("ResizeObserver", ResizeObserverMock);
 });
 
@@ -350,5 +351,13 @@ describe("Inspector Token Usage section", () => {
 
     expect(screen.getByRole("button", { name: /Token Usage/ })).toHaveTextContent("not reported");
     expect(screen.getByText("No token usage reported for this thread.")).toBeInTheDocument();
+  });
+});
+
+describe("Inspector Events section", () => {
+  it("does not render the event log entry inside Inspector", () => {
+    render(<Inspector state={workbenchState([rootOnly])} />);
+
+    expect(screen.queryByRole("button", { name: "Events" })).not.toBeInTheDocument();
   });
 });

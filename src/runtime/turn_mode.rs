@@ -23,17 +23,9 @@ impl TurnMode {
     pub fn prompt_guidance(self) -> Option<&'static str> {
         match self {
             Self::Default => None,
-            Self::Plan => Some(
-                "Plan mode is active for this turn.\n\n\
-The user is asking for planning, not implementation. Treat requests to build, fix,\n\
-change, run migrations, format files, commit, or deploy as requests to plan that\n\
-work. Do not mutate workspace files or system state.\n\n\
-Use read-only tools to ground the plan in real repository facts. If a required\n\
-fact cannot be discovered safely, state the assumption and make the smallest\n\
-decision-complete plan around it.\n\n\
-Return a proposed plan with objective, assumptions, file map, ordered steps,\n\
-verification, and risks. Do not ask the user to choose subagent roles.",
-            ),
+            Self::Plan => Some(crate::runtime::prompt::overlay(
+                crate::runtime::prompt::PromptMode::Plan,
+            )),
         }
     }
 }
@@ -58,7 +50,7 @@ mod tests {
     fn plan_mode_has_prompt_guidance() {
         let guidance = TurnMode::Plan.prompt_guidance().expect("plan guidance");
 
-        assert!(guidance.contains("Plan mode is active"));
+        assert!(guidance.contains("Plan mode"));
         assert!(guidance.contains("planning, not implementation"));
     }
 

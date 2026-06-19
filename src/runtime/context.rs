@@ -716,7 +716,8 @@ mod tests {
         assert!(system_text.contains("Agent profile instructions:"));
         assert!(system_text.contains("You are a planner agent."));
         assert!(system_text.contains("Do not edit"));
-        assert!(system_text.contains("Plan mode is active"));
+        assert!(system_text.contains("Turn mode guidance:"));
+        assert!(system_text.contains("## Plan mode"));
         assert!(!system_text.contains("worker agents for scoped execution"));
     }
 

@@ -7,9 +7,10 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent
 } from "react";
-import { ArrowLeft, ArrowRight, Database, PanelRight, ShieldAlert, SidebarIcon } from "lucide-react";
+import { ArrowLeft, ArrowRight, Database, PanelRight, ScrollText, ShieldAlert, SidebarIcon } from "lucide-react";
 import { AgentThreadViewer } from "@/components/AgentThreadViewer";
 import { ApprovalInbox } from "@/components/ApprovalInbox";
+import { EventLogDialog } from "@/components/events/EventLogDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
@@ -47,6 +48,7 @@ export function AppShell() {
   const [desktopSidebarCollapsed, setDesktopSidebarCollapsed] = useState(false);
   const [resizingDesktopSidebar, setResizingDesktopSidebar] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
+  const [eventLogOpen, setEventLogOpen] = useState(false);
   const pendingApprovalCount = workbench.pendingApprovals.length;
   const chromeSidebarWidth = desktopSidebarWidth;
   const approvalInboxLabel = `${t("approvals.inbox.title")}, ${pendingApprovalCount} ${t("approvals.inbox.pending")} ${
@@ -420,6 +422,27 @@ export function AppShell() {
                   </SheetContent>
                 </Sheet>
               ) : null}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label={t("chrome.eventLog.open")}
+                    disabled={!workbench.activeProjectId || !workbench.activeSessionId}
+                    onClick={() => setEventLogOpen(true)}
+                  >
+                    <ScrollText className="h-4 w-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{t("chrome.eventLog.title")}</TooltipContent>
+              </Tooltip>
+              <EventLogDialog
+                projectId={workbench.activeProjectId}
+                threadId={workbench.activeSessionId}
+                open={eventLogOpen}
+                onClose={() => setEventLogOpen(false)}
+              />
               <Sheet open={memoryOpen} onOpenChange={setMemoryOpen}>
                 <Tooltip>
                   <TooltipTrigger asChild>

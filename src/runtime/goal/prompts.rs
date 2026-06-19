@@ -1,4 +1,4 @@
-use crate::app_server::protocol::{ThreadGoal, ThreadGoalReport, ThreadGoalStatus};
+use crate::app_server::protocol::{ThreadGoal, ThreadGoalMode, ThreadGoalReport, ThreadGoalStatus};
 
 pub(crate) fn active_goal_snapshot_prompt(goal: &ThreadGoal) -> String {
     format!(
@@ -18,14 +18,11 @@ pub(crate) fn active_goal_snapshot_prompt(goal: &ThreadGoal) -> String {
     )
 }
 
-pub(crate) fn forge_intensive_active_goal_snapshot_prompt(goal: &ThreadGoal) -> String {
-    format!(
-        "{}\n\n\
-         Forge intensive mode is active. Treat this as a stricter operating mode for the current goal.\n\n\
-         Required workflow: delegate exploration and implementation to subagents when work can be separated, record evidence and QA on real surfaces, and use defer_question for user input that is needed before honest completion.\n\n\
-         Completion gate: before any update_goal call with status complete, spawn a reviewer subagent with agent_type=reviewer and fork_turns=none. Give the reviewer only the objective, changed files, diff, and objective evidence needed for review.",
-        active_goal_snapshot_prompt(goal),
-    )
+pub(crate) fn active_goal_snapshot_prompt_for_mode(
+    goal: &ThreadGoal,
+    mode: ThreadGoalMode,
+) -> String {
+    apply_goal_overlay(active_goal_snapshot_prompt(goal), mode)
 }
 
 pub(crate) fn continuation_prompt(goal: &ThreadGoal) -> String {
@@ -48,17 +45,17 @@ pub(crate) fn continuation_prompt(goal: &ThreadGoal) -> String {
     )
 }
 
-pub(crate) fn forge_intensive_continuation_prompt(goal: &ThreadGoal) -> String {
-    format!(
-        "{}\n\n\
-         Forge intensive mode is active. Required workflow:\n\
-         - delegate exploration and implementation to subagents when work can be separated.\n\
-         - Keep reviewer context clean: before any update_goal call with status complete, spawn a reviewer subagent with agent_type=reviewer and fork_turns=none.\n\
-         - Give the reviewer only the objective, changed files, diff, and objective evidence needed for review.\n\
-         - Record evidence and QA on real surfaces before claiming completion.\n\
-         - Use defer_question for user input that is needed before honest completion.",
-        continuation_prompt(goal),
-    )
+pub(crate) fn continuation_prompt_for_mode(goal: &ThreadGoal, mode: ThreadGoalMode) -> String {
+    apply_goal_overlay(continuation_prompt(goal), mode)
+}
+
+/// Append the mode's overlay (if any) to a base goal prompt. `Standard` returns
+/// the base unchanged.
+fn apply_goal_overlay(base: String, mode: ThreadGoalMode) -> String {
+    match crate::runtime::prompt::goal_overlay(mode) {
+        Some(overlay) => format!("{base}\n\n{overlay}"),
+        None => base,
+    }
 }
 
 pub(crate) fn budget_limit_prompt(goal: &ThreadGoal) -> String {
@@ -259,8 +256,9 @@ mod tests {
     }
 
     #[test]
-    fn forge_intensive_continuation_prompt_requires_review_subagent_and_defer_question() {
-        let prompt = forge_intensive_continuation_prompt(&goal("finish the feature"));
+    fn intensive_continuation_prompt_requires_review_subagent_and_defer_question() {
+        let prompt =
+            continuation_prompt_for_mode(&goal("finish the feature"), ThreadGoalMode::Intensive);
 
         assert!(prompt.contains("delegate exploration and implementation to subagents"));
         assert!(prompt.contains("agent_type=reviewer"));

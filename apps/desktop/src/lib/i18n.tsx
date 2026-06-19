@@ -60,6 +60,8 @@ export type TranslationKey =
   | "chrome.memory.open"
   | "chrome.memory.title"
   | "chrome.memory.description"
+  | "chrome.eventLog.open"
+  | "chrome.eventLog.title"
   | "chrome.inspector.open"
   | "chrome.inspector.title"
   | "chrome.session.new"
@@ -152,7 +154,6 @@ export type TranslationKey =
   | "inspector.sections.tokenUsage"
   | "inspector.sections.contextWindow"
   | "inspector.sections.changedFiles"
-  | "inspector.sections.events"
   | "inspector.agentSummary.running"
   | "inspector.agentSummary.singular"
   | "inspector.agentSummary.plural"
@@ -163,8 +164,15 @@ export type TranslationKey =
   | "inspector.changedFiles.none"
   | "inspector.changedFiles.changed"
   | "inspector.changedFiles.empty"
-  | "inspector.events.recorded"
-  | "inspector.events.empty"
+  | "eventLog.title"
+  | "eventLog.description"
+  | "eventLog.showStreaming"
+  | "eventLog.loading"
+  | "eventLog.empty"
+  | "eventLog.onlyStreamingHidden"
+  | "eventLog.noActiveThread"
+  | "eventLog.selectEvent"
+  | "eventLog.timeNotRecorded"
   | "inspector.waitingApproval.approvalSingular"
   | "inspector.waitingApproval.approvalPlural"
   | "inspector.waitingApproval.expandSingular"
@@ -456,6 +464,8 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "chrome.memory.open": "Open memory",
     "chrome.memory.title": "Memory",
     "chrome.memory.description": "Project memory governance",
+    "chrome.eventLog.open": "Open event log",
+    "chrome.eventLog.title": "Event log",
     "chrome.inspector.open": "Open inspector",
     "chrome.inspector.title": "Inspector",
     "chrome.session.new": "New session",
@@ -548,7 +558,6 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "inspector.sections.tokenUsage": "Token Usage",
     "inspector.sections.contextWindow": "Context Window",
     "inspector.sections.changedFiles": "Changed Files",
-    "inspector.sections.events": "Events",
     "inspector.agentSummary.running": "{count} running",
     "inspector.agentSummary.singular": "1 agent",
     "inspector.agentSummary.plural": "{count} agents",
@@ -559,8 +568,15 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "inspector.changedFiles.none": "none",
     "inspector.changedFiles.changed": "{count} changed",
     "inspector.changedFiles.empty": "No changed files reported.",
-    "inspector.events.recorded": "{count} recorded",
-    "inspector.events.empty": "No runtime events yet.",
+    "eventLog.title": "Event Log · {count}",
+    "eventLog.description": "Runtime event audit log.",
+    "eventLog.showStreaming": "Show streaming",
+    "eventLog.loading": "Loading events...",
+    "eventLog.empty": "No runtime events.",
+    "eventLog.onlyStreamingHidden": "Only streaming events are hidden.",
+    "eventLog.noActiveThread": "No active thread.",
+    "eventLog.selectEvent": "Select an event to inspect.",
+    "eventLog.timeNotRecorded": "not recorded",
     "inspector.waitingApproval.approvalSingular": "approval",
     "inspector.waitingApproval.approvalPlural": "approvals",
     "inspector.waitingApproval.expandSingular": "Expand 1 waiting approval agent",
@@ -843,6 +859,8 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "chrome.memory.open": "打开记忆",
     "chrome.memory.title": "记忆",
     "chrome.memory.description": "项目记忆治理",
+    "chrome.eventLog.open": "打开事件日志",
+    "chrome.eventLog.title": "事件日志",
     "chrome.inspector.open": "打开检查器",
     "chrome.inspector.title": "检查器",
     "chrome.session.new": "新会话",
@@ -935,7 +953,6 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "inspector.sections.tokenUsage": "Token 用量",
     "inspector.sections.contextWindow": "上下文窗口",
     "inspector.sections.changedFiles": "变更文件",
-    "inspector.sections.events": "事件",
     "inspector.agentSummary.running": "{count} 个运行中",
     "inspector.agentSummary.singular": "1 个 agent",
     "inspector.agentSummary.plural": "{count} 个 agent",
@@ -946,8 +963,15 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "inspector.changedFiles.none": "无",
     "inspector.changedFiles.changed": "{count} 个变更",
     "inspector.changedFiles.empty": "没有报告变更文件。",
-    "inspector.events.recorded": "{count} 条记录",
-    "inspector.events.empty": "还没有运行时事件。",
+    "eventLog.title": "事件日志 · {count}",
+    "eventLog.description": "运行时事件审计日志。",
+    "eventLog.showStreaming": "显示流式",
+    "eventLog.loading": "正在加载事件...",
+    "eventLog.empty": "没有运行时事件。",
+    "eventLog.onlyStreamingHidden": "仅流式事件被隐藏。",
+    "eventLog.noActiveThread": "没有活动线程。",
+    "eventLog.selectEvent": "选择一个事件查看详情。",
+    "eventLog.timeNotRecorded": "未记录",
     "inspector.waitingApproval.approvalSingular": "审批",
     "inspector.waitingApproval.approvalPlural": "审批",
     "inspector.waitingApproval.expandSingular": "展开 1 个等待审批的 agent",

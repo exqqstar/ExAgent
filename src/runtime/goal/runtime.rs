@@ -348,14 +348,12 @@ impl GoalRuntime {
         thread_id: &ThreadId,
         goal: &ThreadGoal,
     ) -> anyhow::Result<String> {
-        if ForgeGoalModeStore::new(self.db.clone())
-            .is_intensive(thread_id, &goal.goal_id)
-            .await?
-        {
-            Ok(crate::runtime::goal::prompts::forge_intensive_continuation_prompt(goal))
-        } else {
-            Ok(crate::runtime::goal::prompts::continuation_prompt(goal))
-        }
+        let mode = ForgeGoalModeStore::new(self.db.clone())
+            .mode_for_goal(thread_id, &goal.goal_id)
+            .await?;
+        Ok(crate::runtime::goal::prompts::continuation_prompt_for_mode(
+            goal, mode,
+        ))
     }
 
     pub(crate) async fn active_goal_snapshot_prompt_for_goal(
@@ -363,16 +361,10 @@ impl GoalRuntime {
         thread_id: &ThreadId,
         goal: &ThreadGoal,
     ) -> anyhow::Result<String> {
-        if ForgeGoalModeStore::new(self.db.clone())
-            .is_intensive(thread_id, &goal.goal_id)
-            .await?
-        {
-            Ok(crate::runtime::goal::prompts::forge_intensive_active_goal_snapshot_prompt(goal))
-        } else {
-            Ok(crate::runtime::goal::prompts::active_goal_snapshot_prompt(
-                goal,
-            ))
-        }
+        let mode = ForgeGoalModeStore::new(self.db.clone())
+            .mode_for_goal(thread_id, &goal.goal_id)
+            .await?;
+        Ok(crate::runtime::goal::prompts::active_goal_snapshot_prompt_for_mode(goal, mode))
     }
 
     #[cfg(test)]
@@ -1442,6 +1434,37 @@ VALUES (?, ?, ?, ?, ?, 'test', 0, 'idle', 1, 1)
             .unwrap();
         assert!(snapshot.contains("agent_type=reviewer"));
         assert!(snapshot.contains("fork_turns=none"));
+    }
+
+    #[tokio::test]
+    async fn reviewed_goal_appends_review_gate_overlay() {
+        let thread_id = ThreadId::new("goal_runtime_reviewed_prompt");
+        let (_dir, runtime) = runtime_with_thread(&thread_id).await;
+        let goal = runtime
+            .create_goal_with_options(
+                &thread_id,
+                "finish reviewed goal".to_string(),
+                None,
+                CreateGoalOptions {
+                    mode: ThreadGoalMode::Reviewed,
+                },
+            )
+            .await
+            .unwrap();
+
+        let continuation = runtime
+            .continuation_prompt_for_goal(&thread_id, &goal)
+            .await
+            .unwrap();
+        assert!(continuation.contains("Reviewed mode"));
+        assert!(continuation.contains("agent_type=reviewer"));
+
+        let snapshot = runtime
+            .active_goal_snapshot_prompt_for_goal(&thread_id, &goal)
+            .await
+            .unwrap();
+        assert!(snapshot.contains("Reviewed mode"));
+        assert!(snapshot.contains("agent_type=reviewer"));
     }
 
     #[tokio::test]

@@ -1350,6 +1350,11 @@ export async function replayEvents(
   });
 }
 
+export async function replayAllEvents(projectId: string, threadId: string): Promise<BackendRuntimeEvent[]> {
+  const replay = await replayEvents(projectId, threadId, null);
+  return replay.events;
+}
+
 export async function subscribeRuntimeEvents(
   projectId: string,
   threadId: string,
@@ -1763,6 +1768,7 @@ export const exagentClient = {
   renameThread,
   compactThread,
   forkThread,
+  replayAllEvents,
   replayEvents,
   resumeThread,
   saveProviderSettings,

@@ -5,10 +5,12 @@ import {
   importImageFiles,
   listApprovals,
   pickImageFiles,
+  replayAllEvents,
   scanSkillCatalog,
   setThreadGoal,
   submitApprovalDecision
 } from "@/api/exagentClient";
+import type { BackendRuntimeEvent } from "@/types";
 
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn()
@@ -17,6 +19,15 @@ const tauriMocks = vi.hoisted(() => ({
 const dialogMocks = vi.hoisted(() => ({
   open: vi.fn()
 }));
+
+function runtimeEvent(eventId: string): BackendRuntimeEvent {
+  return {
+    event_id: eventId,
+    thread_id: "thread-root",
+    turn_id: "turn-1",
+    kind: { type: "turn_started" }
+  };
+}
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: tauriMocks.invoke
@@ -85,6 +96,29 @@ describe("exagentClient", () => {
     expect(response).toEqual({
       thread_id: "thread-root",
       latest_compaction: { summary: "manual compact summary" }
+    });
+  });
+
+  it("replays runtime events from a single snapshot without chasing newly appended events", async () => {
+    const firstEvent = runtimeEvent("evt_1");
+    const secondEvent = runtimeEvent("evt_2");
+
+    tauriMocks.invoke.mockImplementation(async (_command, args) => {
+      if (args?.afterEventId === null) {
+        return { thread_id: "thread-root", events: [firstEvent, secondEvent] };
+      }
+      throw new Error(`unexpected cursor ${String(args?.afterEventId)}`);
+    });
+
+    const events = await replayAllEvents("project-exagent", "thread-root");
+
+    expect(events).toEqual([firstEvent, secondEvent]);
+    expect(tauriMocks.invoke).toHaveBeenCalledTimes(1);
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("events_replay", {
+      projectId: "project-exagent",
+      threadId: "thread-root",
+      afterEventId: null,
+      includeSnapshot: true
     });
   });
 

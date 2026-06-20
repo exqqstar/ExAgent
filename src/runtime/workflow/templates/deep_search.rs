@@ -708,6 +708,17 @@ impl DeepSearchTemplateRunner {
 
         self.ensure_can_continue(DeepSearchPhaseId::Verify)?;
         if ranked_claims.is_empty() {
+            if phase_counts.sources_extracted == 0 && phase_counts.extract_failed > 0 {
+                return Err(DeepSearchPhaseError::new(
+                    DeepSearchPhaseId::Extract,
+                    " after every selected source failed",
+                    anyhow::anyhow!(
+                        "{} selected source extraction task(s) failed before any claims could be extracted",
+                        phase_counts.extract_failed
+                    ),
+                )
+                .into());
+            }
             self.progress_sink
                 .update_phase_counts("verify", 0, 0, 0)
                 .await;
@@ -1815,7 +1826,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn template_runner_counts_fetch_approval_block_without_failing_run() {
+    async fn template_runner_fails_when_every_extract_item_fails() {
         let runner = Arc::new(MockJsonRunner::new(vec![json_text(&scope(vec![
             SearchAngle {
                 label: "approval".to_string(),
@@ -1843,18 +1854,19 @@ mod tests {
             }]),
         );
 
-        let result = DeepSearchTemplateRunner::new(limits(1, 1, 1, 1, 1), runner.clone())
+        let error = DeepSearchTemplateRunner::new(limits(1, 1, 1, 1, 1), runner.clone())
             .with_source_provider(sources)
             .run("What changed?")
             .await
-            .expect("approval-blocked fetch should degrade");
+            .expect_err("all extract item failures should fail the extract phase");
 
-        assert!(result.report.summary.contains("No verifiable claims"));
-        assert_eq!(result.selected_sources.len(), 1);
-        assert_eq!(result.stats.sources_fetched, 0);
-        assert_eq!(result.stats.approval_blocked, 1);
-        assert_eq!(result.phase_counts.sources_extracted, 0);
-        assert_eq!(result.phase_counts.extract_failed, 1);
+        let phase_error = error
+            .downcast_ref::<DeepSearchPhaseError>()
+            .expect("deep search phase error");
+        assert_eq!(phase_error.phase_id(), DeepSearchPhaseId::Extract);
+        assert!(phase_error
+            .to_string()
+            .contains("after every selected source failed"));
         assert_eq!(runner.labels(), vec!["deep-search:scope"]);
     }
 

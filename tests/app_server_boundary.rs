@@ -21,6 +21,12 @@ use exagent::policy::PolicyMode;
 use exagent::registry::{ToolContext, ToolRegistry};
 use exagent::resolved::{ModelRef, ResolvedCredential, ResolvedModelConfig};
 use exagent::resolver::EnvModelResolver;
+use exagent::runtime::agent_profile::AgentType;
+use exagent::runtime::workflow::{
+    WorkflowFetchOutput, WorkflowFetchRequest, WorkflowFetchStatus, WorkflowSearchRequest,
+    WorkflowSearchResponse, WorkflowSearchResult, WorkflowSourceError, WorkflowSourceFetch,
+    WorkflowSourceSearch,
+};
 use exagent::session::{ApprovalId, ThreadSnapshot, ThreadSource};
 use exagent::tools::ask_user::AskUserTool;
 use exagent::tools::run_command::RunCommandTool;
@@ -29,6 +35,7 @@ use exagent::types::{
     AssistantTurn, ConversationMessage, EventId, LlmCompletion, ReasoningBlock, ReasoningSignature,
     ThreadId, TokenUsage, TokenUsageInfo, ToolCall, ToolResult, ToolStatus, TurnId,
 };
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -46,17 +53,134 @@ struct BlockingSecondTurnLlm {
     calls: Arc<Mutex<usize>>,
 }
 
-struct BlockingWorkflowSearchLlm {
-    second_search_started: Arc<Notify>,
-    release_second_search: Arc<Notify>,
+struct TestWorkflowSourceProvider {
+    searches: Mutex<VecDeque<Result<Vec<WorkflowSearchResult>, WorkflowSourceError>>>,
+    fetches: Mutex<VecDeque<WorkflowFetchOutput>>,
+}
+
+impl TestWorkflowSourceProvider {
+    fn new(searches: Vec<Vec<WorkflowSearchResult>>) -> Self {
+        Self {
+            searches: Mutex::new(VecDeque::from(
+                searches.into_iter().map(Ok).collect::<Vec<_>>(),
+            )),
+            fetches: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    fn source(url: &str, title: &str) -> WorkflowSearchResult {
+        WorkflowSearchResult {
+            title: title.to_string(),
+            url: url.to_string(),
+            snippet: "A deterministic test source.".to_string(),
+            rank: 1,
+            provider: "mock".to_string(),
+        }
+    }
+
+    fn failing(error: &str) -> Self {
+        Self {
+            searches: Mutex::new(VecDeque::from(vec![Err(WorkflowSourceError::Provider(
+                error.to_string(),
+            ))])),
+            fetches: Mutex::new(VecDeque::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl WorkflowSourceSearch for TestWorkflowSourceProvider {
+    async fn search(
+        &self,
+        request: WorkflowSearchRequest,
+    ) -> Result<WorkflowSearchResponse, WorkflowSourceError> {
+        let results = self
+            .searches
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Ok(Vec::new()))?;
+        Ok(WorkflowSearchResponse {
+            query: request.query,
+            provider: "mock".to_string(),
+            results,
+        })
+    }
+}
+
+#[async_trait]
+impl WorkflowSourceFetch for TestWorkflowSourceProvider {
+    async fn fetch(&self, request: WorkflowFetchRequest) -> WorkflowFetchOutput {
+        self.fetches
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| WorkflowFetchOutput {
+                url: request.url,
+                final_url: None,
+                status: WorkflowFetchStatus::Fetched,
+                content: Some("Fetched source text".to_string()),
+                http_status: Some(200),
+                content_type: Some("text/plain".to_string()),
+                body_bytes: Some(19),
+                body_truncated: Some(false),
+                output_truncated: Some(false),
+                policy_decision: Some("allow".to_string()),
+                error: None,
+            })
+    }
+}
+
+struct BlockingWorkflowSearchProvider {
+    inner: TestWorkflowSourceProvider,
+    block_on_call: usize,
+    started: Arc<Notify>,
+    release: Arc<Notify>,
     calls: Arc<Mutex<usize>>,
 }
 
-struct BlockingFirstSearchWorkflowLlm {
-    first_search_started: Arc<Notify>,
-    release_first_search: Arc<Notify>,
-    extract_started: Arc<Notify>,
-    calls: Arc<Mutex<usize>>,
+impl BlockingWorkflowSearchProvider {
+    fn new(
+        searches: Vec<Vec<WorkflowSearchResult>>,
+        block_on_call: usize,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        calls: Arc<Mutex<usize>>,
+    ) -> Self {
+        Self {
+            inner: TestWorkflowSourceProvider::new(searches),
+            block_on_call,
+            started,
+            release,
+            calls,
+        }
+    }
+}
+
+#[async_trait]
+impl WorkflowSourceSearch for BlockingWorkflowSearchProvider {
+    async fn search(
+        &self,
+        request: WorkflowSearchRequest,
+    ) -> Result<WorkflowSearchResponse, WorkflowSourceError> {
+        let call_index = {
+            let mut calls = self.calls.lock().unwrap();
+            *calls = calls.saturating_add(1);
+            *calls
+        };
+        if call_index == self.block_on_call {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.search(request).await
+    }
+}
+
+#[async_trait]
+impl WorkflowSourceFetch for BlockingWorkflowSearchProvider {
+    async fn fetch(&self, request: WorkflowFetchRequest) -> WorkflowFetchOutput {
+        self.inner.fetch(request).await
+    }
 }
 
 struct RecordingOptionsLlm {
@@ -141,155 +265,6 @@ impl LlmClient for BlockingSecondTurnLlm {
         }
         Ok(AssistantTurn {
             text: Some(format!("answer {call_index}")),
-            tool_calls: vec![],
-            reasoning: vec![],
-        }
-        .into_completion())
-    }
-}
-
-#[async_trait]
-impl LlmClient for BlockingWorkflowSearchLlm {
-    async fn complete(
-        &self,
-        _messages: &[ConversationMessage],
-        _tools: &[ToolSpec],
-        _options: &LlmRequestOptions,
-    ) -> Result<LlmCompletion> {
-        let call_index = {
-            let mut calls = self.calls.lock().unwrap();
-            *calls = calls.saturating_add(1);
-            *calls
-        };
-
-        let text = match call_index {
-            1 => serde_json::json!({
-                "question": "Can workflow_read see live search progress?",
-                "summary": "Use two search angles so the second can block.",
-                "angles": [
-                    {
-                        "label": "first",
-                        "query": "first query",
-                        "rationale": "Exercise the first search update."
-                    },
-                    {
-                        "label": "second",
-                        "query": "second query",
-                        "rationale": "Keep the search phase running."
-                    }
-                ]
-            })
-            .to_string(),
-            2 => serde_json::json!({
-                "results": [{
-                    "url": "https://example.com/first",
-                    "title": "First source",
-                    "snippet": "A deterministic source.",
-                    "relevance": "high"
-                }]
-            })
-            .to_string(),
-            3 => {
-                self.second_search_started.notify_one();
-                self.release_second_search.notified().await;
-                serde_json::json!({ "results": [] }).to_string()
-            }
-            4 => serde_json::json!({
-                "source_url": "https://example.com/first",
-                "source_title": "First source",
-                "source_quality": "primary",
-                "claims": []
-            })
-            .to_string(),
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "unexpected workflow search test call {call_index}"
-                ));
-            }
-        };
-
-        Ok(AssistantTurn {
-            text: Some(text),
-            tool_calls: vec![],
-            reasoning: vec![],
-        }
-        .into_completion())
-    }
-}
-
-#[async_trait]
-impl LlmClient for BlockingFirstSearchWorkflowLlm {
-    async fn complete(
-        &self,
-        _messages: &[ConversationMessage],
-        _tools: &[ToolSpec],
-        _options: &LlmRequestOptions,
-    ) -> Result<LlmCompletion> {
-        let call_index = {
-            let mut calls = self.calls.lock().unwrap();
-            *calls = calls.saturating_add(1);
-            *calls
-        };
-
-        let text = match call_index {
-            1 => serde_json::json!({
-                "question": "Can workflow cancellation stop later child work?",
-                "summary": "Use two search angles so cancellation can happen mid-search.",
-                "angles": [
-                    {
-                        "label": "first",
-                        "query": "first query",
-                        "rationale": "The first search blocks while cancellation is requested."
-                    },
-                    {
-                        "label": "second",
-                        "query": "second query",
-                        "rationale": "This search should not start after cancellation."
-                    }
-                ]
-            })
-            .to_string(),
-            2 => {
-                self.first_search_started.notify_one();
-                self.release_first_search.notified().await;
-                serde_json::json!({
-                    "results": [{
-                        "url": "https://example.com/first-cancelled",
-                        "title": "First cancelled source",
-                        "snippet": "A deterministic source.",
-                        "relevance": "high"
-                    }]
-                })
-                .to_string()
-            }
-            3 => serde_json::json!({
-                "results": [{
-                    "url": "https://example.com/second-cancelled",
-                    "title": "Second cancelled source",
-                    "snippet": "A deterministic source.",
-                    "relevance": "high"
-                }]
-            })
-            .to_string(),
-            4 | 5 => {
-                self.extract_started.notify_one();
-                serde_json::json!({
-                    "source_url": format!("https://example.com/extract-{call_index}"),
-                    "source_title": "Extract should not start",
-                    "source_quality": "primary",
-                    "claims": []
-                })
-                .to_string()
-            }
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "unexpected workflow cancellation test call {call_index}"
-                ));
-            }
-        };
-
-        Ok(AssistantTurn {
-            text: Some(text),
             tool_calls: vec![],
             reasoning: vec![],
         }
@@ -4478,7 +4453,7 @@ async fn submit_boundary_op_dispatches_workflow_start_read_and_cancel() {
     let reread = service
         .submit_boundary_op(BoundaryOp::WorkflowRead(WorkflowReadParams {
             workspace_root: None,
-            run_id: started.run_id,
+            run_id: started.run_id.clone(),
         }))
         .await
         .unwrap();
@@ -4509,7 +4484,10 @@ async fn submit_boundary_op_dispatches_workflow_start_read_and_cancel() {
 async fn workflow_cancel_immediately_after_start_is_not_overwritten_by_background_completion() {
     let dir = tempdir().unwrap();
     let question = "Research immediate cancellation";
-    let service = AppServerService::with_llm(
+    let source_provider = Arc::new(TestWorkflowSourceProvider::new(vec![vec![
+        TestWorkflowSourceProvider::source("https://example.com/cancel", "Cancel"),
+    ]]));
+    let service = AppServerService::with_llm_and_workflow_source_provider(
         AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
@@ -4535,21 +4513,6 @@ async fn workflow_cancel_immediately_after_start_is_not_overwritten_by_backgroun
             AssistantTurn {
                 text: Some(
                     serde_json::json!({
-                        "results": [{
-                            "url": "https://example.com/cancel",
-                            "title": "Cancel",
-                            "snippet": "A deterministic test source.",
-                            "relevance": "high"
-                        }]
-                    })
-                    .to_string(),
-                ),
-                tool_calls: vec![],
-                reasoning: vec![],
-            },
-            AssistantTurn {
-                text: Some(
-                    serde_json::json!({
                         "source_url": "https://example.com/cancel",
                         "source_title": "Cancel",
                         "source_quality": "primary",
@@ -4562,6 +4525,7 @@ async fn workflow_cancel_immediately_after_start_is_not_overwritten_by_backgroun
             },
         ])),
         ToolRegistry::new,
+        source_provider,
     );
 
     let response = service
@@ -4611,21 +4575,54 @@ async fn workflow_cancel_while_search_is_running_stops_later_child_agents() {
     let dir = tempdir().unwrap();
     let first_search_started = Arc::new(Notify::new());
     let release_first_search = Arc::new(Notify::new());
-    let extract_started = Arc::new(Notify::new());
-    let calls = Arc::new(Mutex::new(0));
-    let service = AppServerService::with_llm(
+    let source_calls = Arc::new(Mutex::new(0));
+    let source_provider = Arc::new(BlockingWorkflowSearchProvider::new(
+        vec![
+            vec![TestWorkflowSourceProvider::source(
+                "https://example.com/first-cancelled",
+                "First cancelled source",
+            )],
+            vec![TestWorkflowSourceProvider::source(
+                "https://example.com/second-cancelled",
+                "Second cancelled source",
+            )],
+        ],
+        1,
+        first_search_started.clone(),
+        release_first_search.clone(),
+        source_calls.clone(),
+    ));
+    let service = AppServerService::with_llm_and_workflow_source_provider(
         AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         },
-        Box::new(BlockingFirstSearchWorkflowLlm {
-            first_search_started: first_search_started.clone(),
-            release_first_search: release_first_search.clone(),
-            extract_started: extract_started.clone(),
-            calls: calls.clone(),
-        }),
+        Box::new(MockLlm::new(vec![AssistantTurn {
+            text: Some(
+                serde_json::json!({
+                    "question": "Can workflow cancellation stop later child work?",
+                    "summary": "Use two search angles so cancellation can happen mid-search.",
+                    "angles": [
+                        {
+                            "label": "first",
+                            "query": "first query",
+                            "rationale": "The first search blocks while cancellation is requested."
+                        },
+                        {
+                            "label": "second",
+                            "query": "second query",
+                            "rationale": "This search may already be scheduled concurrently."
+                        }
+                    ]
+                })
+                .to_string(),
+            ),
+            tool_calls: vec![],
+            reasoning: vec![],
+        }])),
         ToolRegistry::new,
+        source_provider,
     );
 
     let response = service
@@ -4662,34 +4659,18 @@ async fn workflow_cancel_while_search_is_running_stops_later_child_agents() {
     assert_eq!(cancelled.run.status, WorkflowRunStatus::Cancelled);
 
     release_first_search.notify_one();
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            extract_started.notified()
-        )
-        .await
-        .is_err(),
-        "extract child should not start after workflow cancellation"
-    );
-
     let reread = wait_for_workflow_cancelled_stable(&service, &started.run_id).await;
     assert_eq!(reread.run.status, WorkflowRunStatus::Cancelled);
 
-    let total_calls = *calls.lock().unwrap();
+    let total_calls = *source_calls.lock().unwrap();
     assert!(
-        total_calls < 4,
-        "expected cancellation to stop before extract calls, saw {total_calls} calls"
+        total_calls <= 2,
+        "expected only scheduled search calls before cancellation, saw {total_calls} calls"
     );
     let child_labels = workflow_child_agent_labels(dir.path(), &started.thread_id);
     assert!(
-        child_labels.len() < 4,
-        "expected fewer child agents than scope/search/search/extract, got {child_labels:?}"
-    );
-    assert!(
-        child_labels
-            .iter()
-            .all(|label| !label.contains(":search-0002")),
-        "second search child label should not be created after cancellation: {child_labels:?}"
+        child_labels.len() < 2,
+        "expected no extract child agents, got {child_labels:?}"
     );
     assert!(
         child_labels
@@ -4700,10 +4681,16 @@ async fn workflow_cancel_while_search_is_running_stops_later_child_agents() {
 }
 
 #[tokio::test]
-async fn workflow_start_runs_deep_research_in_background_child_threads() {
+async fn workflow_child_threads_use_research_agent_type_and_complete_deep_research() {
     let dir = tempdir().unwrap();
     let question = "Research whether workflow execution wiring preserves the root shell";
-    let service = AppServerService::with_llm(
+    let source_provider = Arc::new(TestWorkflowSourceProvider::new(vec![vec![
+        TestWorkflowSourceProvider::source(
+            "https://example.com/workflow-shell",
+            "Workflow shell notes",
+        ),
+    ]]));
+    let service = AppServerService::with_llm_and_workflow_source_provider(
         AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
@@ -4729,21 +4716,6 @@ async fn workflow_start_runs_deep_research_in_background_child_threads() {
             AssistantTurn {
                 text: Some(
                     serde_json::json!({
-                        "results": [{
-                            "url": "https://example.com/workflow-shell",
-                            "title": "Workflow shell notes",
-                            "snippet": "A deterministic test source.",
-                            "relevance": "high"
-                        }]
-                    })
-                    .to_string(),
-                ),
-                tool_calls: vec![],
-                reasoning: vec![],
-            },
-            AssistantTurn {
-                text: Some(
-                    serde_json::json!({
                         "source_url": "https://example.com/workflow-shell",
                         "source_title": "Workflow shell notes",
                         "source_quality": "primary",
@@ -4756,6 +4728,7 @@ async fn workflow_start_runs_deep_research_in_background_child_threads() {
             },
         ])),
         ToolRegistry::new,
+        source_provider,
     );
 
     let response = service
@@ -4805,7 +4778,7 @@ async fn workflow_start_runs_deep_research_in_background_child_threads() {
     assert_eq!(read.run.phases[1].completed_count, 1);
     assert_eq!(read.run.phases[2].completed_count, 1);
 
-    assert_eq!(read.run.stats.agent_calls, 3);
+    assert_eq!(read.run.stats.agent_calls, 2);
     assert_eq!(read.run.stats.failed_agent_calls, 0);
     assert_eq!(read.run.stats.total_artifacts, 4);
     assert_eq!(
@@ -4834,7 +4807,7 @@ async fn workflow_start_runs_deep_research_in_background_child_threads() {
         .into_iter()
         .filter(|thread_id| thread_id != started.thread_id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(child_thread_ids.len(), 3);
+    assert_eq!(child_thread_ids.len(), 2);
     for child_thread_id in child_thread_ids {
         let child_thread_id = ThreadId::new(child_thread_id);
         let rollout_paths = exagent::state::rollout::rollout_paths(dir.path(), &child_thread_id);
@@ -4852,6 +4825,7 @@ async fn workflow_start_runs_deep_research_in_background_child_threads() {
         assert_eq!(lineage.root_thread_id, started.thread_id);
         assert_eq!(lineage.depth, 1);
         assert!(lineage.agent_path.starts_with("/root/workflow-"));
+        assert_eq!(lineage.agent_type, Some(AgentType::WorkflowResearch));
         assert_eq!(lineage.agent_role.as_deref(), Some("workflow_json_runner"));
     }
 
@@ -4871,18 +4845,65 @@ async fn workflow_read_reports_live_deep_research_search_progress_before_termina
     let second_search_started = Arc::new(Notify::new());
     let release_second_search = Arc::new(Notify::new());
     let calls = Arc::new(Mutex::new(0));
-    let service = AppServerService::with_llm(
+    let source_provider = Arc::new(BlockingWorkflowSearchProvider::new(
+        vec![
+            vec![TestWorkflowSourceProvider::source(
+                "https://example.com/first",
+                "First source",
+            )],
+            Vec::new(),
+        ],
+        2,
+        second_search_started.clone(),
+        release_second_search.clone(),
+        calls,
+    ));
+    let service = AppServerService::with_llm_and_workflow_source_provider(
         AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         },
-        Box::new(BlockingWorkflowSearchLlm {
-            second_search_started: second_search_started.clone(),
-            release_second_search: release_second_search.clone(),
-            calls,
-        }),
+        Box::new(MockLlm::new(vec![
+            AssistantTurn {
+                text: Some(
+                    serde_json::json!({
+                        "question": "Can workflow_read see live search progress?",
+                        "summary": "Use two search angles so the second can block.",
+                        "angles": [
+                            {
+                                "label": "first",
+                                "query": "first query",
+                                "rationale": "Exercise the first search update."
+                            },
+                            {
+                                "label": "second",
+                                "query": "second query",
+                                "rationale": "Keep the search phase running."
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ),
+                tool_calls: vec![],
+                reasoning: vec![],
+            },
+            AssistantTurn {
+                text: Some(
+                    serde_json::json!({
+                        "source_url": "https://example.com/first",
+                        "source_title": "First source",
+                        "source_quality": "primary",
+                        "claims": []
+                    })
+                    .to_string(),
+                ),
+                tool_calls: vec![],
+                reasoning: vec![],
+            },
+        ])),
         ToolRegistry::new,
+        source_provider,
     );
 
     let response = service
@@ -4982,7 +5003,8 @@ async fn workflow_start_marks_deep_research_failed_when_runner_output_is_invalid
         .as_deref()
         .unwrap_or_default()
         .contains("Deep search failed"));
-    assert_eq!(read.run.stats.agent_calls, 1);
+    assert_eq!(read.run.stats.agent_calls, 2);
+    assert_eq!(read.run.stats.failed_agent_calls, 1);
     assert_eq!(read.run.stats.total_artifacts, 1);
     assert_eq!(read.run.artifacts[0].label, "Error");
     assert_eq!(read.run.phases[0].id, "scope");
@@ -4999,39 +5021,36 @@ async fn workflow_start_marks_deep_research_failed_when_runner_output_is_invalid
 }
 
 #[tokio::test]
-async fn workflow_start_marks_deep_research_search_phase_failed_when_search_output_is_invalid() {
+async fn workflow_start_marks_deep_research_search_phase_failed_when_source_provider_fails() {
     let dir = tempdir().unwrap();
-    let question = "Fail on invalid search output";
-    let service = AppServerService::with_llm(
+    let question = "Fail on host search provider";
+    let source_provider = Arc::new(TestWorkflowSourceProvider::failing(
+        "search provider failed",
+    ));
+    let service = AppServerService::with_llm_and_workflow_source_provider(
         AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         },
-        Box::new(MockLlm::new(vec![
-            AssistantTurn {
-                text: Some(
-                    serde_json::json!({
-                        "question": question,
-                        "summary": "Search one angle.",
-                        "angles": [{
-                            "label": "valid search",
-                            "query": "valid search query",
-                            "rationale": "Exercise invalid search output."
-                        }]
-                    })
-                    .to_string(),
-                ),
-                tool_calls: vec![],
-                reasoning: vec![],
-            },
-            AssistantTurn {
-                text: Some("not json".into()),
-                tool_calls: vec![],
-                reasoning: vec![],
-            },
-        ])),
+        Box::new(MockLlm::new(vec![AssistantTurn {
+            text: Some(
+                serde_json::json!({
+                    "question": question,
+                    "summary": "Search one angle.",
+                    "angles": [{
+                        "label": "valid search",
+                        "query": "valid search query",
+                        "rationale": "Exercise host search provider failure."
+                    }]
+                })
+                .to_string(),
+            ),
+            tool_calls: vec![],
+            reasoning: vec![],
+        }])),
         ToolRegistry::new,
+        source_provider,
     );
 
     let response = service
@@ -5050,16 +5069,16 @@ async fn workflow_start_marks_deep_research_search_phase_failed_when_search_outp
     };
 
     let read = wait_for_workflow_terminal(&service, &started.run_id).await;
-    assert_eq!(read.run.status, WorkflowRunStatus::Failed);
+    assert_eq!(read.run.status, WorkflowRunStatus::Completed);
     assert!(read
         .run
         .report_summary
         .as_deref()
         .unwrap_or_default()
-        .contains("deep search search phase failed"));
-    assert_eq!(read.run.stats.agent_calls, 2);
-    assert_eq!(read.run.stats.total_artifacts, 1);
-    assert_eq!(read.run.artifacts[0].label, "Error");
+        .contains("No usable sources"));
+    assert_eq!(read.run.stats.agent_calls, 1);
+    assert_eq!(read.run.stats.total_artifacts, 4);
+    assert_eq!(read.run.artifacts[0].label, "Report");
     let phase_statuses = read
         .run
         .phases
@@ -5108,13 +5127,18 @@ async fn workflow_read_rejects_missing_run() {
 async fn workflow_read_rejects_wrong_workspace_and_fresh_service_registry() {
     let dir = tempdir().unwrap();
     let other_dir = tempdir().unwrap();
+    let llm_started = Arc::new(Notify::new());
+    let llm_release = Arc::new(Notify::new());
     let service = AppServerService::with_llm(
         AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
             ..AgentConfig::default()
         },
-        Box::new(MockLlm::new(vec![])),
+        Box::new(BlockingLlm {
+            started: llm_started.clone(),
+            release: llm_release.clone(),
+        }),
         ToolRegistry::new,
     );
 
@@ -5131,6 +5155,9 @@ async fn workflow_read_rejects_wrong_workspace_and_fresh_service_registry() {
     let BoundaryOpResponse::WorkflowStarted(started) = started else {
         panic!("expected workflow start response");
     };
+    tokio::time::timeout(std::time::Duration::from_secs(2), llm_started.notified())
+        .await
+        .expect("workflow scope child should start");
 
     let wrong_workspace = service
         .submit_boundary_op(BoundaryOp::WorkflowRead(WorkflowReadParams {
@@ -5155,13 +5182,238 @@ async fn workflow_read_rejects_wrong_workspace_and_fresh_service_registry() {
     let missing_after_restart = fresh_service
         .submit_boundary_op(BoundaryOp::WorkflowRead(WorkflowReadParams {
             workspace_root: None,
-            run_id: started.run_id,
+            run_id: started.run_id.clone(),
         }))
         .await
         .unwrap_err();
     assert!(missing_after_restart
         .to_string()
         .contains("workflow run not found"));
+
+    let _ = service
+        .submit_boundary_op(BoundaryOp::WorkflowCancel(WorkflowCancelParams {
+            workspace_root: None,
+            run_id: started.run_id,
+        }))
+        .await;
+    llm_release.notify_one();
+}
+
+#[tokio::test]
+async fn workflow_read_restores_completed_terminal_run_after_restart() {
+    let dir = tempdir().unwrap();
+    let question = "Persist completed workflow";
+    let source_provider = Arc::new(TestWorkflowSourceProvider::new(vec![vec![
+        TestWorkflowSourceProvider::source("https://example.com/persisted", "Persisted"),
+    ]]));
+    let service = AppServerService::with_llm_and_workflow_source_provider(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![
+            AssistantTurn {
+                text: Some(
+                    serde_json::json!({
+                        "question": question,
+                        "summary": "One source.",
+                        "angles": [{
+                            "label": "persist",
+                            "query": "persist workflow",
+                            "rationale": "Exercise persistence."
+                        }]
+                    })
+                    .to_string(),
+                ),
+                tool_calls: vec![],
+                reasoning: vec![],
+            },
+            AssistantTurn {
+                text: Some(
+                    serde_json::json!({
+                        "source_url": "https://example.com/persisted",
+                        "source_title": "Persisted",
+                        "source_quality": "primary",
+                        "claims": []
+                    })
+                    .to_string(),
+                ),
+                tool_calls: vec![],
+                reasoning: vec![],
+            },
+        ])),
+        ToolRegistry::new,
+        source_provider,
+    );
+
+    let BoundaryOpResponse::WorkflowStarted(started) = service
+        .submit_boundary_op(BoundaryOp::WorkflowStart(WorkflowStartParams {
+            workspace_root: None,
+            cwd: None,
+            template_id: WorkflowTemplateId::DeepResearch,
+            preset_id: WorkflowPresetId::Quick,
+            question: question.into(),
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected workflow start response");
+    };
+    let terminal = wait_for_workflow_terminal(&service, &started.run_id).await;
+    assert_eq!(terminal.run.status, WorkflowRunStatus::Completed);
+
+    let fresh_service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![])),
+        ToolRegistry::new,
+    );
+    let BoundaryOpResponse::WorkflowRead(read) = fresh_service
+        .submit_boundary_op(BoundaryOp::WorkflowRead(WorkflowReadParams {
+            workspace_root: None,
+            run_id: started.run_id,
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected workflow read response");
+    };
+    assert_eq!(read.run.status, WorkflowRunStatus::Completed);
+    assert_eq!(read.run.report_summary, terminal.run.report_summary);
+}
+
+#[tokio::test]
+async fn workflow_read_restores_failed_terminal_run_after_restart() {
+    let dir = tempdir().unwrap();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![AssistantTurn {
+            text: Some("not json".into()),
+            tool_calls: vec![],
+            reasoning: vec![],
+        }])),
+        ToolRegistry::new,
+    );
+
+    let BoundaryOpResponse::WorkflowStarted(started) = service
+        .submit_boundary_op(BoundaryOp::WorkflowStart(WorkflowStartParams {
+            workspace_root: None,
+            cwd: None,
+            template_id: WorkflowTemplateId::DeepResearch,
+            preset_id: WorkflowPresetId::Quick,
+            question: "Persist failed workflow".into(),
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected workflow start response");
+    };
+    let terminal = wait_for_workflow_terminal(&service, &started.run_id).await;
+    assert_eq!(terminal.run.status, WorkflowRunStatus::Failed);
+
+    let fresh_service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![])),
+        ToolRegistry::new,
+    );
+    let BoundaryOpResponse::WorkflowRead(read) = fresh_service
+        .submit_boundary_op(BoundaryOp::WorkflowRead(WorkflowReadParams {
+            workspace_root: None,
+            run_id: started.run_id,
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected workflow read response");
+    };
+    assert_eq!(read.run.status, WorkflowRunStatus::Failed);
+    assert!(read
+        .run
+        .report_summary
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Deep search failed"));
+}
+
+#[tokio::test]
+async fn workflow_read_restores_cancelled_terminal_run_after_restart() {
+    let dir = tempdir().unwrap();
+    let llm_started = Arc::new(Notify::new());
+    let llm_release = Arc::new(Notify::new());
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(BlockingLlm {
+            started: llm_started.clone(),
+            release: llm_release.clone(),
+        }),
+        ToolRegistry::new,
+    );
+
+    let BoundaryOpResponse::WorkflowStarted(started) = service
+        .submit_boundary_op(BoundaryOp::WorkflowStart(WorkflowStartParams {
+            workspace_root: None,
+            cwd: None,
+            template_id: WorkflowTemplateId::DeepResearch,
+            preset_id: WorkflowPresetId::Quick,
+            question: "Persist cancelled workflow".into(),
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected workflow start response");
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), llm_started.notified())
+        .await
+        .expect("workflow child should start");
+    let BoundaryOpResponse::WorkflowCancelled(cancelled) = service
+        .submit_boundary_op(BoundaryOp::WorkflowCancel(WorkflowCancelParams {
+            workspace_root: None,
+            run_id: started.run_id.clone(),
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected workflow cancel response");
+    };
+    assert_eq!(cancelled.run.status, WorkflowRunStatus::Cancelled);
+
+    let fresh_service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(vec![])),
+        ToolRegistry::new,
+    );
+    let BoundaryOpResponse::WorkflowRead(read) = fresh_service
+        .submit_boundary_op(BoundaryOp::WorkflowRead(WorkflowReadParams {
+            workspace_root: None,
+            run_id: started.run_id,
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected workflow read response");
+    };
+    assert_eq!(read.run.status, WorkflowRunStatus::Cancelled);
+    llm_release.notify_one();
 }
 
 #[test]

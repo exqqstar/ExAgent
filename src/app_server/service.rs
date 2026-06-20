@@ -22,6 +22,7 @@ use crate::llm::LlmClient;
 use crate::model::factory::LlmClientFactory;
 use crate::registry::ToolRegistry;
 use crate::resolver::ModelResolver;
+use crate::runtime::workflow::WorkflowSourceProvider;
 
 #[async_trait]
 pub trait AppServerBoundary: Send + Sync {
@@ -148,6 +149,25 @@ impl AppServerService {
                 llm,
                 registry_factory,
                 model_resolver,
+            ),
+        }
+    }
+
+    pub fn with_llm_and_workflow_source_provider<F>(
+        config: AgentConfig,
+        llm: Box<dyn LlmClient>,
+        registry_factory: F,
+        workflow_source_provider: Arc<dyn WorkflowSourceProvider>,
+    ) -> Self
+    where
+        F: Fn() -> ToolRegistry + Send + Sync + 'static,
+    {
+        Self {
+            thread_manager: ThreadManager::with_llm_and_workflow_source_provider(
+                config,
+                llm,
+                registry_factory,
+                workflow_source_provider,
             ),
         }
     }

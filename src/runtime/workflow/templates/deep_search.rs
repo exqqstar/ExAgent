@@ -2,7 +2,9 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -10,16 +12,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::runtime::workflow::agent_runner::{
-    parse_json_object, AgentJsonRequest, AgentJsonRunner,
+    parse_agent_json_response_for_schema, AgentJsonRequest, AgentJsonRunner,
 };
 use crate::runtime::workflow::types::DeepSearchLimits;
 use crate::runtime::workflow::{
-    NoopWorkflowProgressSink, WorkflowCancellation, WorkflowProgressSink,
+    AgentJsonRepair, NoopWorkflowProgressSink, ScheduledAgentOutput, ScheduledAgentTask,
+    UnavailableWorkflowSourceProvider, WorkflowCancellation, WorkflowFetchRequest,
+    WorkflowFetchStatus, WorkflowProgressSink, WorkflowScheduleController, WorkflowScheduler,
+    WorkflowSearchRequest, WorkflowSearchResult, WorkflowSourceProvider,
 };
 
-use super::deep_search_prompts::{
-    extract_prompt, scope_prompt, search_prompt, synthesize_prompt, verify_prompt,
-};
+use super::deep_search_prompts::{extract_prompt, scope_prompt, synthesize_prompt, verify_prompt};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SearchAngle {
@@ -148,11 +151,17 @@ impl DeepSearchStats {
 pub struct DeepSearchPhaseCounts {
     pub scoped_angles: usize,
     pub searched_angles: usize,
+    pub search_failed: usize,
+    pub search_skipped: usize,
     pub search_results: usize,
     pub sources_selected: usize,
     pub sources_extracted: usize,
+    pub extract_failed: usize,
+    pub extract_skipped: usize,
     pub claims_ranked: usize,
     pub verdict_votes: usize,
+    pub verdict_failed: usize,
+    pub verdict_skipped: usize,
     pub synthesized: bool,
 }
 
@@ -257,6 +266,76 @@ impl fmt::Display for DeepSearchCancelled {
 
 impl Error for DeepSearchCancelled {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeepSearchStopReason {
+    TokenBudgetExceeded,
+    RuntimeExceeded,
+}
+
+impl DeepSearchStopReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TokenBudgetExceeded => "token_budget_exceeded",
+            Self::RuntimeExceeded => "runtime_exceeded",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeepSearchStopped {
+    phase_id: DeepSearchPhaseId,
+    reason: DeepSearchStopReason,
+    observed: i64,
+    limit: i64,
+}
+
+impl DeepSearchStopped {
+    pub fn new(
+        phase_id: DeepSearchPhaseId,
+        reason: DeepSearchStopReason,
+        observed: i64,
+        limit: i64,
+    ) -> Self {
+        Self {
+            phase_id,
+            reason,
+            observed,
+            limit,
+        }
+    }
+
+    pub fn phase_id(&self) -> DeepSearchPhaseId {
+        self.phase_id
+    }
+
+    pub fn reason(&self) -> DeepSearchStopReason {
+        self.reason
+    }
+
+    pub fn observed(&self) -> i64 {
+        self.observed
+    }
+
+    pub fn limit(&self) -> i64 {
+        self.limit
+    }
+}
+
+impl fmt::Display for DeepSearchStopped {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "deep search stopped during {}: {} ({} > {})",
+            self.phase_id.as_str(),
+            self.reason.as_str(),
+            self.observed,
+            self.limit
+        )
+    }
+}
+
+impl Error for DeepSearchStopped {}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SelectedSource {
     pub angle_label: String,
@@ -288,6 +367,7 @@ pub struct ClaimVoteSummary {
     pub claim: RankedClaim,
     pub refuted_votes: usize,
     pub non_refuting_or_weak_votes: usize,
+    pub failed_votes: usize,
     pub total_votes: usize,
 }
 
@@ -304,12 +384,115 @@ pub struct AngledSearchResults<'a> {
     pub results: &'a [SearchResultItem],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchPhaseOutput {
+    angle_label: String,
+    output: SearchOutput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExtractPhaseOutput {
+    source: SelectedSource,
+    output: SourceExtractOutput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VerifyPhaseOutput {
+    claim_id: String,
+    verdict: ClaimVerdict,
+}
+
+#[derive(Debug)]
+struct WorkflowBudgetGuard {
+    started_at: Instant,
+    token_budget: Option<i64>,
+    max_runtime: Option<Duration>,
+    tokens_used: std::sync::atomic::AtomicI64,
+}
+
+impl WorkflowBudgetGuard {
+    fn new(limits: DeepSearchLimits) -> Self {
+        Self {
+            started_at: Instant::now(),
+            token_budget: limits.token_budget,
+            max_runtime: limits.max_runtime_secs.map(Duration::from_secs),
+            tokens_used: std::sync::atomic::AtomicI64::new(0),
+        }
+    }
+
+    fn add_tokens(&self, tokens: Option<i64>) {
+        let Some(tokens) = tokens else {
+            return;
+        };
+        self.tokens_used.fetch_add(tokens, Ordering::SeqCst);
+    }
+
+    fn ensure_within_limits(&self, phase_id: DeepSearchPhaseId) -> anyhow::Result<()> {
+        if let Some(max_runtime) = self.max_runtime {
+            if self.started_at.elapsed() >= max_runtime {
+                return Err(DeepSearchStopped::new(
+                    phase_id,
+                    DeepSearchStopReason::RuntimeExceeded,
+                    i64::try_from(self.started_at.elapsed().as_secs()).unwrap_or(i64::MAX),
+                    i64::try_from(max_runtime.as_secs()).unwrap_or(i64::MAX),
+                )
+                .into());
+            }
+        }
+
+        if let Some(token_budget) = self.token_budget {
+            let tokens_used = self.tokens_used.load(Ordering::SeqCst);
+            if tokens_used > token_budget {
+                return Err(DeepSearchStopped::new(
+                    phase_id,
+                    DeepSearchStopReason::TokenBudgetExceeded,
+                    tokens_used,
+                    token_budget,
+                )
+                .into());
+            }
+        }
+
+        Ok(())
+    }
+}
+
+struct DeepSearchBudgetController {
+    guard: Arc<WorkflowBudgetGuard>,
+    phase_id: DeepSearchPhaseId,
+}
+
+impl DeepSearchBudgetController {
+    fn new(guard: Arc<WorkflowBudgetGuard>, phase_id: DeepSearchPhaseId) -> Self {
+        Self { guard, phase_id }
+    }
+}
+
+impl WorkflowScheduleController for DeepSearchBudgetController {
+    fn should_schedule(&self) -> bool {
+        self.guard.ensure_within_limits(self.phase_id).is_ok()
+    }
+
+    fn record_task_tokens(&self, tokens_used: Option<i64>) -> bool {
+        self.guard.add_tokens(tokens_used);
+        self.guard.ensure_within_limits(self.phase_id).is_ok()
+    }
+}
+
+struct ParsedAgentOutput<T> {
+    value: T,
+    tokens_used: Option<i64>,
+}
+
 #[derive(Clone)]
 pub struct DeepSearchTemplateRunner {
     limits: DeepSearchLimits,
     runner: Arc<dyn AgentJsonRunner>,
+    source_provider: Arc<dyn WorkflowSourceProvider>,
+    json_repair: Option<Arc<dyn AgentJsonRepair>>,
     progress_sink: Arc<dyn WorkflowProgressSink>,
     cancellation: WorkflowCancellation,
+    budget_guard: Arc<WorkflowBudgetGuard>,
     run_label: String,
 }
 
@@ -318,8 +501,13 @@ impl DeepSearchTemplateRunner {
         Self {
             limits,
             runner,
+            source_provider: Arc::new(UnavailableWorkflowSourceProvider::new(
+                "workflow source provider is not configured",
+            )),
+            json_repair: None,
             progress_sink: Arc::new(NoopWorkflowProgressSink),
             cancellation: WorkflowCancellation::new(),
+            budget_guard: Arc::new(WorkflowBudgetGuard::new(limits)),
             run_label: "deep-search".to_string(),
         }
     }
@@ -332,8 +520,21 @@ impl DeepSearchTemplateRunner {
         self
     }
 
+    pub fn with_source_provider(
+        mut self,
+        source_provider: Arc<dyn WorkflowSourceProvider>,
+    ) -> Self {
+        self.source_provider = source_provider;
+        self
+    }
+
     pub fn with_progress_sink(mut self, progress_sink: Arc<dyn WorkflowProgressSink>) -> Self {
         self.progress_sink = progress_sink;
+        self
+    }
+
+    pub fn with_json_repair(mut self, json_repair: Arc<dyn AgentJsonRepair>) -> Self {
+        self.json_repair = Some(json_repair);
         self
     }
 
@@ -347,10 +548,15 @@ impl DeepSearchTemplateRunner {
         let mut phase_counts = DeepSearchPhaseCounts::default();
 
         self.declare_progress_phases().await;
-        self.ensure_not_cancelled(DeepSearchPhaseId::Scope)?;
+        self.ensure_can_continue(DeepSearchPhaseId::Scope)?;
         self.progress_sink.start_phase("scope", "Scope", 1).await;
         let scope: ScopeOutput = self
-            .run_agent("scope", scope_prompt(question))
+            .run_agent_in_phase(
+                DeepSearchPhaseId::Scope,
+                "scope",
+                "ScopeOutput",
+                scope_prompt(question),
+            )
             .await
             .map_err(|error| DeepSearchPhaseError::new(DeepSearchPhaseId::Scope, "", error))?;
         phase_counts.scoped_angles = scope.angles.len();
@@ -366,89 +572,121 @@ impl DeepSearchTemplateRunner {
             .cloned()
             .collect();
 
-        self.ensure_not_cancelled(DeepSearchPhaseId::Search)?;
-        if scoped_angles.is_empty() {
-            self.progress_sink
-                .update_phase_counts("search", 0, 0, self.limits.max_angles)
-                .await;
-            self.progress_sink.skip_phase("search").await;
-        } else {
-            self.progress_sink
-                .start_phase("search", "Search", scoped_angles.len())
-                .await;
-        }
-        let mut search_outputs = Vec::new();
-        for (angle_index, angle) in scoped_angles.iter().enumerate() {
-            self.ensure_not_cancelled(DeepSearchPhaseId::Search)?;
-            let output: SearchOutput = self
-                .run_agent(
-                    &format!("search-{number:04}", number = angle_index + 1),
-                    search_prompt(question, angle),
-                )
-                .await
-                .map_err(|error| {
-                    DeepSearchPhaseError::new(
-                        DeepSearchPhaseId::Search,
-                        format!(" for {}", angle.label),
-                        error,
-                    )
-                })?;
-            phase_counts.searched_angles += 1;
-            phase_counts.search_results += output.results.len();
-            self.progress_sink
-                .update_phase_counts("search", phase_counts.searched_angles, 0, 0)
-                .await;
-            search_outputs.push((angle.label.clone(), output));
-        }
-        if phase_counts.searched_angles > 0 {
-            self.progress_sink.complete_phase("search").await;
-        }
-
-        let groups: Vec<_> = search_outputs
+        self.ensure_can_continue(DeepSearchPhaseId::Search)?;
+        let search_budget =
+            DeepSearchBudgetController::new(self.budget_guard.clone(), DeepSearchPhaseId::Search);
+        let search_report = WorkflowScheduler::new(self.limits.max_concurrency)
+            .run_phase_controlled(
+                "search",
+                "Search",
+                scoped_angles
+                    .iter()
+                    .enumerate()
+                    .map(|(angle_index, angle)| {
+                        let label = format!("search-{number:04}", number = angle_index + 1);
+                        self.scheduled_search_task(label, angle.clone())
+                    })
+                    .collect(),
+                self.cancellation.clone(),
+                self.progress_sink.as_ref(),
+                &search_budget,
+            )
+            .await;
+        phase_counts.searched_angles = search_report.outputs.len();
+        phase_counts.search_failed = search_report.failed_agent_calls;
+        phase_counts.search_skipped = search_report.skipped_agent_calls;
+        phase_counts.search_results = search_report
+            .outputs
             .iter()
-            .map(|(angle_label, output)| AngledSearchResults {
-                angle_label,
-                results: &output.results,
+            .map(|output| output.output.results.len())
+            .sum();
+        if self.cancellation.is_cancelled() {
+            return Err(DeepSearchCancelled::new(DeepSearchPhaseId::Search).into());
+        }
+        self.ensure_can_continue(DeepSearchPhaseId::Search)?;
+
+        let groups: Vec<_> = search_report
+            .outputs
+            .iter()
+            .map(|output| AngledSearchResults {
+                angle_label: &output.angle_label,
+                results: &output.output.results,
             })
             .collect();
         let deduped = dedupe_search_results_by_angle(&groups, self.limits.max_sources);
         stats.url_dupes = deduped.url_dupes;
         stats.budget_dropped = deduped.budget_dropped;
-        stats.sources_fetched = deduped.sources.len();
         phase_counts.sources_selected = deduped.sources.len();
 
-        self.ensure_not_cancelled(DeepSearchPhaseId::Extract)?;
+        self.ensure_can_continue(DeepSearchPhaseId::Extract)?;
         if deduped.sources.is_empty() {
             self.progress_sink
                 .update_phase_counts("extract", 0, 0, 0)
                 .await;
             self.progress_sink.skip_phase("extract").await;
-        } else {
             self.progress_sink
-                .start_phase("extract", "Extract", deduped.sources.len())
+                .update_phase_counts("verify", 0, 0, 0)
                 .await;
+            self.progress_sink.skip_phase("verify").await;
+            self.progress_sink
+                .update_phase_counts("synthesize", 0, 0, 1)
+                .await;
+            self.progress_sink.skip_phase("synthesize").await;
+            let report = no_sources_report(question, &stats);
+            return Ok(DeepSearchRunResult {
+                report,
+                stats,
+                selected_sources: deduped.sources,
+                ranked_claims: Vec::new(),
+                aggregated_verdicts: AggregatedVerdicts::default(),
+                phase_counts,
+            });
         }
-        let mut extracted_claims = Vec::new();
-        for (source_index, source) in deduped.sources.iter().enumerate() {
-            self.ensure_not_cancelled(DeepSearchPhaseId::Extract)?;
-            let source_extract: SourceExtractOutput = self
-                .run_agent(
-                    &format!("extract-{number:04}", number = source_index + 1),
-                    extract_prompt(question, source, &source.snippet),
-                )
-                .await
-                .map_err(|error| {
-                    DeepSearchPhaseError::new(
-                        DeepSearchPhaseId::Extract,
-                        format!(" for {}", source.url),
-                        error,
-                    )
-                })?;
-            phase_counts.sources_extracted += 1;
-            self.progress_sink
-                .update_phase_counts("extract", phase_counts.sources_extracted, 0, 0)
-                .await;
 
+        let fetched_sources = Arc::new(AtomicUsize::new(0));
+        let approval_blocked = Arc::new(AtomicUsize::new(0));
+        let extract_budget =
+            DeepSearchBudgetController::new(self.budget_guard.clone(), DeepSearchPhaseId::Extract);
+        let extract_report = WorkflowScheduler::new(self.limits.max_concurrency)
+            .run_phase_controlled(
+                "extract",
+                "Extract",
+                deduped
+                    .sources
+                    .iter()
+                    .enumerate()
+                    .map(|(source_index, source)| {
+                        let label = format!("extract-{number:04}", number = source_index + 1);
+                        self.scheduled_extract_task(
+                            label,
+                            question.to_string(),
+                            source.clone(),
+                            fetched_sources.clone(),
+                            approval_blocked.clone(),
+                        )
+                    })
+                    .collect(),
+                self.cancellation.clone(),
+                self.progress_sink.as_ref(),
+                &extract_budget,
+            )
+            .await;
+        phase_counts.sources_extracted = extract_report.outputs.len();
+        phase_counts.extract_failed = extract_report.failed_agent_calls;
+        phase_counts.extract_skipped = extract_report.skipped_agent_calls;
+        stats.sources_fetched = fetched_sources.load(Ordering::SeqCst);
+        stats.approval_blocked = approval_blocked.load(Ordering::SeqCst);
+        if self.cancellation.is_cancelled() {
+            return Err(DeepSearchCancelled::new(DeepSearchPhaseId::Extract).into());
+        }
+        self.ensure_can_continue(DeepSearchPhaseId::Extract)?;
+
+        let mut extracted_claims = Vec::new();
+        for ExtractPhaseOutput {
+            source,
+            output: source_extract,
+        } in extract_report.outputs
+        {
             let source_url = non_empty_or(&source_extract.source_url, &source.url);
             let source_title = non_empty_or(&source_extract.source_title, &source.title);
             for claim in source_extract.claims {
@@ -462,16 +700,13 @@ impl DeepSearchTemplateRunner {
                 });
             }
         }
-        if phase_counts.sources_extracted > 0 {
-            self.progress_sink.complete_phase("extract").await;
-        }
         stats.claims_extracted = extracted_claims.len();
 
         let ranked_claims = rank_claims(extracted_claims, self.limits.max_claims);
         stats.budget_dropped += stats.claims_extracted.saturating_sub(ranked_claims.len());
         phase_counts.claims_ranked = ranked_claims.len();
 
-        self.ensure_not_cancelled(DeepSearchPhaseId::Verify)?;
+        self.ensure_can_continue(DeepSearchPhaseId::Verify)?;
         if ranked_claims.is_empty() {
             self.progress_sink
                 .update_phase_counts("verify", 0, 0, 0)
@@ -493,49 +728,62 @@ impl DeepSearchTemplateRunner {
         }
 
         let planned_verdict_votes = ranked_claims.len() * self.limits.votes_per_claim;
+        let mut verdicts_by_claim_id: BTreeMap<String, Vec<ClaimVerdict>> = BTreeMap::new();
         if planned_verdict_votes == 0 {
             self.progress_sink
                 .update_phase_counts("verify", 0, 0, 0)
                 .await;
             self.progress_sink.skip_phase("verify").await;
         } else {
-            self.progress_sink
-                .start_phase("verify", "Verify", planned_verdict_votes)
-                .await;
-        }
-        let mut verdicts_by_claim_id: BTreeMap<String, Vec<ClaimVerdict>> = BTreeMap::new();
-        for (claim_index, claim) in ranked_claims.iter().enumerate() {
-            for vote_index in 0..self.limits.votes_per_claim {
-                self.ensure_not_cancelled(DeepSearchPhaseId::Verify)?;
-                let verdict: ClaimVerdict = self
-                    .run_agent(
-                        &format!(
+            let verify_tasks = ranked_claims
+                .iter()
+                .enumerate()
+                .flat_map(|(claim_index, claim)| {
+                    (0..self.limits.votes_per_claim).map(move |vote_index| {
+                        let label = format!(
                             "verify-{claim_number:04}-vote-{vote_number:04}",
                             claim_number = claim_index + 1,
                             vote_number = vote_index + 1
-                        ),
-                        verify_prompt(question, claim, &verification_evidence_text(claim)),
-                    )
-                    .await
-                    .map_err(|error| {
-                        DeepSearchPhaseError::new(
-                            DeepSearchPhaseId::Verify,
-                            format!(" for {}", claim.id),
-                            error,
+                        );
+                        let prompt =
+                            verify_prompt(question, claim, &verification_evidence_text(claim));
+                        let claim_id = claim.id.clone();
+                        self.scheduled_agent_task::<ClaimVerdict, _>(
+                            label,
+                            "ClaimVerdict",
+                            prompt,
+                            move |verdict| VerifyPhaseOutput { claim_id, verdict },
                         )
-                    })?;
-                phase_counts.verdict_votes += 1;
-                self.progress_sink
-                    .update_phase_counts("verify", phase_counts.verdict_votes, 0, 0)
-                    .await;
-                verdicts_by_claim_id
-                    .entry(claim.id.clone())
-                    .or_default()
-                    .push(verdict);
+                    })
+                })
+                .collect();
+            let verify_budget = DeepSearchBudgetController::new(
+                self.budget_guard.clone(),
+                DeepSearchPhaseId::Verify,
+            );
+            let verify_report = WorkflowScheduler::new(self.limits.max_concurrency)
+                .run_phase_controlled(
+                    "verify",
+                    "Verify",
+                    verify_tasks,
+                    self.cancellation.clone(),
+                    self.progress_sink.as_ref(),
+                    &verify_budget,
+                )
+                .await;
+            phase_counts.verdict_votes = verify_report.outputs.len();
+            phase_counts.verdict_failed = verify_report.failed_agent_calls;
+            phase_counts.verdict_skipped = verify_report.skipped_agent_calls;
+            if self.cancellation.is_cancelled() {
+                return Err(DeepSearchCancelled::new(DeepSearchPhaseId::Verify).into());
             }
-        }
-        if phase_counts.verdict_votes > 0 {
-            self.progress_sink.complete_phase("verify").await;
+            self.ensure_can_continue(DeepSearchPhaseId::Verify)?;
+            for output in verify_report.outputs {
+                verdicts_by_claim_id
+                    .entry(output.claim_id)
+                    .or_default()
+                    .push(output.verdict);
+            }
         }
 
         stats.claims_verified = verdicts_by_claim_id
@@ -546,11 +794,12 @@ impl DeepSearchTemplateRunner {
             &ranked_claims,
             &verdicts_by_claim_id,
             self.limits.refutations_required,
+            self.limits.votes_per_claim,
         );
         stats.survived = aggregated_verdicts.survived.len();
         stats.killed = aggregated_verdicts.killed.len();
 
-        self.ensure_not_cancelled(DeepSearchPhaseId::Synthesize)?;
+        self.ensure_can_continue(DeepSearchPhaseId::Synthesize)?;
         if !ranked_claims.is_empty()
             && aggregated_verdicts.survived.is_empty()
             && aggregated_verdicts.killed.len() == ranked_claims.len()
@@ -570,14 +819,36 @@ impl DeepSearchTemplateRunner {
             });
         }
 
+        if !ranked_claims.is_empty()
+            && aggregated_verdicts.survived.is_empty()
+            && aggregated_verdicts.killed.is_empty()
+            && aggregated_verdicts.unverified.len() == ranked_claims.len()
+        {
+            self.progress_sink
+                .update_phase_counts("synthesize", 0, 0, 1)
+                .await;
+            self.progress_sink.skip_phase("synthesize").await;
+            let report = all_unverified_report(question, &aggregated_verdicts.unverified, &stats);
+            return Ok(DeepSearchRunResult {
+                report,
+                stats,
+                selected_sources: deduped.sources,
+                ranked_claims,
+                aggregated_verdicts,
+                phase_counts,
+            });
+        }
+
         let survived_claims = summaries_to_claims(&aggregated_verdicts.survived);
         let killed_claims = summaries_to_claims(&aggregated_verdicts.killed);
         self.progress_sink
             .start_phase("synthesize", "Synthesize", 1)
             .await;
         let synthesis = self
-            .run_agent::<DeepSearchReport>(
+            .run_agent_in_phase::<DeepSearchReport>(
+                DeepSearchPhaseId::Synthesize,
                 "synthesize",
+                "DeepSearchReport",
                 synthesize_prompt(question, &survived_claims, &killed_claims),
             )
             .await;
@@ -606,7 +877,7 @@ impl DeepSearchTemplateRunner {
             }
         };
 
-        self.ensure_not_cancelled(DeepSearchPhaseId::Synthesize)?;
+        self.ensure_can_continue(DeepSearchPhaseId::Synthesize)?;
         Ok(DeepSearchRunResult {
             report,
             stats,
@@ -637,31 +908,233 @@ impl DeepSearchTemplateRunner {
             .await;
     }
 
-    fn ensure_not_cancelled(&self, phase_id: DeepSearchPhaseId) -> anyhow::Result<()> {
+    fn ensure_can_continue(&self, phase_id: DeepSearchPhaseId) -> anyhow::Result<()> {
         if self.cancellation.is_cancelled() {
             return Err(DeepSearchCancelled::new(phase_id).into());
         }
+        self.budget_guard.ensure_within_limits(phase_id)?;
         Ok(())
     }
 
-    async fn run_agent<T>(&self, label: &str, prompt: String) -> anyhow::Result<T>
+    #[cfg(test)]
+    async fn run_agent<T>(
+        &self,
+        label: &str,
+        schema_name: &str,
+        prompt: String,
+    ) -> anyhow::Result<T>
     where
         T: DeserializeOwned,
     {
-        let response = self
-            .runner
-            .run_json(AgentJsonRequest {
-                label: format!("{}:{label}", self.run_label),
-                prompt,
-                schema_hint: Some(json!({"type": "object"})),
-            })
-            .await?;
-        if response.value.is_object() {
-            if let Ok(parsed) = serde_json::from_value(response.value.clone()) {
-                return Ok(parsed);
+        Ok(self
+            .run_agent_output(label, schema_name, prompt)
+            .await?
+            .value)
+    }
+
+    async fn run_agent_in_phase<T>(
+        &self,
+        phase_id: DeepSearchPhaseId,
+        label: &str,
+        schema_name: &str,
+        prompt: String,
+    ) -> anyhow::Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let output = self.run_agent_output(label, schema_name, prompt).await?;
+        self.budget_guard.add_tokens(output.tokens_used);
+        self.ensure_can_continue(phase_id)?;
+        Ok(output.value)
+    }
+
+    async fn run_agent_output<T>(
+        &self,
+        label: &str,
+        schema_name: &str,
+        prompt: String,
+    ) -> anyhow::Result<ParsedAgentOutput<T>>
+    where
+        T: DeserializeOwned,
+    {
+        run_agent_with_runner(
+            self.runner.clone(),
+            self.json_repair.clone(),
+            self.run_label.clone(),
+            label,
+            schema_name,
+            prompt,
+        )
+        .await
+    }
+
+    fn scheduled_search_task(
+        &self,
+        label: String,
+        angle: SearchAngle,
+    ) -> ScheduledAgentTask<SearchPhaseOutput> {
+        let source_provider = self.source_provider.clone();
+        let max_results = self.limits.max_sources;
+        ScheduledAgentTask::new(move |_| async move {
+            let response = source_provider
+                .search(WorkflowSearchRequest {
+                    query: angle.query.clone(),
+                    max_results,
+                })
+                .await?;
+            let output = SearchOutput {
+                results: response
+                    .results
+                    .into_iter()
+                    .map(search_result_item_from_workflow)
+                    .collect(),
+            };
+            let _ = label;
+            Ok(ScheduledAgentOutput::new(SearchPhaseOutput {
+                angle_label: angle.label,
+                output,
+            }))
+        })
+    }
+
+    fn scheduled_extract_task(
+        &self,
+        label: String,
+        question: String,
+        source: SelectedSource,
+        fetched_sources: Arc<AtomicUsize>,
+        approval_blocked: Arc<AtomicUsize>,
+    ) -> ScheduledAgentTask<ExtractPhaseOutput> {
+        let source_provider = self.source_provider.clone();
+        let runner = self.runner.clone();
+        let json_repair = self.json_repair.clone();
+        let run_label = self.run_label.clone();
+        ScheduledAgentTask::new(move |_| async move {
+            let fetch = source_provider
+                .fetch(WorkflowFetchRequest {
+                    url: source.url.clone(),
+                    timeout_secs: None,
+                })
+                .await;
+            match fetch.status {
+                WorkflowFetchStatus::Fetched => {
+                    fetched_sources.fetch_add(1, Ordering::SeqCst);
+                }
+                WorkflowFetchStatus::ApprovalBlocked => {
+                    approval_blocked.fetch_add(1, Ordering::SeqCst);
+                    anyhow::bail!(
+                        "{}",
+                        fetch
+                            .error
+                            .unwrap_or_else(|| "source fetch requires approval".to_string())
+                    );
+                }
+                WorkflowFetchStatus::Failed => {
+                    anyhow::bail!(
+                        "{}",
+                        fetch
+                            .error
+                            .unwrap_or_else(|| "source fetch failed".to_string())
+                    );
+                }
             }
+
+            let source_text = fetch.content.unwrap_or_default();
+            let prompt = extract_prompt(&question, &source, &source_text);
+            let output = run_agent_with_runner::<SourceExtractOutput>(
+                runner,
+                json_repair,
+                run_label,
+                &label,
+                "SourceExtractOutput",
+                prompt,
+            )
+            .await?;
+            let parsed = ExtractPhaseOutput {
+                source,
+                output: output.value,
+            };
+            Ok(scheduled_output_with_optional_tokens(
+                parsed,
+                output.tokens_used,
+            ))
+        })
+    }
+
+    fn scheduled_agent_task<T, U>(
+        &self,
+        label: String,
+        schema_name: &'static str,
+        prompt: String,
+        map_output: impl FnOnce(T) -> U + Send + 'static,
+    ) -> ScheduledAgentTask<U>
+    where
+        T: DeserializeOwned + Send + 'static,
+        U: Send + 'static,
+    {
+        let runner = self.runner.clone();
+        let json_repair = self.json_repair.clone();
+        let run_label = self.run_label.clone();
+        ScheduledAgentTask::new(move |_| async move {
+            let parsed = run_agent_with_runner::<T>(
+                runner,
+                json_repair,
+                run_label,
+                &label,
+                schema_name,
+                prompt,
+            )
+            .await?;
+            Ok(scheduled_output_with_optional_tokens(
+                map_output(parsed.value),
+                parsed.tokens_used,
+            ))
+        })
+    }
+}
+
+async fn run_agent_with_runner<T>(
+    runner: Arc<dyn AgentJsonRunner>,
+    json_repair: Option<Arc<dyn AgentJsonRepair>>,
+    run_label: String,
+    label: &str,
+    schema_name: &str,
+    prompt: String,
+) -> anyhow::Result<ParsedAgentOutput<T>>
+where
+    T: DeserializeOwned,
+{
+    let response = runner
+        .run_json(AgentJsonRequest {
+            label: format!("{run_label}:{label}"),
+            prompt,
+            schema_hint: Some(json!({"type": "object"})),
+        })
+        .await?;
+    if response.value.is_object() {
+        if let Ok(parsed) = serde_json::from_value(response.value.clone()) {
+            return Ok(ParsedAgentOutput {
+                value: parsed,
+                tokens_used: response.tokens_used,
+            });
         }
-        parse_json_object(&response.text)
+    }
+    let value =
+        parse_agent_json_response_for_schema(schema_name, &response.text, json_repair.as_deref())
+            .await?;
+    Ok(ParsedAgentOutput {
+        value,
+        tokens_used: response.tokens_used,
+    })
+}
+
+fn scheduled_output_with_optional_tokens<T>(
+    value: T,
+    tokens_used: Option<i64>,
+) -> ScheduledAgentOutput<T> {
+    match tokens_used {
+        Some(tokens_used) => ScheduledAgentOutput::with_tokens(value, tokens_used),
+        None => ScheduledAgentOutput::new(value),
     }
 }
 
@@ -696,6 +1169,23 @@ pub fn normalize_source_url(source: &str) -> Option<String> {
     url.set_path(&path);
 
     Some(url.to_string().trim_end_matches('/').to_string())
+}
+
+fn search_result_item_from_workflow(result: WorkflowSearchResult) -> SearchResultItem {
+    SearchResultItem {
+        url: result.url,
+        title: result.title,
+        snippet: result.snippet,
+        relevance: search_relevance_for_rank(result.rank),
+    }
+}
+
+fn search_relevance_for_rank(rank: usize) -> SearchRelevance {
+    match rank {
+        0..=3 => SearchRelevance::High,
+        4..=8 => SearchRelevance::Medium,
+        _ => SearchRelevance::Low,
+    }
 }
 
 pub fn dedupe_search_results(
@@ -765,6 +1255,7 @@ pub fn aggregate_verdicts(
     claims: &[RankedClaim],
     verdicts_by_claim_id: &BTreeMap<String, Vec<ClaimVerdict>>,
     refutations_required: usize,
+    expected_votes_per_claim: usize,
 ) -> AggregatedVerdicts {
     let threshold = refutations_required.max(1);
     let mut aggregated = AggregatedVerdicts::default();
@@ -787,12 +1278,13 @@ pub fn aggregate_verdicts(
             claim: claim.clone(),
             refuted_votes,
             non_refuting_or_weak_votes,
+            failed_votes: expected_votes_per_claim.saturating_sub(verdicts.len()),
             total_votes: verdicts.len(),
         };
 
         if refuted_votes >= threshold {
             aggregated.killed.push(summary);
-        } else if non_refuting_or_weak_votes > 0 {
+        } else if verdicts.len() >= threshold {
             aggregated.survived.push(summary);
         } else {
             aggregated.unverified.push(summary);
@@ -809,6 +1301,18 @@ pub fn no_claims_report(question: &str, stats: &DeepSearchStats) -> DeepSearchRe
         caveats: vec![format!(
             "Deep search extracted {} claims from {} fetched sources.",
             stats.claims_extracted, stats.sources_fetched
+        )],
+        open_questions: stats_open_questions(stats),
+    }
+}
+
+pub fn no_sources_report(question: &str, stats: &DeepSearchStats) -> DeepSearchReport {
+    DeepSearchReport {
+        summary: format!("No usable sources were found for: {question}"),
+        findings: Vec::new(),
+        caveats: vec![format!(
+            "Deep search found 0 usable sources; {} search results were dropped by duplicate or budget filters.",
+            stats.budget_dropped
         )],
         open_questions: stats_open_questions(stats),
     }
@@ -833,6 +1337,32 @@ pub fn all_refuted_report(
         caveats: vec![format!(
             "No claims survived verification; {} of {} verified claims were killed.",
             stats.killed, stats.claims_verified
+        )],
+        open_questions: stats_open_questions(stats),
+    }
+}
+
+pub fn all_unverified_report(
+    question: &str,
+    unverified: &[ClaimVoteSummary],
+    stats: &DeepSearchStats,
+) -> DeepSearchReport {
+    DeepSearchReport {
+        summary: format!("Candidate claims did not reach verification quorum for: {question}"),
+        findings: unverified
+            .iter()
+            .map(|summary| {
+                format!(
+                    "Unverified: {} ({} valid votes, {} failed or missing votes)",
+                    summary.claim.claim.claim, summary.total_votes, summary.failed_votes
+                )
+            })
+            .collect(),
+        caveats: vec![format!(
+            "{} candidate claims lacked enough successful verifier votes to confirm or refute.",
+            unverified
+                .len()
+                .max(stats.claims_extracted.saturating_sub(stats.claims_verified))
         )],
         open_questions: stats_open_questions(stats),
     }
@@ -943,11 +1473,15 @@ mod tests {
     use crate::runtime::workflow::agent_runner::{
         AgentJsonRequest, AgentJsonResponse, AgentJsonRunner,
     };
+    use crate::runtime::workflow::json_repair::{AgentJsonParseFailure, AgentJsonRepair};
     use crate::runtime::workflow::progress::{
         RecordingWorkflowProgressSink, WorkflowProgressEvent,
     };
     use crate::runtime::workflow::types::DeepSearchLimits;
-    use crate::runtime::workflow::WorkflowCancellation;
+    use crate::runtime::workflow::{
+        WorkflowCancellation, WorkflowFetchOutput, WorkflowSearchResponse, WorkflowSourceError,
+        WorkflowSourceFetch, WorkflowSourceSearch,
+    };
 
     fn result(url: &str, title: &str) -> SearchResultItem {
         SearchResultItem {
@@ -956,6 +1490,16 @@ mod tests {
             snippet: "snippet".to_string(),
             relevance: SearchRelevance::High,
         }
+    }
+
+    fn source_provider(searches: Vec<Vec<SearchResultItem>>) -> Arc<MockWorkflowSourceProvider> {
+        Arc::new(MockWorkflowSourceProvider::new(searches))
+    }
+
+    fn failing_source_provider(error: &str) -> Arc<MockWorkflowSourceProvider> {
+        Arc::new(MockWorkflowSourceProvider::new_results(vec![Err(
+            WorkflowSourceError::Provider(error.to_string()),
+        )]))
     }
 
     #[tokio::test]
@@ -973,12 +1517,6 @@ mod tests {
                     rationale: "over cap".to_string(),
                 },
             ])),
-            json_text(&SearchOutput {
-                results: vec![
-                    result("https://example.com/a", "A"),
-                    result("https://example.com/b", "B"),
-                ],
-            }),
             json_text(&SourceExtractOutput {
                 source_url: "https://example.com/a".to_string(),
                 source_title: "A".to_string(),
@@ -1013,8 +1551,13 @@ mod tests {
             }),
         ]));
         let limits = limits(1, 2, 2, 2, 2);
+        let sources = source_provider(vec![vec![
+            result("https://example.com/a", "A"),
+            result("https://example.com/b", "B"),
+        ]]);
 
         let result = DeepSearchTemplateRunner::new(limits, runner.clone())
+            .with_source_provider(sources)
             .with_run_label("unit")
             .run("What changed?")
             .await
@@ -1052,7 +1595,6 @@ mod tests {
             labels,
             vec![
                 "unit:scope",
-                "unit:search-0001",
                 "unit:extract-0001",
                 "unit:extract-0002",
                 "unit:verify-0001-vote-0001",
@@ -1076,7 +1618,7 @@ mod tests {
         ]));
 
         let parsed: ScopeOutput = DeepSearchTemplateRunner::new(limits(1, 1, 1, 1, 1), runner)
-            .run_agent("scope", "ignored".to_string())
+            .run_agent("scope", "ScopeOutput", "ignored".to_string())
             .await
             .expect("parse structured value");
 
@@ -1084,30 +1626,275 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn template_runner_tags_search_failure_with_typed_phase_despite_extract_word_in_label() {
+    async fn template_runner_repairs_invalid_json_once_before_failing_phase() {
         let runner = Arc::new(MockJsonRunner::new(vec![
-            json_text(&scope(vec![SearchAngle {
+            "{\"question\":\"broken\",}".to_string()
+        ]));
+        let repair = Arc::new(StaticJsonRepair::new(vec![json_text(&scope(Vec::new()))]));
+
+        let result = DeepSearchTemplateRunner::new(limits(1, 1, 1, 1, 1), runner)
+            .with_json_repair(repair.clone())
+            .run("What changed?")
+            .await
+            .expect("scope JSON should be repaired");
+
+        assert!(result.report.summary.contains("No usable sources"));
+        assert_eq!(repair.schema_names(), vec!["ScopeOutput"]);
+    }
+
+    #[tokio::test]
+    async fn template_runner_counts_search_item_failure_without_failing_run() {
+        let runner = Arc::new(MockJsonRunner::new(vec![json_text(&scope(vec![
+            SearchAngle {
                 label: "extract phase bait".to_string(),
                 query: "search query".to_string(),
                 rationale: "why".to_string(),
-            }])),
-            "not json".to_string(),
-        ]));
+            },
+        ]))]));
+        let sources = failing_source_provider("search provider failed");
 
-        let error = DeepSearchTemplateRunner::new(limits(1, 1, 1, 1, 1), runner)
+        let result = DeepSearchTemplateRunner::new(limits(1, 1, 1, 1, 1), runner)
+            .with_source_provider(sources)
             .run("What changed?")
             .await
-            .expect_err("invalid search output should fail");
+            .expect("failed host search item should be counted and degraded");
 
-        let phase_error = error
-            .downcast_ref::<DeepSearchPhaseError>()
-            .expect("template failure should carry typed phase error");
-        assert_eq!(phase_error.phase_id(), DeepSearchPhaseId::Search);
-        assert_eq!(phase_error.phase_id().as_str(), "search");
-        assert!(error
-            .to_string()
-            .contains("deep search search phase failed"));
-        assert!(error.to_string().contains("extract phase bait"));
+        assert!(result.report.summary.contains("No usable sources"));
+        assert_eq!(result.phase_counts.searched_angles, 0);
+        assert_eq!(result.phase_counts.search_failed, 1);
+        assert_eq!(result.phase_counts.search_results, 0);
+        assert_eq!(result.selected_sources.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn template_runner_stops_when_token_budget_is_exceeded() {
+        let scoped = scope(vec![SearchAngle {
+            label: "budget".to_string(),
+            query: "budget query".to_string(),
+            rationale: "why".to_string(),
+        }]);
+        let runner = Arc::new(MockJsonRunner::new_agent_responses(vec![
+            agent_response_with_tokens(json_text(&scoped), 10),
+        ]));
+        let mut limits = limits(1, 1, 1, 1, 1);
+        limits.token_budget = Some(5);
+
+        let error = DeepSearchTemplateRunner::new(limits, runner.clone())
+            .run("What changed?")
+            .await
+            .expect_err("token budget should stop workflow");
+
+        let stopped = error
+            .chain()
+            .find_map(|source| source.downcast_ref::<DeepSearchStopped>())
+            .expect("typed stop error");
+        assert_eq!(stopped.phase_id(), DeepSearchPhaseId::Scope);
+        assert_eq!(stopped.reason(), DeepSearchStopReason::TokenBudgetExceeded);
+        assert_eq!(stopped.observed(), 10);
+        assert_eq!(stopped.limit(), 5);
+        assert_eq!(runner.labels(), vec!["deep-search:scope"]);
+    }
+
+    #[tokio::test]
+    async fn template_runner_stops_scheduling_when_token_budget_is_exceeded_mid_phase() {
+        let scoped = scope(vec![SearchAngle {
+            label: "budget".to_string(),
+            query: "budget query".to_string(),
+            rationale: "why".to_string(),
+        }]);
+        let runner = Arc::new(MockJsonRunner::new_agent_responses(vec![
+            agent_response_with_tokens(json_text(&scoped), 1),
+            agent_response_with_tokens(
+                json_text(&SourceExtractOutput {
+                    source_url: "https://example.com/a".to_string(),
+                    source_title: "A".to_string(),
+                    source_quality: SourceQuality::High,
+                    publish_date: None,
+                    claims: vec![ExtractedClaim {
+                        claim: "Costly claim".to_string(),
+                        quote: "Quote".to_string(),
+                        importance: ClaimImportance::High,
+                    }],
+                }),
+                10,
+            ),
+        ]));
+        let mut limits = limits(1, 2, 1, 1, 1);
+        limits.token_budget = Some(5);
+        let sources = source_provider(vec![vec![
+            result("https://example.com/a", "A"),
+            result("https://example.com/b", "B"),
+        ]]);
+
+        let error = DeepSearchTemplateRunner::new(limits, runner.clone())
+            .with_source_provider(sources)
+            .run("What changed?")
+            .await
+            .expect_err("token budget should stop queued extract work");
+
+        let stopped = error
+            .chain()
+            .find_map(|source| source.downcast_ref::<DeepSearchStopped>())
+            .expect("typed stop error");
+        assert_eq!(stopped.phase_id(), DeepSearchPhaseId::Extract);
+        assert_eq!(stopped.reason(), DeepSearchStopReason::TokenBudgetExceeded);
+        assert_eq!(stopped.observed(), 11);
+        assert_eq!(stopped.limit(), 5);
+        assert_eq!(
+            runner.labels(),
+            vec!["deep-search:scope", "deep-search:extract-0001"]
+        );
+    }
+
+    #[tokio::test]
+    async fn template_runner_stops_immediately_when_runtime_limit_is_exceeded() {
+        let runner = Arc::new(MockJsonRunner::new(Vec::new()));
+        let mut limits = limits(1, 1, 1, 1, 1);
+        limits.max_runtime_secs = Some(0);
+
+        let error = DeepSearchTemplateRunner::new(limits, runner.clone())
+            .run("What changed?")
+            .await
+            .expect_err("runtime limit should stop workflow");
+
+        let stopped = error
+            .downcast_ref::<DeepSearchStopped>()
+            .expect("typed stop error");
+        assert_eq!(stopped.phase_id(), DeepSearchPhaseId::Scope);
+        assert_eq!(stopped.reason(), DeepSearchStopReason::RuntimeExceeded);
+        assert_eq!(stopped.limit(), 0);
+        assert!(runner.labels().is_empty());
+    }
+
+    #[tokio::test]
+    async fn template_runner_counts_extract_item_failure_without_dropping_successes() {
+        let runner = Arc::new(MockJsonRunner::new(vec![
+            json_text(&scope(vec![SearchAngle {
+                label: "current".to_string(),
+                query: "current query".to_string(),
+                rationale: "why".to_string(),
+            }])),
+            "not json".to_string(),
+            json_text(&SourceExtractOutput {
+                source_url: "https://example.com/good".to_string(),
+                source_title: "Good".to_string(),
+                source_quality: SourceQuality::High,
+                publish_date: None,
+                claims: vec![ExtractedClaim {
+                    claim: "Surviving claim".to_string(),
+                    quote: "Quote".to_string(),
+                    importance: ClaimImportance::High,
+                }],
+            }),
+            json_text(&verdict(false, VerdictConfidence::High)),
+            json_text(&DeepSearchReport {
+                summary: "Synthesized partial answer".to_string(),
+                findings: vec!["Finding".to_string()],
+                caveats: Vec::new(),
+                open_questions: Vec::new(),
+            }),
+        ]));
+        let sources = source_provider(vec![vec![
+            result("https://example.com/bad", "Bad"),
+            result("https://example.com/good", "Good"),
+        ]]);
+
+        let result = DeepSearchTemplateRunner::new(limits(1, 2, 1, 1, 1), runner)
+            .with_source_provider(sources)
+            .run("What changed?")
+            .await
+            .expect("invalid extract item should be counted and degraded");
+
+        assert_eq!(result.selected_sources.len(), 2);
+        assert_eq!(result.stats.sources_fetched, 2);
+        assert_eq!(result.stats.claims_extracted, 1);
+        assert_eq!(result.phase_counts.sources_extracted, 1);
+        assert_eq!(result.phase_counts.extract_failed, 1);
+        assert_eq!(result.phase_counts.claims_ranked, 1);
+        assert_eq!(result.report.summary, "Synthesized partial answer");
+    }
+
+    #[tokio::test]
+    async fn template_runner_counts_fetch_approval_block_without_failing_run() {
+        let runner = Arc::new(MockJsonRunner::new(vec![json_text(&scope(vec![
+            SearchAngle {
+                label: "approval".to_string(),
+                query: "approval query".to_string(),
+                rationale: "why".to_string(),
+            },
+        ]))]));
+        let sources = Arc::new(
+            MockWorkflowSourceProvider::new(vec![vec![result(
+                "https://example.com/blocked",
+                "Blocked",
+            )]])
+            .with_fetches(vec![WorkflowFetchOutput {
+                url: "https://example.com/blocked".to_string(),
+                final_url: None,
+                status: WorkflowFetchStatus::ApprovalBlocked,
+                content: None,
+                http_status: None,
+                content_type: None,
+                body_bytes: None,
+                body_truncated: None,
+                output_truncated: None,
+                policy_decision: Some("review_required".to_string()),
+                error: Some("network fetch requires approval".to_string()),
+            }]),
+        );
+
+        let result = DeepSearchTemplateRunner::new(limits(1, 1, 1, 1, 1), runner.clone())
+            .with_source_provider(sources)
+            .run("What changed?")
+            .await
+            .expect("approval-blocked fetch should degrade");
+
+        assert!(result.report.summary.contains("No verifiable claims"));
+        assert_eq!(result.selected_sources.len(), 1);
+        assert_eq!(result.stats.sources_fetched, 0);
+        assert_eq!(result.stats.approval_blocked, 1);
+        assert_eq!(result.phase_counts.sources_extracted, 0);
+        assert_eq!(result.phase_counts.extract_failed, 1);
+        assert_eq!(runner.labels(), vec!["deep-search:scope"]);
+    }
+
+    #[tokio::test]
+    async fn template_runner_counts_verify_item_failure_and_keeps_valid_votes() {
+        let runner = Arc::new(MockJsonRunner::new(vec![
+            json_text(&scope(vec![SearchAngle {
+                label: "current".to_string(),
+                query: "current query".to_string(),
+                rationale: "why".to_string(),
+            }])),
+            json_text(&SourceExtractOutput {
+                source_url: "https://example.com/source".to_string(),
+                source_title: "Source".to_string(),
+                source_quality: SourceQuality::High,
+                publish_date: None,
+                claims: vec![ExtractedClaim {
+                    claim: "Partly verified claim".to_string(),
+                    quote: "Quote".to_string(),
+                    importance: ClaimImportance::High,
+                }],
+            }),
+            "not json".to_string(),
+            json_text(&verdict(false, VerdictConfidence::High)),
+        ]));
+        let sources = source_provider(vec![vec![result("https://example.com/source", "Source")]]);
+
+        let result = DeepSearchTemplateRunner::new(limits(1, 1, 1, 2, 2), runner)
+            .with_source_provider(sources)
+            .run("What changed?")
+            .await
+            .expect("invalid verify item should be counted and degraded");
+
+        assert_eq!(result.phase_counts.verdict_votes, 1);
+        assert_eq!(result.phase_counts.verdict_failed, 1);
+        assert_eq!(result.stats.claims_verified, 1);
+        assert_eq!(result.stats.survived, 0);
+        assert_eq!(result.aggregated_verdicts.unverified[0].total_votes, 1);
+        assert_eq!(result.aggregated_verdicts.unverified[0].failed_votes, 1);
+        assert!(result.report.summary.contains("verification quorum"));
     }
 
     #[tokio::test]
@@ -1118,9 +1905,6 @@ mod tests {
                 query: "current query".to_string(),
                 rationale: "why".to_string(),
             }])),
-            json_text(&SearchOutput {
-                results: vec![result("https://example.com/source", "Source")],
-            }),
             json_text(&SourceExtractOutput {
                 source_url: "https://example.com/source".to_string(),
                 source_title: "Source".to_string(),
@@ -1129,8 +1913,10 @@ mod tests {
                 claims: Vec::new(),
             }),
         ]));
+        let sources = source_provider(vec![vec![result("https://example.com/source", "Source")]]);
 
         let result = DeepSearchTemplateRunner::new(limits(1, 1, 4, 2, 2), runner.clone())
+            .with_source_provider(sources)
             .run("What changed?")
             .await
             .expect("run deep search");
@@ -1155,9 +1941,6 @@ mod tests {
                 query: "current query".to_string(),
                 rationale: "why".to_string(),
             }])),
-            json_text(&SearchOutput {
-                results: vec![result("https://example.com/source", "Source")],
-            }),
             json_text(&SourceExtractOutput {
                 source_url: "https://example.com/source".to_string(),
                 source_title: "Source".to_string(),
@@ -1166,9 +1949,11 @@ mod tests {
                 claims: Vec::new(),
             }),
         ]));
+        let sources = source_provider(vec![vec![result("https://example.com/source", "Source")]]);
         let progress = RecordingWorkflowProgressSink::new();
 
         let result = DeepSearchTemplateRunner::new(limits(1, 1, 4, 2, 2), runner)
+            .with_source_provider(sources)
             .with_progress_sink(Arc::new(progress.clone()))
             .run("What changed?")
             .await
@@ -1275,9 +2060,6 @@ mod tests {
                 query: "audit query".to_string(),
                 rationale: "why".to_string(),
             }])),
-            json_text(&SearchOutput {
-                results: vec![result("https://example.com/source", "Source")],
-            }),
             json_text(&SourceExtractOutput {
                 source_url: "https://example.com/source".to_string(),
                 source_title: "Source".to_string(),
@@ -1291,8 +2073,10 @@ mod tests {
             }),
             json_text(&verdict(true, VerdictConfidence::High)),
         ]));
+        let sources = source_provider(vec![vec![result("https://example.com/source", "Source")]]);
 
         let result = DeepSearchTemplateRunner::new(limits(1, 1, 1, 1, 1), runner.clone())
+            .with_source_provider(sources)
             .run("What changed?")
             .await
             .expect("run deep search");
@@ -1320,9 +2104,6 @@ mod tests {
                 query: "audit query".to_string(),
                 rationale: "why".to_string(),
             }])),
-            json_text(&SearchOutput {
-                results: vec![result("https://example.com/source", "Source")],
-            }),
             json_text(&SourceExtractOutput {
                 source_url: "https://example.com/source".to_string(),
                 source_title: "Source".to_string(),
@@ -1337,8 +2118,10 @@ mod tests {
             json_text(&verdict(false, VerdictConfidence::High)),
             "not json".to_string(),
         ]));
+        let sources = source_provider(vec![vec![result("https://example.com/source", "Source")]]);
 
         let result = DeepSearchTemplateRunner::new(limits(1, 1, 1, 1, 1), runner.clone())
+            .with_source_provider(sources)
             .run("What changed?")
             .await
             .expect("run deep search");
@@ -1372,19 +2155,6 @@ mod tests {
                     rationale: "why".to_string(),
                 },
             ])),
-            json_text(&SearchOutput {
-                results: vec![
-                    result("https://www.example.com/a/?utm=1", "A"),
-                    result("https://example.com/b", "B"),
-                ],
-            }),
-            json_text(&SearchOutput {
-                results: vec![
-                    result("https://example.com/a", "A duplicate"),
-                    result("https://example.com/c", "C"),
-                    result("https://example.com/d", "D"),
-                ],
-            }),
             json_text(&SourceExtractOutput {
                 source_url: "https://example.com/a".to_string(),
                 source_title: "A".to_string(),
@@ -1400,8 +2170,20 @@ mod tests {
                 claims: Vec::new(),
             }),
         ]));
+        let sources = source_provider(vec![
+            vec![
+                result("https://www.example.com/a/?utm=1", "A"),
+                result("https://example.com/b", "B"),
+            ],
+            vec![
+                result("https://example.com/a", "A duplicate"),
+                result("https://example.com/c", "C"),
+                result("https://example.com/d", "D"),
+            ],
+        ]);
 
         let result = DeepSearchTemplateRunner::new(limits(2, 2, 4, 2, 2), runner.clone())
+            .with_source_provider(sources)
             .run("What changed?")
             .await
             .expect("run deep search");
@@ -1429,39 +2211,28 @@ mod tests {
     #[tokio::test]
     async fn template_runner_cancellation_after_search_prevents_later_agents() {
         let cancellation = WorkflowCancellation::new();
-        let runner = Arc::new(CancellingJsonRunner::new(
+        let runner = Arc::new(MockJsonRunner::new(vec![json_text(&scope(vec![
+            SearchAngle {
+                label: "first".to_string(),
+                query: "first query".to_string(),
+                rationale: "why".to_string(),
+            },
+            SearchAngle {
+                label: "second".to_string(),
+                query: "second query".to_string(),
+                rationale: "why".to_string(),
+            },
+        ]))]));
+        let sources = Arc::new(CancellingWorkflowSourceProvider::new(
             cancellation.clone(),
-            "unit:search-0001",
             vec![
-                json_text(&scope(vec![
-                    SearchAngle {
-                        label: "first".to_string(),
-                        query: "first query".to_string(),
-                        rationale: "why".to_string(),
-                    },
-                    SearchAngle {
-                        label: "second".to_string(),
-                        query: "second query".to_string(),
-                        rationale: "why".to_string(),
-                    },
-                ])),
-                json_text(&SearchOutput {
-                    results: vec![result("https://example.com/a", "A")],
-                }),
-                json_text(&SearchOutput {
-                    results: vec![result("https://example.com/b", "B")],
-                }),
-                json_text(&SourceExtractOutput {
-                    source_url: "https://example.com/a".to_string(),
-                    source_title: "A".to_string(),
-                    source_quality: SourceQuality::Medium,
-                    publish_date: None,
-                    claims: Vec::new(),
-                }),
+                vec![result("https://example.com/a", "A")],
+                vec![result("https://example.com/b", "B")],
             ],
         ));
 
         let error = DeepSearchTemplateRunner::new(limits(2, 2, 4, 2, 2), runner.clone())
+            .with_source_provider(sources)
             .with_run_label("unit")
             .with_cancellation(cancellation)
             .run("What changed?")
@@ -1472,7 +2243,7 @@ mod tests {
             .downcast_ref::<DeepSearchCancelled>()
             .expect("template should return a cancellation error");
         assert_eq!(cancelled.phase_id(), DeepSearchPhaseId::Search);
-        assert_eq!(runner.labels(), vec!["unit:scope", "unit:search-0001"]);
+        assert_eq!(runner.labels(), vec!["unit:scope"]);
     }
 
     #[test]
@@ -1640,7 +2411,7 @@ mod tests {
             ],
         );
 
-        let aggregated = aggregate_verdicts(&claims, &verdicts, 2);
+        let aggregated = aggregate_verdicts(&claims, &verdicts, 2, 3);
 
         assert_eq!(aggregated.killed.len(), 1);
         assert_eq!(aggregated.killed[0].claim.id, "killed");
@@ -1655,6 +2426,7 @@ mod tests {
         assert_eq!(aggregated.unverified.len(), 1);
         assert_eq!(aggregated.unverified[0].claim.id, "unverified");
         assert_eq!(aggregated.unverified[0].total_votes, 0);
+        assert_eq!(aggregated.unverified[0].failed_votes, 3);
     }
 
     #[test]
@@ -1753,6 +2525,7 @@ mod tests {
             refutations_required,
             max_concurrency: 1,
             token_budget: None,
+            max_runtime_secs: None,
         }
     }
 
@@ -1763,6 +2536,156 @@ mod tests {
     struct MockJsonRunner {
         responses: Mutex<VecDeque<AgentJsonResponse>>,
         calls: Mutex<Vec<AgentJsonRequest>>,
+    }
+
+    struct MockWorkflowSourceProvider {
+        searches: Mutex<VecDeque<Result<Vec<SearchResultItem>, WorkflowSourceError>>>,
+        fetches: Mutex<VecDeque<WorkflowFetchOutput>>,
+    }
+
+    impl MockWorkflowSourceProvider {
+        fn new(searches: Vec<Vec<SearchResultItem>>) -> Self {
+            Self::new_results(searches.into_iter().map(Ok).collect())
+        }
+
+        fn new_results(searches: Vec<Result<Vec<SearchResultItem>, WorkflowSourceError>>) -> Self {
+            Self {
+                searches: Mutex::new(VecDeque::from(searches)),
+                fetches: Mutex::new(VecDeque::new()),
+            }
+        }
+
+        fn with_fetches(mut self, fetches: Vec<WorkflowFetchOutput>) -> Self {
+            self.fetches = Mutex::new(VecDeque::from(fetches));
+            self
+        }
+    }
+
+    #[async_trait]
+    impl WorkflowSourceSearch for MockWorkflowSourceProvider {
+        async fn search(
+            &self,
+            request: WorkflowSearchRequest,
+        ) -> Result<WorkflowSearchResponse, WorkflowSourceError> {
+            let results = self
+                .searches
+                .lock()
+                .expect("lock searches")
+                .pop_front()
+                .unwrap_or_else(|| Ok(Vec::new()))?;
+            Ok(WorkflowSearchResponse {
+                query: request.query,
+                provider: "mock".to_string(),
+                results: results
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, result)| WorkflowSearchResult {
+                        title: result.title,
+                        url: result.url,
+                        snippet: result.snippet,
+                        rank: index + 1,
+                        provider: "mock".to_string(),
+                    })
+                    .collect(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl WorkflowSourceFetch for MockWorkflowSourceProvider {
+        async fn fetch(&self, request: WorkflowFetchRequest) -> WorkflowFetchOutput {
+            self.fetches
+                .lock()
+                .expect("lock fetches")
+                .pop_front()
+                .unwrap_or_else(|| WorkflowFetchOutput {
+                    url: request.url,
+                    final_url: None,
+                    status: WorkflowFetchStatus::Fetched,
+                    content: Some("Fetched source text".to_string()),
+                    http_status: Some(200),
+                    content_type: Some("text/plain".to_string()),
+                    body_bytes: Some(19),
+                    body_truncated: Some(false),
+                    output_truncated: Some(false),
+                    policy_decision: Some("allow".to_string()),
+                    error: None,
+                })
+        }
+    }
+
+    struct CancellingWorkflowSourceProvider {
+        inner: MockWorkflowSourceProvider,
+        cancellation: WorkflowCancellation,
+        calls: Mutex<usize>,
+    }
+
+    impl CancellingWorkflowSourceProvider {
+        fn new(cancellation: WorkflowCancellation, searches: Vec<Vec<SearchResultItem>>) -> Self {
+            Self {
+                inner: MockWorkflowSourceProvider::new(searches),
+                cancellation,
+                calls: Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl WorkflowSourceSearch for CancellingWorkflowSourceProvider {
+        async fn search(
+            &self,
+            request: WorkflowSearchRequest,
+        ) -> Result<WorkflowSearchResponse, WorkflowSourceError> {
+            let response = self.inner.search(request).await?;
+            let mut calls = self.calls.lock().expect("lock calls");
+            *calls = calls.saturating_add(1);
+            if *calls == 1 {
+                self.cancellation.cancel();
+            }
+            Ok(response)
+        }
+    }
+
+    #[async_trait]
+    impl WorkflowSourceFetch for CancellingWorkflowSourceProvider {
+        async fn fetch(&self, request: WorkflowFetchRequest) -> WorkflowFetchOutput {
+            self.inner.fetch(request).await
+        }
+    }
+
+    struct StaticJsonRepair {
+        responses: Mutex<VecDeque<String>>,
+        failures: Mutex<Vec<AgentJsonParseFailure>>,
+    }
+
+    impl StaticJsonRepair {
+        fn new(responses: Vec<String>) -> Self {
+            Self {
+                responses: Mutex::new(VecDeque::from(responses)),
+                failures: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn schema_names(&self) -> Vec<String> {
+            self.failures
+                .lock()
+                .expect("lock failures")
+                .iter()
+                .map(|failure| failure.schema_name.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl AgentJsonRepair for StaticJsonRepair {
+        async fn repair_json(&self, failure: AgentJsonParseFailure) -> anyhow::Result<String> {
+            self.failures.lock().expect("lock failures").push(failure);
+            self.responses
+                .lock()
+                .expect("lock repair responses")
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("repair response available"))
+        }
     }
 
     impl MockJsonRunner {
@@ -1794,59 +2717,6 @@ mod tests {
         }
     }
 
-    struct CancellingJsonRunner {
-        responses: Mutex<VecDeque<AgentJsonResponse>>,
-        calls: Mutex<Vec<AgentJsonRequest>>,
-        cancellation: WorkflowCancellation,
-        cancel_after_label: String,
-    }
-
-    impl CancellingJsonRunner {
-        fn new(
-            cancellation: WorkflowCancellation,
-            cancel_after_label: impl Into<String>,
-            responses: Vec<String>,
-        ) -> Self {
-            let responses: Vec<_> = responses
-                .into_iter()
-                .map(agent_response_from_text)
-                .collect();
-            Self {
-                responses: Mutex::new(VecDeque::from(responses)),
-                calls: Mutex::new(Vec::new()),
-                cancellation,
-                cancel_after_label: cancel_after_label.into(),
-            }
-        }
-
-        fn labels(&self) -> Vec<String> {
-            self.calls
-                .lock()
-                .expect("lock calls")
-                .iter()
-                .map(|call| call.label.clone())
-                .collect()
-        }
-    }
-
-    #[async_trait]
-    impl AgentJsonRunner for CancellingJsonRunner {
-        async fn run_json(&self, request: AgentJsonRequest) -> anyhow::Result<AgentJsonResponse> {
-            let label = request.label.clone();
-            self.calls.lock().expect("lock calls").push(request);
-            let response = self
-                .responses
-                .lock()
-                .expect("lock responses")
-                .pop_front()
-                .expect("mock response available");
-            if label == self.cancel_after_label {
-                self.cancellation.cancel();
-            }
-            Ok(response)
-        }
-    }
-
     #[async_trait]
     impl AgentJsonRunner for MockJsonRunner {
         async fn run_json(&self, request: AgentJsonRequest) -> anyhow::Result<AgentJsonResponse> {
@@ -1867,6 +2737,15 @@ mod tests {
             text,
             value,
             tokens_used: None,
+        }
+    }
+
+    fn agent_response_with_tokens(text: String, tokens_used: i64) -> AgentJsonResponse {
+        let value = serde_json::from_str(&text).unwrap_or_else(|_| json!(null));
+        AgentJsonResponse {
+            text,
+            value,
+            tokens_used: Some(tokens_used),
         }
     }
 }

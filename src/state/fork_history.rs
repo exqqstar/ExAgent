@@ -86,7 +86,9 @@ pub fn build_thread_fork_history(
     let mut forked = parent_items[..=boundary_index]
         .iter()
         .filter_map(|item| match item {
-            RolloutItem::ThreadMeta(_) | RolloutItem::EventMsg(_) => None,
+            RolloutItem::ThreadMeta(_) | RolloutItem::EventMsg(_) | RolloutItem::WorkflowRun(_) => {
+                None
+            }
             RolloutItem::ResponseItem(_)
             | RolloutItem::Compacted(_)
             | RolloutItem::TurnContext(_) => Some(item.clone()),
@@ -103,7 +105,7 @@ fn filter_item(
     fork_turns: ForkTurns,
 ) -> Option<RolloutItem> {
     match item {
-        RolloutItem::ThreadMeta(_) | RolloutItem::EventMsg(_) => None,
+        RolloutItem::ThreadMeta(_) | RolloutItem::EventMsg(_) | RolloutItem::WorkflowRun(_) => None,
         RolloutItem::TurnContext(_) => None,
         RolloutItem::Compacted(compacted) => Some(RolloutItem::Compacted(filter_compacted(
             compacted, fork_turns,

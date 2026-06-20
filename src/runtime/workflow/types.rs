@@ -46,6 +46,8 @@ pub struct DeepSearchLimits {
     pub max_concurrency: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_runtime_secs: Option<u64>,
 }
 
 impl DeepSearchLimits {
@@ -58,7 +60,8 @@ impl DeepSearchLimits {
                 votes_per_claim: 2,
                 refutations_required: 2,
                 max_concurrency: 5,
-                token_budget: None,
+                token_budget: Some(80_000),
+                max_runtime_secs: Some(120),
             },
             WorkflowPresetId::Standard => Self {
                 max_angles: 4,
@@ -67,7 +70,8 @@ impl DeepSearchLimits {
                 votes_per_claim: 2,
                 refutations_required: 2,
                 max_concurrency: 6,
-                token_budget: None,
+                token_budget: Some(160_000),
+                max_runtime_secs: Some(300),
             },
             WorkflowPresetId::Deep => Self {
                 max_angles: 5,
@@ -76,14 +80,14 @@ impl DeepSearchLimits {
                 votes_per_claim: 3,
                 refutations_required: 2,
                 max_concurrency: 8,
-                token_budget: None,
+                token_budget: Some(320_000),
+                max_runtime_secs: Some(600),
             },
         }
     }
 
     pub fn planned_agent_calls(&self) -> usize {
         1 // scope
-            + self.max_angles
             + self.max_sources
             + (self.max_claims * self.votes_per_claim)
             + 1 // synthesize
@@ -124,9 +128,42 @@ mod tests {
     #[test]
     fn deep_search_preset_limits_match_planned_agent_calls() {
         let cases = [
-            (WorkflowPresetId::Quick, 3, 8, 8, 2, 2, 5, 29),
-            (WorkflowPresetId::Standard, 4, 12, 12, 2, 2, 6, 42),
-            (WorkflowPresetId::Deep, 5, 15, 20, 3, 2, 8, 82),
+            (
+                WorkflowPresetId::Quick,
+                3,
+                8,
+                8,
+                2,
+                2,
+                5,
+                Some(80_000),
+                Some(120),
+                26,
+            ),
+            (
+                WorkflowPresetId::Standard,
+                4,
+                12,
+                12,
+                2,
+                2,
+                6,
+                Some(160_000),
+                Some(300),
+                38,
+            ),
+            (
+                WorkflowPresetId::Deep,
+                5,
+                15,
+                20,
+                3,
+                2,
+                8,
+                Some(320_000),
+                Some(600),
+                77,
+            ),
         ];
 
         for (
@@ -137,6 +174,8 @@ mod tests {
             votes_per_claim,
             refutations_required,
             max_concurrency,
+            token_budget,
+            max_runtime_secs,
             planned_calls,
         ) in cases
         {
@@ -147,7 +186,8 @@ mod tests {
             assert_eq!(limits.votes_per_claim, votes_per_claim);
             assert_eq!(limits.refutations_required, refutations_required);
             assert_eq!(limits.max_concurrency, max_concurrency);
-            assert_eq!(limits.token_budget, None);
+            assert_eq!(limits.token_budget, token_budget);
+            assert_eq!(limits.max_runtime_secs, max_runtime_secs);
             assert_eq!(limits.planned_agent_calls(), planned_calls);
             assert_eq!(
                 WorkflowLimits::deep_search_for_preset(preset),

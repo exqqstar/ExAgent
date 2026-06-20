@@ -518,7 +518,9 @@ fn turn_ids_from_rollout_item(item: &RolloutItem) -> Vec<&TurnId> {
         RolloutItem::ResponseItem(response_item) => vec![&response_item.turn_id],
         RolloutItem::TurnContext(context) => vec![&context.turn_id],
         RolloutItem::EventMsg(event) => event.turn_id.as_ref().into_iter().collect(),
-        RolloutItem::ThreadMeta(_) | RolloutItem::Compacted(_) => vec![],
+        RolloutItem::ThreadMeta(_) | RolloutItem::Compacted(_) | RolloutItem::WorkflowRun(_) => {
+            vec![]
+        }
     }
 }
 

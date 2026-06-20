@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::io::Write as _;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use crate::app_server::protocol::WorkflowRunView;
 use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::session::{ThreadLineage, ThreadSnapshot, ThreadSource, TurnContextItem};
 use crate::types::{ConversationMessage, ThreadId, TurnId};
@@ -16,6 +17,7 @@ pub enum RolloutItem {
     TurnContext(TurnContextItem),
     Compacted(CompactedItem),
     EventMsg(RuntimeEvent),
+    WorkflowRun(WorkflowRunView),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -108,6 +110,7 @@ pub fn snapshot_from_rollout_items(
                 }
             }
             RolloutItem::ThreadMeta(_) => {}
+            RolloutItem::WorkflowRun(_) => {}
         }
     }
 
@@ -149,6 +152,16 @@ pub fn response_items_from_rollout_items(items: &[RolloutItem]) -> Vec<ResponseI
         .collect()
 }
 
+pub fn latest_workflow_run_from_rollout_items(
+    items: &[RolloutItem],
+    run_id: &str,
+) -> Option<WorkflowRunView> {
+    items.iter().rev().find_map(|item| match item {
+        RolloutItem::WorkflowRun(run) if run.run_id == run_id => Some(run.clone()),
+        _ => None,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CompactedItem {
     pub message: String,
@@ -161,7 +174,8 @@ pub fn should_persist_rollout_item(item: &RolloutItem) -> bool {
         RolloutItem::ThreadMeta(_)
         | RolloutItem::ResponseItem(_)
         | RolloutItem::TurnContext(_)
-        | RolloutItem::Compacted(_) => true,
+        | RolloutItem::Compacted(_)
+        | RolloutItem::WorkflowRun(_) => true,
         RolloutItem::EventMsg(event) => should_persist_event(event),
     }
 }
@@ -367,6 +381,9 @@ impl RolloutStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_server::protocol::{
+        WorkflowPresetId, WorkflowRunStatus, WorkflowStats, WorkflowStopReason, WorkflowTemplateId,
+    };
     use crate::events::{RuntimeEvent, RuntimeEventKind};
     use crate::resolved::ModelRef;
     use crate::session::{ApprovalId, TurnContextItem};
@@ -699,6 +716,43 @@ mod tests {
     }
 
     #[test]
+    fn workflow_run_rollout_item_round_trips_and_persists() {
+        let mut run = workflow_run_view("workflow_run_thread_1", WorkflowRunStatus::Failed);
+        run.stop_reason = Some(WorkflowStopReason::TokenBudgetExceeded);
+        let item = RolloutItem::WorkflowRun(run.clone());
+
+        assert!(should_persist_rollout_item(&item));
+        let value = serde_json::to_value(&item).expect("serialize workflow run");
+        assert_eq!(value["type"], "workflow_run");
+        assert_eq!(value["payload"]["run_id"], "workflow_run_thread_1");
+        assert_eq!(value["payload"]["stop_reason"], "token_budget_exceeded");
+
+        let decoded: RolloutItem =
+            serde_json::from_value(value).expect("deserialize workflow run item");
+        assert_eq!(decoded, item);
+    }
+
+    #[test]
+    fn latest_workflow_run_from_rollout_items_returns_latest_matching_snapshot() {
+        let older = workflow_run_view("workflow_run_thread_1", WorkflowRunStatus::Failed);
+        let newer = workflow_run_view("workflow_run_thread_1", WorkflowRunStatus::Completed);
+        let other = workflow_run_view("workflow_run_thread_2", WorkflowRunStatus::Cancelled);
+
+        let found = latest_workflow_run_from_rollout_items(
+            &[
+                RolloutItem::WorkflowRun(older),
+                RolloutItem::WorkflowRun(other),
+                RolloutItem::WorkflowRun(newer.clone()),
+            ],
+            "workflow_run_thread_1",
+        )
+        .expect("latest workflow run");
+
+        assert_eq!(found.status, WorkflowRunStatus::Completed);
+        assert_eq!(found.updated_at_ms, newer.updated_at_ms);
+    }
+
+    #[test]
     fn rollout_path_uses_thread_directory_and_rollout_jsonl() {
         let workspace_root = PathBuf::from("/workspace");
         let thread_id = ThreadId::new("thread_1");
@@ -707,5 +761,40 @@ mod tests {
 
         assert!(paths.thread_dir.ends_with("thread_1"));
         assert!(paths.rollout_path.ends_with("rollout.jsonl"));
+    }
+
+    fn workflow_run_view(run_id: &str, status: WorkflowRunStatus) -> WorkflowRunView {
+        WorkflowRunView {
+            run_id: run_id.to_string(),
+            thread_id: ThreadId::new(run_id.trim_start_matches("workflow_run_")),
+            template_id: WorkflowTemplateId::DeepResearch,
+            preset_id: WorkflowPresetId::Quick,
+            label: "Deep research: test".to_string(),
+            status,
+            phases: Vec::new(),
+            artifacts: Vec::new(),
+            stats: WorkflowStats {
+                agent_calls: 1,
+                failed_agent_calls: 0,
+                skipped_agent_calls: 0,
+                total_artifacts: 0,
+                tokens_used: None,
+                elapsed_ms: 0,
+                template_stats: json!({}),
+            },
+            report_summary: Some("summary".to_string()),
+            stop_reason: None,
+            created_at_ms: 1,
+            updated_at_ms: match status {
+                WorkflowRunStatus::Completed => 3,
+                WorkflowRunStatus::Failed => 2,
+                WorkflowRunStatus::Cancelled => 4,
+                WorkflowRunStatus::Queued
+                | WorkflowRunStatus::Running
+                | WorkflowRunStatus::WaitingApproval => 1,
+            },
+            started_at_ms: Some(1),
+            completed_at_ms: Some(2),
+        }
     }
 }

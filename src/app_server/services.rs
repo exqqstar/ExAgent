@@ -29,6 +29,7 @@ use crate::runtime::subagent::{
     SpawnCleanChildRequest, SubagentLifecycle,
 };
 use crate::runtime::thread_runtime::{AgentFactory, WorkspaceRuntimeOpGate};
+use crate::runtime::workflow::WorkflowSourceProvider;
 use crate::session::{ThreadSnapshot, ThreadSource};
 use crate::state::fork_history::{build_fork_history, ForkTurns};
 use crate::state::index_db::GoalAccountingMode;
@@ -49,6 +50,7 @@ pub(in crate::app_server) struct AppServerServices {
     pub(in crate::app_server) runtime_loader: RuntimeLoader,
     pub(in crate::app_server) subagent_lifecycle: Arc<dyn SubagentLifecycle>,
     pub(in crate::app_server) workflow_runs: Arc<WorkflowRunRegistry>,
+    pub(in crate::app_server) workflow_source_provider: Option<Arc<dyn WorkflowSourceProvider>>,
     pub(in crate::app_server) goal_store: Option<crate::index_db::IndexDb>,
     pub(in crate::app_server) memory_runtime: Option<Arc<MemoryRuntime>>,
     #[cfg(test)]
@@ -100,6 +102,7 @@ impl AppServerServices {
             runtime_loader,
             subagent_lifecycle,
             workflow_runs,
+            workflow_source_provider: None,
             goal_store: None,
             memory_runtime: None,
             #[cfg(test)]
@@ -149,6 +152,7 @@ impl AppServerServices {
             runtime_loader,
             subagent_lifecycle,
             workflow_runs,
+            workflow_source_provider: None,
             goal_store: None,
             memory_runtime: None,
             #[cfg(test)]
@@ -199,6 +203,7 @@ impl AppServerServices {
             runtime_loader,
             subagent_lifecycle,
             workflow_runs,
+            workflow_source_provider: None,
             goal_store: None,
             memory_runtime: None,
             mcp_client_factory: Some(mcp_client_factory),
@@ -214,6 +219,14 @@ impl AppServerServices {
             #[cfg(test)]
             self.mcp_client_factory.clone(),
         )
+    }
+
+    pub(in crate::app_server) fn with_workflow_source_provider(
+        mut self,
+        workflow_source_provider: Arc<dyn WorkflowSourceProvider>,
+    ) -> Self {
+        self.workflow_source_provider = Some(workflow_source_provider);
+        self
     }
 
     pub(in crate::app_server) fn with_goal_store(

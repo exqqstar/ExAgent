@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 
 use crate::app_server::protocol::{
     WorkflowArtifactSummary, WorkflowPhaseStatus, WorkflowPhaseView, WorkflowPresetId,
-    WorkflowRunStatus, WorkflowRunView, WorkflowStats, WorkflowTemplateId,
+    WorkflowRunStatus, WorkflowRunView, WorkflowStats, WorkflowStopReason, WorkflowTemplateId,
 };
 use crate::runtime::workflow::artifacts::ArtifactStore;
 use crate::runtime::workflow::types::{WorkflowLimits, WorkflowRunId};
@@ -147,6 +147,10 @@ impl WorkflowRunHandle {
     pub async fn set_template_stats(&self, template_stats: Value) {
         self.state.lock().await.set_template_stats(template_stats);
     }
+
+    pub async fn set_stop_reason(&self, stop_reason: Option<WorkflowStopReason>) {
+        self.state.lock().await.set_stop_reason(stop_reason);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +166,7 @@ pub struct WorkflowRunState {
     artifacts: ArtifactStore,
     stats: WorkflowStats,
     report_summary: Option<String>,
+    stop_reason: Option<WorkflowStopReason>,
     created_at_ms: i64,
     updated_at_ms: i64,
     started_at_ms: Option<i64>,
@@ -197,6 +202,7 @@ impl WorkflowRunState {
                 template_stats: Value::Null,
             },
             report_summary: None,
+            stop_reason: None,
             created_at_ms: now,
             updated_at_ms: now,
             started_at_ms: None,
@@ -409,6 +415,14 @@ impl WorkflowRunState {
         self.touch();
     }
 
+    pub fn set_stop_reason(&mut self, stop_reason: Option<WorkflowStopReason>) {
+        if self.is_terminal() {
+            return;
+        }
+        self.stop_reason = stop_reason;
+        self.touch();
+    }
+
     pub fn view(&self) -> WorkflowRunView {
         WorkflowRunView {
             run_id: self.run_id.to_string(),
@@ -421,6 +435,7 @@ impl WorkflowRunState {
             artifacts: self.artifacts.list_summaries(),
             stats: self.stats.clone(),
             report_summary: self.report_summary.clone(),
+            stop_reason: self.stop_reason,
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
             started_at_ms: self.started_at_ms,

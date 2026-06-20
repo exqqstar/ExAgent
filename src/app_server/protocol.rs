@@ -117,6 +117,13 @@ pub enum WorkflowPhaseStatus {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowStopReason {
+    TokenBudgetExceeded,
+    RuntimeExceeded,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkflowStartParams {
     pub workspace_root: Option<String>,
@@ -168,6 +175,8 @@ pub struct WorkflowRunView {
     pub stats: WorkflowStats,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<WorkflowStopReason>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1778,6 +1787,7 @@ mod tests {
                 }),
             },
             report_summary: Some("Early findings are available.".to_string()),
+            stop_reason: Some(WorkflowStopReason::TokenBudgetExceeded),
             created_at_ms: 900,
             updated_at_ms: 1_300,
             started_at_ms: Some(1_000),
@@ -1812,6 +1822,7 @@ mod tests {
             read_value["run"]["stats"]["template_stats"]["verify_agents"],
             24
         );
+        assert_eq!(read_value["run"]["stop_reason"], "token_budget_exceeded");
         let decoded_read: BoundaryOpResponse =
             serde_json::from_value(read_value).expect("deserialize workflow read response");
         assert_eq!(decoded_read, read);

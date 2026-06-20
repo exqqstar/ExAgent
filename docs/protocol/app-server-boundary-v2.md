@@ -261,16 +261,24 @@ The current boundary exposes a minimal workflow manager shell through
 `quick`, `standard`, and `deep`.
 
 `workflow_start` creates a visible root workflow thread, records an in-memory
-run handle, returns a queued run view immediately, and starts minimal
-background execution for `deep-research`. The background run uses the built-in
-deep-search template with app-server JSON-agent calls. Each JSON-agent call runs
-one prompt in a clean subagent-like child thread rooted at the workflow root
-thread, then shuts down that child runtime after the call completes.
+run handle, returns a queued run view immediately, and starts background
+execution for `deep-research`. The built-in deep-search template runs five
+phases: scope, search, extract, verify, and synthesize.
 
-This is still v0 execution wiring. Workflow runs and workflow events are not
-persisted across process restarts yet. Deep research uses the template's
-mockable agent prompts and does not implement real `web_fetch`, durable
-workflow event persistence, or concurrent fan-out yet.
+Scope, extract, verify, synthesize, and JSON-repair work run as isolated child
+threads rooted at the workflow root. Each child performs one structured JSON
+model call, then the runtime shuts that child down while keeping its rollout
+readable. Search and fetch are runtime source operations rather than model
+search agents: search uses the configured web search provider, and fetch uses
+the same `web_fetch` service and approval policy as tools. If fetch would need
+approval in a background workflow, it returns an approval-blocked source result
+instead of creating a pending approval.
+
+The workflow is durable only as a terminal read model. Completed, failed, and
+cancelled `WorkflowRunView` snapshots are appended to the root thread rollout
+and can be read after process restart. Queued and running workflows are not
+resumed after restart and are not readable from a fresh process unless they had
+already reached a terminal state.
 
 The start request is:
 
@@ -329,18 +337,24 @@ Workflow statuses serialize as `queued`, `running`, `waiting_approval`,
 
 Cancelling a terminal run is idempotent and returns the current run view.
 
-Deep research presets bound the maximum planned JSON-agent calls as follows.
-Small runs may use fewer calls when scope/search/extract phases produce less
-work:
+Deep research presets bound maximum planned JSON-agent calls as follows. Search
+is not counted because it is a host source operation. Small runs may use fewer
+calls when scope/search/extract phases produce less work:
 
 ```text
-quick    = 1 scope + 3 search + 8 extract + 8*2 verify + 1 synth = 29
-standard = 1 scope + 4 search + 12 extract + 12*2 verify + 1 synth = 42
-deep     = 1 scope + 5 search + 15 extract + 20*3 verify + 1 synth = 82
+quick    = 1 scope + 8 extract + 8*2 verify + 1 synth = 26
+standard = 1 scope + 12 extract + 12*2 verify + 1 synth = 38
+deep     = 1 scope + 15 extract + 20*3 verify + 1 synth = 77
 ```
 
-Planned workflow runtime events will use the same replay and subscription
-channels as thread events. The planned workflow event family is:
+The runtime enforces preset token and wall-clock guards while scheduling phase
+work. If a guard trips, the run fails and `WorkflowRunView.stop_reason` is set
+to `token_budget_exceeded` or `runtime_exceeded`. `workflow_read` remains
+compact: artifact payloads are not returned inline, and oversized template
+stats are replaced by a truncation marker.
+
+Workflow runtime events use the same replay and subscription channels as thread
+events. The workflow event family is:
 
 - `workflow_started`
 - `workflow_phase_started`

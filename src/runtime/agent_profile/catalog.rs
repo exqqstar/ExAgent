@@ -120,6 +120,29 @@ still message the parent or sibling agents if you need information."
             default_thinking_mode: None,
             tool_policy: AgentToolPolicy::full_workspace_basic_collaboration(),
         },
+        AgentType::WorkflowResearch => AgentProfile {
+            id: AgentType::WorkflowResearch,
+            display_name: "Workflow research".to_string(),
+            description: "Read-only research worker for workflow child turns.".to_string(),
+            spawn_guidance:
+                "Reserved for workflow-managed research calls that need repository reading,\n\
+search, and web retrieval without workspace mutation or child orchestration."
+                    .to_string(),
+            instructions:
+                "You are a workflow research agent. Return the requested JSON using only\n\
+read-only research tools.\n\n\
+You may read files, search the workspace, search the web, and fetch web pages.\n\
+Do not edit files, run shell commands, apply patches, write to command stdin,\n\
+spawn or close agents, or create follow-up tasks."
+                    .to_string(),
+            response_guidance:
+                "Return only the requested structured result. Include grounded source details\n\
+when the schema asks for them."
+                    .to_string(),
+            default_fork_turns: ForkTurns::None,
+            default_thinking_mode: Some(ThinkingMode::Low),
+            tool_policy: read_only_policy(AgentType::WorkflowResearch),
+        },
     }
 }
 
@@ -129,8 +152,10 @@ pub fn render_spawn_agent_type_description() -> String {
         String::new(),
         "Available profiles:".to_string(),
     ];
-    for profile in all_profiles() {
-        lines.push(render_profile_for_spawn_schema(&profile));
+    for agent_type in AgentType::SPAWNABLE {
+        lines.push(render_profile_for_spawn_schema(&profile_for_type(Some(
+            agent_type,
+        ))));
     }
     lines.join("\n")
 }

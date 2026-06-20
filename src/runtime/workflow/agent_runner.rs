@@ -8,6 +8,7 @@ use serde_json::Value;
 use crate::config::ThinkingMode;
 use crate::model::resolved::ModelRef;
 use crate::runtime::agent_profile::AgentType;
+use crate::runtime::workflow::json_repair::{AgentJsonParseFailure, AgentJsonRepair};
 use crate::types::ThreadId;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,11 +51,6 @@ pub trait AgentJsonRunner: Send + Sync {
     async fn run_json(&self, request: AgentJsonRequest) -> anyhow::Result<AgentJsonResponse>;
 }
 
-#[async_trait]
-pub trait AgentJsonRepair: Send + Sync {
-    async fn repair_json(&self, text: &str, error: &serde_json::Error) -> anyhow::Result<String>;
-}
-
 pub async fn parse_agent_json_response<T>(
     text: &str,
     repair: Option<&dyn AgentJsonRepair>,
@@ -62,14 +58,28 @@ pub async fn parse_agent_json_response<T>(
 where
     T: DeserializeOwned,
 {
-    match serde_json::from_str(text) {
+    parse_agent_json_response_for_schema("AgentJsonResponse", text, repair).await
+}
+
+pub async fn parse_agent_json_response_for_schema<T>(
+    schema_name: &str,
+    text: &str,
+    repair: Option<&dyn AgentJsonRepair>,
+) -> anyhow::Result<T>
+where
+    T: DeserializeOwned,
+{
+    match parse_json_object(text) {
         Ok(parsed) => Ok(parsed),
         Err(error) => {
+            let failure = AgentJsonParseFailure::new(schema_name, text, error.to_string());
             let Some(repair) = repair else {
-                return Err(error.into());
+                return Err(failure.into());
             };
-            let repaired = repair.repair_json(text, &error).await?;
-            Ok(serde_json::from_str(&repaired)?)
+            let repaired = repair.repair_json(failure).await?;
+            parse_json_object(&repaired).map_err(|repair_error| {
+                AgentJsonParseFailure::new(schema_name, repaired, repair_error.to_string()).into()
+            })
         }
     }
 }
@@ -212,32 +222,23 @@ mod tests {
         meta: serde_json::Value,
     }
 
-    struct StripFenceRepair;
+    struct TrailingCommaRepair;
 
     #[async_trait]
-    impl AgentJsonRepair for StripFenceRepair {
-        async fn repair_json(
-            &self,
-            text: &str,
-            _error: &serde_json::Error,
-        ) -> anyhow::Result<String> {
-            Ok(text
-                .trim()
-                .trim_start_matches("```json")
-                .trim_end_matches("```")
-                .trim()
-                .to_string())
+    impl AgentJsonRepair for TrailingCommaRepair {
+        async fn repair_json(&self, failure: AgentJsonParseFailure) -> anyhow::Result<String> {
+            assert_eq!(failure.schema_name, "AgentJsonResponse");
+            assert!(failure.error.contains("invalid JSON object candidate"));
+            Ok(failure.raw_text.replace(",}", "}"))
         }
     }
 
     #[tokio::test]
     async fn parsing_helper_uses_one_repair_attempt() {
-        let parsed: Answer = parse_agent_json_response(
-            "```json\n{\"answer\":\"yes\"}\n```",
-            Some(&StripFenceRepair),
-        )
-        .await
-        .expect("parse repaired json");
+        let parsed: Answer =
+            parse_agent_json_response("{\"answer\":\"yes\",}", Some(&TrailingCommaRepair))
+                .await
+                .expect("parse repaired json");
 
         assert_eq!(
             parsed,
@@ -245,6 +246,44 @@ mod tests {
                 answer: "yes".to_string()
             }
         );
+    }
+
+    struct BadRepair;
+
+    #[async_trait]
+    impl AgentJsonRepair for BadRepair {
+        async fn repair_json(&self, _failure: AgentJsonParseFailure) -> anyhow::Result<String> {
+            Ok("{still bad".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_failure_without_repair_is_typed() {
+        let error = parse_agent_json_response_for_schema::<Answer>("Answer", "{bad", None)
+            .await
+            .expect_err("invalid json should fail");
+        let failure = error
+            .downcast_ref::<AgentJsonParseFailure>()
+            .expect("typed parse failure");
+
+        assert_eq!(failure.schema_name, "Answer");
+        assert_eq!(failure.raw_text, "{bad");
+        assert!(failure.error.contains("unterminated JSON object"));
+    }
+
+    #[tokio::test]
+    async fn parse_failure_after_repair_is_typed_with_repaired_text() {
+        let error =
+            parse_agent_json_response_for_schema::<Answer>("Answer", "{bad", Some(&BadRepair))
+                .await
+                .expect_err("bad repaired json should fail");
+        let failure = error
+            .downcast_ref::<AgentJsonParseFailure>()
+            .expect("typed repaired parse failure");
+
+        assert_eq!(failure.schema_name, "Answer");
+        assert_eq!(failure.raw_text, "{still bad");
+        assert!(failure.error.contains("unterminated JSON object"));
     }
 
     #[test]

@@ -37,6 +37,7 @@ use crate::runtime::agent_profile::AgentType;
 use crate::runtime::subagent::InterAgentCommunication;
 #[cfg(test)]
 use crate::runtime::turn_mode::TurnMode;
+use crate::runtime::workflow::WorkflowSourceProvider;
 #[cfg(test)]
 use crate::state::spawn_edges::{SpawnEdgeStatus, ThreadSpawnEdgeStore};
 #[cfg(test)]
@@ -132,6 +133,28 @@ impl ThreadManager {
                 registry_factory,
                 model_resolver,
             )),
+        }
+    }
+
+    pub fn with_llm_and_workflow_source_provider<F>(
+        base_config: AgentConfig,
+        llm: Box<dyn LlmClient>,
+        registry_factory: F,
+        workflow_source_provider: Arc<dyn WorkflowSourceProvider>,
+    ) -> Self
+    where
+        F: Fn() -> ToolRegistry + Send + Sync + 'static,
+    {
+        Self {
+            services: Arc::new(
+                AppServerServices::with_llm_and_model_resolver(
+                    base_config,
+                    llm,
+                    registry_factory,
+                    Arc::new(EnvModelResolver),
+                )
+                .with_workflow_source_provider(workflow_source_provider),
+            ),
         }
     }
 

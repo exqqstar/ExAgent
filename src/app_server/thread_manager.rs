@@ -14,12 +14,13 @@ use crate::app_server::protocol::{
     ThreadForkParams, ThreadForkResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
     ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, TurnContextOverrides,
     TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
-    BOUNDARY_PROTOCOL_VERSION,
+    WorkflowCancelParams, WorkflowCancelResponse, WorkflowReadParams, WorkflowReadResponse,
+    WorkflowStartParams, WorkflowStartResponse, BOUNDARY_PROTOCOL_VERSION,
 };
 use crate::app_server::request_processors::{
     agent_processor, approvals_processor, checkpoint_processor, compaction_processor,
     events_processor, fork_processor, goal_processor, memory_processor, thread_processor,
-    turn_processor,
+    turn_processor, workflow_processor,
 };
 use crate::app_server::services::AppServerServices;
 use crate::config::AgentConfig;
@@ -228,6 +229,9 @@ impl ThreadManager {
                 BoundaryCapability::MemoryListCandidates,
                 BoundaryCapability::MemoryListArchived,
                 BoundaryCapability::MemoryPromote,
+                BoundaryCapability::WorkflowStart,
+                BoundaryCapability::WorkflowRead,
+                BoundaryCapability::WorkflowCancel,
             ],
             supported_streams: vec![BoundaryCapability::EventsSubscribe],
             supported_permission_profiles: crate::config::PermissionProfile::supported_profiles(),
@@ -309,6 +313,24 @@ impl ThreadManager {
         params: SubmitUserInputParams,
     ) -> Result<SubmitUserInputResponse> {
         turn_processor::submit_user_input(self.services.as_ref(), params).await
+    }
+
+    pub async fn workflow_start(
+        &self,
+        params: WorkflowStartParams,
+    ) -> Result<WorkflowStartResponse> {
+        workflow_processor::workflow_start(self.services.as_ref(), params).await
+    }
+
+    pub async fn workflow_read(&self, params: WorkflowReadParams) -> Result<WorkflowReadResponse> {
+        workflow_processor::workflow_read(self.services.as_ref(), params).await
+    }
+
+    pub async fn workflow_cancel(
+        &self,
+        params: WorkflowCancelParams,
+    ) -> Result<WorkflowCancelResponse> {
+        workflow_processor::workflow_cancel(self.services.as_ref(), params).await
     }
 
     async fn turn_start_direct(&self, params: TurnStartParams) -> Result<TurnStartResponse> {
@@ -435,6 +457,18 @@ impl ThreadManager {
                     .await
                     .map(BoundaryOpResponse::MemoryPromoted)
             }
+            BoundaryOp::WorkflowStart(params) => self
+                .workflow_start(params)
+                .await
+                .map(BoundaryOpResponse::WorkflowStarted),
+            BoundaryOp::WorkflowRead(params) => self
+                .workflow_read(params)
+                .await
+                .map(BoundaryOpResponse::WorkflowRead),
+            BoundaryOp::WorkflowCancel(params) => self
+                .workflow_cancel(params)
+                .await
+                .map(BoundaryOpResponse::WorkflowCancelled),
         }
     }
 

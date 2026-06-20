@@ -5,6 +5,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::agent::Agent;
+use crate::app_server::request_processors::workflow_processor::{
+    new_workflow_run_registry, WorkflowRunRegistry,
+};
 use crate::app_server::runtime_loader::{RuntimeLoader, RuntimeSpawner};
 use crate::app_server::thread_store::read_thread_state_from_storage;
 use crate::app_server::AppServerError;
@@ -35,6 +38,7 @@ use crate::types::ThreadId;
 
 pub(in crate::app_server) type RegistryFactory = Arc<dyn Fn() -> ToolRegistry + Send + Sync>;
 
+#[derive(Clone)]
 pub(in crate::app_server) struct AppServerServices {
     pub(in crate::app_server) base_config: AgentConfig,
     pub(in crate::app_server) llm_factory: Arc<dyn LlmClientFactory>,
@@ -44,6 +48,7 @@ pub(in crate::app_server) struct AppServerServices {
     pub(in crate::app_server) policy: Arc<PolicyManager>,
     pub(in crate::app_server) runtime_loader: RuntimeLoader,
     pub(in crate::app_server) subagent_lifecycle: Arc<dyn SubagentLifecycle>,
+    pub(in crate::app_server) workflow_runs: Arc<WorkflowRunRegistry>,
     pub(in crate::app_server) goal_store: Option<crate::index_db::IndexDb>,
     pub(in crate::app_server) memory_runtime: Option<Arc<MemoryRuntime>>,
     #[cfg(test)]
@@ -84,6 +89,7 @@ impl AppServerServices {
             None,
             None,
         );
+        let workflow_runs = new_workflow_run_registry();
         Self {
             base_config,
             llm_factory,
@@ -93,6 +99,7 @@ impl AppServerServices {
             policy,
             runtime_loader,
             subagent_lifecycle,
+            workflow_runs,
             goal_store: None,
             memory_runtime: None,
             #[cfg(test)]
@@ -131,6 +138,7 @@ impl AppServerServices {
             None,
             None,
         );
+        let workflow_runs = new_workflow_run_registry();
         Self {
             base_config,
             llm_factory,
@@ -140,6 +148,7 @@ impl AppServerServices {
             policy,
             runtime_loader,
             subagent_lifecycle,
+            workflow_runs,
             goal_store: None,
             memory_runtime: None,
             #[cfg(test)]
@@ -179,6 +188,7 @@ impl AppServerServices {
             None,
             None,
         );
+        let workflow_runs = new_workflow_run_registry();
         Self {
             base_config,
             llm_factory,
@@ -188,6 +198,7 @@ impl AppServerServices {
             policy,
             runtime_loader,
             subagent_lifecycle,
+            workflow_runs,
             goal_store: None,
             memory_runtime: None,
             mcp_client_factory: Some(mcp_client_factory),

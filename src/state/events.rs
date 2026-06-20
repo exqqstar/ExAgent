@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use crate::app_server::protocol::{
+    WorkflowArtifactSummary, WorkflowPhaseView, WorkflowPresetId, WorkflowRunStatus, WorkflowStats,
+    WorkflowTemplateId,
+};
 use crate::config::PermissionProfile;
 use crate::policy::QuestionPrompt;
 use crate::session::{ApprovalId, ApprovalStatus, CompactionSummary, ExecSessionId};
@@ -237,6 +241,31 @@ pub enum RuntimeEventKind {
     ThreadGoalReport {
         report: crate::app_server::protocol::ThreadGoalReport,
     },
+    WorkflowStarted {
+        run_id: String,
+        template_id: WorkflowTemplateId,
+        preset_id: WorkflowPresetId,
+        label: String,
+    },
+    WorkflowPhaseStarted {
+        run_id: String,
+        phase_id: String,
+        label: String,
+        planned_count: usize,
+    },
+    WorkflowPhaseUpdated {
+        run_id: String,
+        phase: WorkflowPhaseView,
+    },
+    WorkflowArtifactRecorded {
+        run_id: String,
+        artifact: WorkflowArtifactSummary,
+    },
+    WorkflowCompleted {
+        run_id: String,
+        status: WorkflowRunStatus,
+        stats: WorkflowStats,
+    },
     RuntimeError {
         message: String,
     },
@@ -407,6 +436,72 @@ mod tests {
             let value = serde_json::to_value(&event).expect("serialize thread goal event");
             let decoded: RuntimeEventKind =
                 serde_json::from_value(value).expect("deserialize thread goal event");
+            assert_eq!(decoded, event);
+        }
+    }
+
+    #[test]
+    fn workflow_events_round_trip() {
+        let phase = crate::app_server::protocol::WorkflowPhaseView {
+            id: "collect".to_string(),
+            label: "Collect".to_string(),
+            status: crate::app_server::protocol::WorkflowPhaseStatus::Running,
+            planned_count: 3,
+            completed_count: 1,
+            failed_count: 0,
+            skipped_count: 0,
+            started_at_ms: Some(1_000),
+            updated_at_ms: 1_100,
+            completed_at_ms: None,
+        };
+        let artifact = WorkflowArtifactSummary {
+            id: "artifact_1".to_string(),
+            label: "Sources".to_string(),
+            status: Some("ready".to_string()),
+            created_at_ms: 1_200,
+            updated_at_ms: 1_300,
+        };
+        let stats = WorkflowStats {
+            agent_calls: 2,
+            failed_agent_calls: 1,
+            skipped_agent_calls: 0,
+            total_artifacts: 1,
+            tokens_used: Some(500),
+            elapsed_ms: 250,
+            template_stats: json!({"claims": 4}),
+        };
+        let events = vec![
+            RuntimeEventKind::WorkflowStarted {
+                run_id: "workflow_1".to_string(),
+                template_id: WorkflowTemplateId::DeepResearch,
+                preset_id: WorkflowPresetId::Quick,
+                label: "Deep research".to_string(),
+            },
+            RuntimeEventKind::WorkflowPhaseStarted {
+                run_id: "workflow_1".to_string(),
+                phase_id: "collect".to_string(),
+                label: "Collect".to_string(),
+                planned_count: 3,
+            },
+            RuntimeEventKind::WorkflowPhaseUpdated {
+                run_id: "workflow_1".to_string(),
+                phase,
+            },
+            RuntimeEventKind::WorkflowArtifactRecorded {
+                run_id: "workflow_1".to_string(),
+                artifact,
+            },
+            RuntimeEventKind::WorkflowCompleted {
+                run_id: "workflow_1".to_string(),
+                status: WorkflowRunStatus::Completed,
+                stats,
+            },
+        ];
+
+        for event in events {
+            let value = serde_json::to_value(&event).expect("serialize workflow event");
+            let decoded: RuntimeEventKind =
+                serde_json::from_value(value).expect("deserialize workflow event");
             assert_eq!(decoded, event);
         }
     }

@@ -41,7 +41,18 @@ The current response advertises:
     "turn_interrupt",
     "approval_decision",
     "submit_user_input",
-    "events_replay"
+    "events_replay",
+    "memory_search",
+    "memory_save",
+    "memory_update",
+    "memory_forget",
+    "memory_audit",
+    "memory_list_candidates",
+    "memory_list_archived",
+    "memory_promote",
+    "workflow_start",
+    "workflow_read",
+    "workflow_cancel"
   ],
   "supported_streams": ["events_subscribe"],
   "supported_permission_profiles": ["full_access"]
@@ -241,6 +252,101 @@ When a loaded runtime observes a goal mode change, clients may receive:
 
 Clients should update the current thread's visible goal mode from this event and
 reset it to `standard` on `thread_goal_cleared`.
+
+## Workflows
+
+The current boundary exposes a minimal workflow manager shell through
+`/thread/op`. It supports `workflow_start`, `workflow_read`, and
+`workflow_cancel` for the built-in `deep-research` template with preset ids
+`quick`, `standard`, and `deep`.
+
+`workflow_start` creates a visible root workflow thread, records an in-memory
+run handle, returns a queued run view immediately, and starts minimal
+background execution for `deep-research`. The background run uses the built-in
+deep-search template with app-server JSON-agent calls. Each JSON-agent call runs
+one prompt in a clean subagent-like child thread rooted at the workflow root
+thread, then shuts down that child runtime after the call completes.
+
+This is still v0 execution wiring. Workflow runs and workflow events are not
+persisted across process restarts yet. Deep research uses the template's
+mockable agent prompts and does not implement real `web_fetch`, durable
+workflow event persistence, or concurrent fan-out yet.
+
+The start request is:
+
+```json
+{
+  "type": "workflow_start",
+  "workspace_root": ".",
+  "cwd": ".",
+  "template_id": "deep-research",
+  "preset_id": "standard",
+  "question": "Research world models"
+}
+```
+
+The response acknowledges the queued run and names the root workflow thread.
+The run may transition to `running`, `completed`, `failed`, or `cancelled`
+asynchronously after this response:
+
+```json
+{
+  "type": "workflow_started",
+  "run_id": "workflow_run_...",
+  "thread_id": "session_...",
+  "status": "queued"
+}
+```
+
+The read and cancel requests are:
+
+```json
+{
+  "type": "workflow_read",
+  "workspace_root": ".",
+  "run_id": "workflow_run_..."
+}
+```
+
+```json
+{
+  "type": "workflow_cancel",
+  "workspace_root": ".",
+  "run_id": "workflow_run_..."
+}
+```
+
+Both `workflow_read` and `workflow_cancelled` responses return a
+`WorkflowRunView` under `run`. The v0 view is intentionally small: run and
+thread ids, template and preset ids, a display label, status, phase counts,
+artifact summaries, timestamps, optional `report_summary`, and `stats`.
+`WorkflowStats.template_stats` is a template-specific JSON side channel for
+small counters. Full source bodies, claim tables, and report content belong in
+artifact storage rather than every runtime event.
+
+Workflow statuses serialize as `queued`, `running`, `waiting_approval`,
+`completed`, `failed`, or `cancelled`.
+
+Cancelling a terminal run is idempotent and returns the current run view.
+
+Deep research presets bound the maximum planned JSON-agent calls as follows.
+Small runs may use fewer calls when scope/search/extract phases produce less
+work:
+
+```text
+quick    = 1 scope + 3 search + 8 extract + 8*2 verify + 1 synth = 29
+standard = 1 scope + 4 search + 12 extract + 12*2 verify + 1 synth = 42
+deep     = 1 scope + 5 search + 15 extract + 20*3 verify + 1 synth = 82
+```
+
+Planned workflow runtime events will use the same replay and subscription
+channels as thread events. The planned workflow event family is:
+
+- `workflow_started`
+- `workflow_phase_started`
+- `workflow_phase_updated`
+- `workflow_artifact_recorded`
+- `workflow_completed`
 
 ## Agent Tree
 

@@ -46,6 +46,9 @@ pub enum BoundaryCapability {
     MemoryListCandidates,
     MemoryListArchived,
     MemoryPromote,
+    WorkflowStart,
+    WorkflowRead,
+    WorkflowCancel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -75,6 +78,141 @@ pub struct RunParams {
     pub thinking_mode: Option<ThinkingMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_profile: Option<PermissionProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkflowTemplateId {
+    DeepResearch,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowPresetId {
+    Quick,
+    Standard,
+    Deep,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowRunStatus {
+    Queued,
+    Running,
+    WaitingApproval,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowPhaseStatus {
+    Pending,
+    Running,
+    WaitingApproval,
+    Completed,
+    Failed,
+    Skipped,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowStartParams {
+    pub workspace_root: Option<String>,
+    pub cwd: Option<String>,
+    pub template_id: WorkflowTemplateId,
+    pub preset_id: WorkflowPresetId,
+    pub question: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowStartResponse {
+    pub run_id: String,
+    pub thread_id: ThreadId,
+    pub status: WorkflowRunStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowReadParams {
+    pub workspace_root: Option<String>,
+    pub run_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkflowReadResponse {
+    pub run: WorkflowRunView,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowCancelParams {
+    pub workspace_root: Option<String>,
+    pub run_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkflowCancelResponse {
+    pub run: WorkflowRunView,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkflowRunView {
+    pub run_id: String,
+    pub thread_id: ThreadId,
+    pub template_id: WorkflowTemplateId,
+    pub preset_id: WorkflowPresetId,
+    pub label: String,
+    pub status: WorkflowRunStatus,
+    pub phases: Vec<WorkflowPhaseView>,
+    pub artifacts: Vec<WorkflowArtifactSummary>,
+    pub stats: WorkflowStats,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_summary: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowPhaseView {
+    pub id: String,
+    pub label: String,
+    pub status: WorkflowPhaseStatus,
+    pub planned_count: usize,
+    pub completed_count: usize,
+    pub failed_count: usize,
+    pub skipped_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
+    pub updated_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowArtifactSummary {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkflowStats {
+    pub agent_calls: usize,
+    pub failed_agent_calls: usize,
+    pub skipped_agent_calls: usize,
+    pub total_artifacts: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_used: Option<i64>,
+    pub elapsed_ms: i64,
+    #[serde(default)]
+    pub template_stats: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -985,6 +1123,9 @@ pub enum BoundaryOp {
     MemoryListCandidates(MemoryListCandidatesParams),
     MemoryListArchived(MemoryListArchivedParams),
     MemoryPromote(MemoryPromoteParams),
+    WorkflowStart(WorkflowStartParams),
+    WorkflowRead(WorkflowReadParams),
+    WorkflowCancel(WorkflowCancelParams),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1016,6 +1157,9 @@ pub enum BoundaryOpResponse {
     MemoryCandidatesListed(MemoryListCandidatesResponse),
     MemoryArchivedListed(MemoryListArchivedResponse),
     MemoryPromoted(MemoryPromoteResponse),
+    WorkflowStarted(WorkflowStartResponse),
+    WorkflowRead(WorkflowReadResponse),
+    WorkflowCancelled(WorkflowCancelResponse),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1444,6 +1588,241 @@ mod tests {
         let decoded_response: BoundaryOpResponse =
             serde_json::from_value(response_value).expect("deserialize thread fork response");
         assert_eq!(decoded_response, response);
+    }
+
+    #[test]
+    fn workflow_protocol_ids_and_statuses_serialize_with_expected_case() {
+        assert_eq!(
+            serde_json::to_value(WorkflowTemplateId::DeepResearch).unwrap(),
+            json!("deep-research")
+        );
+        assert_eq!(
+            serde_json::from_value::<WorkflowTemplateId>(json!("deep-research")).unwrap(),
+            WorkflowTemplateId::DeepResearch
+        );
+
+        let presets = [
+            (WorkflowPresetId::Quick, "quick"),
+            (WorkflowPresetId::Standard, "standard"),
+            (WorkflowPresetId::Deep, "deep"),
+        ];
+        for (preset, expected) in presets {
+            assert_eq!(serde_json::to_value(preset).unwrap(), json!(expected));
+            assert_eq!(
+                serde_json::from_value::<WorkflowPresetId>(json!(expected)).unwrap(),
+                preset
+            );
+        }
+
+        let statuses = [
+            (WorkflowRunStatus::Queued, "queued"),
+            (WorkflowRunStatus::Running, "running"),
+            (WorkflowRunStatus::WaitingApproval, "waiting_approval"),
+            (WorkflowRunStatus::Completed, "completed"),
+            (WorkflowRunStatus::Failed, "failed"),
+            (WorkflowRunStatus::Cancelled, "cancelled"),
+        ];
+        for (status, expected) in statuses {
+            assert_eq!(serde_json::to_value(status).unwrap(), json!(expected));
+            assert_eq!(
+                serde_json::from_value::<WorkflowRunStatus>(json!(expected)).unwrap(),
+                status
+            );
+        }
+
+        let phase_statuses = [
+            (WorkflowPhaseStatus::Pending, "pending"),
+            (WorkflowPhaseStatus::Running, "running"),
+            (WorkflowPhaseStatus::WaitingApproval, "waiting_approval"),
+            (WorkflowPhaseStatus::Completed, "completed"),
+            (WorkflowPhaseStatus::Failed, "failed"),
+            (WorkflowPhaseStatus::Skipped, "skipped"),
+            (WorkflowPhaseStatus::Cancelled, "cancelled"),
+        ];
+        for (status, expected) in phase_statuses {
+            assert_eq!(serde_json::to_value(status).unwrap(), json!(expected));
+            assert_eq!(
+                serde_json::from_value::<WorkflowPhaseStatus>(json!(expected)).unwrap(),
+                status
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_start_params_round_trip() {
+        let params = WorkflowStartParams {
+            workspace_root: Some(".".to_string()),
+            cwd: Some(".".to_string()),
+            template_id: WorkflowTemplateId::DeepResearch,
+            preset_id: WorkflowPresetId::Standard,
+            question: "Research world models".to_string(),
+        };
+
+        let value = serde_json::to_value(&params).expect("serialize workflow start params");
+        assert_eq!(
+            value,
+            json!({
+                "workspace_root": ".",
+                "cwd": ".",
+                "template_id": "deep-research",
+                "preset_id": "standard",
+                "question": "Research world models"
+            })
+        );
+        let decoded: WorkflowStartParams =
+            serde_json::from_value(value).expect("deserialize workflow start params");
+        assert_eq!(decoded, params);
+    }
+
+    #[test]
+    fn workflow_boundary_ops_round_trip() {
+        let start = BoundaryOp::WorkflowStart(WorkflowStartParams {
+            workspace_root: Some("/repo".to_string()),
+            cwd: Some("research".to_string()),
+            template_id: WorkflowTemplateId::DeepResearch,
+            preset_id: WorkflowPresetId::Quick,
+            question: "Research world models".to_string(),
+        });
+
+        let start_value = serde_json::to_value(&start).expect("serialize workflow start op");
+        assert_eq!(
+            start_value,
+            json!({
+                "type": "workflow_start",
+                "workspace_root": "/repo",
+                "cwd": "research",
+                "template_id": "deep-research",
+                "preset_id": "quick",
+                "question": "Research world models"
+            })
+        );
+        let decoded_start: BoundaryOp =
+            serde_json::from_value(start_value).expect("deserialize workflow start op");
+        assert_eq!(decoded_start, start);
+
+        let read = BoundaryOp::WorkflowRead(WorkflowReadParams {
+            workspace_root: Some("/repo".to_string()),
+            run_id: "workflow_run_1".to_string(),
+        });
+        let read_value = serde_json::to_value(&read).expect("serialize workflow read op");
+        assert_eq!(
+            read_value,
+            json!({
+                "type": "workflow_read",
+                "workspace_root": "/repo",
+                "run_id": "workflow_run_1"
+            })
+        );
+        let decoded_read: BoundaryOp =
+            serde_json::from_value(read_value).expect("deserialize workflow read op");
+        assert_eq!(decoded_read, read);
+
+        let cancel = BoundaryOp::WorkflowCancel(WorkflowCancelParams {
+            workspace_root: Some("/repo".to_string()),
+            run_id: "workflow_run_1".to_string(),
+        });
+        let cancel_value = serde_json::to_value(&cancel).expect("serialize workflow cancel op");
+        assert_eq!(
+            cancel_value,
+            json!({
+                "type": "workflow_cancel",
+                "workspace_root": "/repo",
+                "run_id": "workflow_run_1"
+            })
+        );
+        let decoded_cancel: BoundaryOp =
+            serde_json::from_value(cancel_value).expect("deserialize workflow cancel op");
+        assert_eq!(decoded_cancel, cancel);
+    }
+
+    #[test]
+    fn workflow_boundary_responses_round_trip_with_run_view() {
+        let view = WorkflowRunView {
+            run_id: "workflow_run_1".to_string(),
+            thread_id: ThreadId::new("thread_workflow"),
+            template_id: WorkflowTemplateId::DeepResearch,
+            preset_id: WorkflowPresetId::Standard,
+            label: "Research world models".to_string(),
+            status: WorkflowRunStatus::Running,
+            phases: vec![WorkflowPhaseView {
+                id: "scope".to_string(),
+                label: "Scope".to_string(),
+                status: WorkflowPhaseStatus::Completed,
+                planned_count: 1,
+                completed_count: 1,
+                failed_count: 0,
+                skipped_count: 0,
+                started_at_ms: Some(1_000),
+                updated_at_ms: 1_100,
+                completed_at_ms: Some(1_100),
+            }],
+            artifacts: vec![WorkflowArtifactSummary {
+                id: "artifact_report".to_string(),
+                label: "Report".to_string(),
+                status: Some("draft".to_string()),
+                created_at_ms: 1_200,
+                updated_at_ms: 1_300,
+            }],
+            stats: WorkflowStats {
+                agent_calls: 42,
+                failed_agent_calls: 1,
+                skipped_agent_calls: 0,
+                total_artifacts: 1,
+                tokens_used: Some(12_000),
+                elapsed_ms: 3_000,
+                template_stats: json!({
+                    "search_agents": 4,
+                    "fetch_agents": 12,
+                    "verify_agents": 24,
+                    "synth_agents": 1
+                }),
+            },
+            report_summary: Some("Early findings are available.".to_string()),
+            created_at_ms: 900,
+            updated_at_ms: 1_300,
+            started_at_ms: Some(1_000),
+            completed_at_ms: None,
+        };
+
+        let started = BoundaryOpResponse::WorkflowStarted(WorkflowStartResponse {
+            run_id: "workflow_run_1".to_string(),
+            thread_id: ThreadId::new("thread_workflow"),
+            status: WorkflowRunStatus::Queued,
+        });
+        let started_value =
+            serde_json::to_value(&started).expect("serialize workflow started response");
+        assert_eq!(
+            started_value,
+            json!({
+                "type": "workflow_started",
+                "run_id": "workflow_run_1",
+                "thread_id": "thread_workflow",
+                "status": "queued"
+            })
+        );
+        let decoded_started: BoundaryOpResponse =
+            serde_json::from_value(started_value).expect("deserialize workflow started response");
+        assert_eq!(decoded_started, started);
+
+        let read = BoundaryOpResponse::WorkflowRead(WorkflowReadResponse { run: view.clone() });
+        let read_value = serde_json::to_value(&read).expect("serialize workflow read response");
+        assert_eq!(read_value["type"], "workflow_read");
+        assert_eq!(read_value["run"]["template_id"], "deep-research");
+        assert_eq!(
+            read_value["run"]["stats"]["template_stats"]["verify_agents"],
+            24
+        );
+        let decoded_read: BoundaryOpResponse =
+            serde_json::from_value(read_value).expect("deserialize workflow read response");
+        assert_eq!(decoded_read, read);
+
+        let cancelled = BoundaryOpResponse::WorkflowCancelled(WorkflowCancelResponse { run: view });
+        let cancelled_value =
+            serde_json::to_value(&cancelled).expect("serialize workflow cancelled response");
+        assert_eq!(cancelled_value["type"], "workflow_cancelled");
+        let decoded_cancelled: BoundaryOpResponse = serde_json::from_value(cancelled_value)
+            .expect("deserialize workflow cancelled response");
+        assert_eq!(decoded_cancelled, cancelled);
     }
 
     #[test]

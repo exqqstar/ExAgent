@@ -196,6 +196,11 @@ fn should_persist_event(event: &RuntimeEvent) -> bool {
             | RuntimeEventKind::OpenQuestionRecorded { .. }
             | RuntimeEventKind::OpenQuestionResolved { .. }
             | RuntimeEventKind::ThreadGoalReport { .. }
+            | RuntimeEventKind::WorkflowStarted { .. }
+            | RuntimeEventKind::WorkflowPhaseStarted { .. }
+            | RuntimeEventKind::WorkflowPhaseUpdated { .. }
+            | RuntimeEventKind::WorkflowArtifactRecorded { .. }
+            | RuntimeEventKind::WorkflowCompleted { .. }
     )
 }
 

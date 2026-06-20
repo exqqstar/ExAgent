@@ -761,7 +761,8 @@ mod tests {
             if let Some(tokens_used) = tokens_used {
                 self.tokens_used.fetch_add(tokens_used, Ordering::SeqCst);
             }
-            self.completed.fetch_add(1, Ordering::SeqCst) + 1 < 1
+            self.completed.fetch_add(1, Ordering::SeqCst);
+            false
         }
     }
 }

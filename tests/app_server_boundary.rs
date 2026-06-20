@@ -582,6 +582,30 @@ async fn wait_for_workflow_terminal(
     panic!("timed out waiting for workflow terminal status");
 }
 
+fn assert_thread_shows_workflow_summary(
+    thread: &ThreadView,
+    status_label: &str,
+    summary_fragment: &str,
+) {
+    assert_eq!(thread.status, ThreadStatus::Idle);
+    assert_eq!(thread.turns.len(), 1);
+    assert!(thread.turns[0]
+        .id
+        .as_str()
+        .starts_with("workflow_summary_workflow_run_"));
+    assert_eq!(thread.turns[0].status, TurnStatus::Completed);
+    assert_eq!(thread.turns[0].items.len(), 1);
+    assert!(matches!(
+        &thread.turns[0].items[0],
+        ThreadItem::AssistantMessage { text, .. }
+            if text
+                .as_deref()
+                .is_some_and(|text| text.contains(status_label)
+                    && text.contains("Deep research:")
+                    && text.contains(summary_fragment))
+    ));
+}
+
 async fn wait_for_workflow_cancelled_stable(
     service: &AppServerService,
     run_id: &str,
@@ -4835,8 +4859,11 @@ async fn workflow_child_threads_use_research_agent_type_and_complete_deep_resear
             workspace_root: None,
         })
         .unwrap();
-    assert_eq!(root_thread.thread.status, ThreadStatus::Idle);
-    assert!(root_thread.thread.turns.is_empty());
+    assert_thread_shows_workflow_summary(
+        &root_thread.thread,
+        "Workflow completed",
+        "No verifiable claims",
+    );
 }
 
 #[tokio::test]
@@ -5016,8 +5043,11 @@ async fn workflow_start_marks_deep_research_failed_when_runner_output_is_invalid
             workspace_root: None,
         })
         .unwrap();
-    assert_eq!(root_thread.thread.status, ThreadStatus::Idle);
-    assert!(root_thread.thread.turns.is_empty());
+    assert_thread_shows_workflow_summary(
+        &root_thread.thread,
+        "Workflow failed",
+        "Deep search failed",
+    );
 }
 
 #[tokio::test]

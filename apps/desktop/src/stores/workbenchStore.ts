@@ -38,6 +38,7 @@ import type {
   ThreadView,
   ToolInvocationTranscriptStatus,
   TranscriptMessage,
+  WorkflowStartRequest,
   WorkbenchSnapshot
 } from "@/types";
 
@@ -114,6 +115,7 @@ type WorkbenchState = WorkbenchSnapshot & {
   selectProject: (projectId: string, sessionId?: string) => Promise<void>;
   openSession: (sessionId: string) => Promise<void>;
   startSession: (projectId?: string) => Promise<string | null>;
+  startWorkflow: (projectId: string, request: WorkflowStartRequest) => Promise<string | null>;
   startPersonalSession: () => Promise<string | null>;
   sendPrompt: () => Promise<void>;
   interruptActiveTurn: () => Promise<void>;
@@ -741,6 +743,69 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       error: null
     });
     return null;
+  },
+
+  async startWorkflow(projectId: string, request: WorkflowStartRequest) {
+    const project = get().projects.find((item) => item.id === projectId);
+    if (!project) {
+      set({ error: "Choose a project folder first." });
+      return null;
+    }
+
+    openSessionRequestSequence += 1;
+    cancelPendingAgentTreeRefresh();
+    cancelPendingApprovalsRefresh();
+    resetSelectedAgentThread(get, set);
+    get().eventUnlisten?.();
+    set({
+      loading: true,
+      error: null,
+      activeProjectId: projectId,
+      activeSessionId: null,
+      activeTurnId: null,
+      transcript: [],
+      currentGoal: null,
+      currentGoalMode: "standard",
+      draftGoal: null,
+      goalEditorOpen: false,
+      events: [],
+      changedFiles: [],
+      composerValue: "",
+      composerAttachments: [],
+      composerPlanMode: false,
+      cwd: project.path,
+      eventUnlisten: null,
+      appliedRuntimeEventIds: new Set(),
+      pendingApprovals: [],
+      approvalsStatus: "idle",
+      approvalsError: null,
+      approvalActionStatus: null,
+      selectedApprovalIds: new Set(),
+      compareThreadId: null,
+      compareView: null
+    });
+
+    try {
+      const started = await exagentClient.startWorkflow(projectId, request);
+      const threads = get().search
+        ? await exagentClient.listThreads(projectId, false, get().search)
+        : await exagentClient.reindexProject(projectId);
+      set({
+        projects: get().projects.map((item) => ({ ...item, active: item.id === projectId })),
+        sessions: threads.map(exagentClient.threadRecordToSession),
+        activeProjectId: projectId,
+        activeSessionId: started.thread_id,
+        activeTurnId: null,
+        cwd: project.path,
+        loading: false,
+        error: null
+      });
+      await get().openSession(started.thread_id);
+      return started.thread_id;
+    } catch (error) {
+      set({ loading: false, error: errorMessage(error) });
+      return null;
+    }
   },
 
   async startPersonalSession() {

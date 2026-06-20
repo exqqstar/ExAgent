@@ -15,7 +15,8 @@ use exagent::app_server::protocol::{
     ThreadGoalMode, ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams,
     ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartResponse,
     TurnContextOverrides, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse,
+    TurnStartResponse, WorkflowPresetId, WorkflowStartParams, WorkflowStartResponse,
+    WorkflowTemplateId,
 };
 use exagent::config::ThinkingMode;
 use exagent::events::{
@@ -504,6 +505,38 @@ pub async fn thread_start(
         .read()
         .await
         .start_thread(&project_id)
+        .await
+        .map_err(error_string)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowStartCommandRequest {
+    template_id: WorkflowTemplateId,
+    preset_id: WorkflowPresetId,
+    question: String,
+}
+
+#[tauri::command]
+pub async fn workflow_start(
+    state: State<'_, DesktopState>,
+    project_id: String,
+    request: WorkflowStartCommandRequest,
+) -> CommandResult<WorkflowStartResponse> {
+    state
+        .facade
+        .read()
+        .await
+        .start_workflow(
+            &project_id,
+            WorkflowStartParams {
+                workspace_root: None,
+                cwd: None,
+                template_id: request.template_id,
+                preset_id: request.preset_id,
+                question: request.question,
+            },
+        )
         .await
         .map_err(error_string)
 }

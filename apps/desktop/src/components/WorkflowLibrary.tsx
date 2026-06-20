@@ -237,20 +237,47 @@ export function WorkflowLibrary({ state, onOpenConversation }: { state: Workbenc
   const [question, setQuestion] = useState(
     "研究一下 world model 相关的发展历程、技术路线以及相关应用，覆盖 World Models、Dreamer、JEPA、Genie 和视频生成模型。"
   );
-  const [previewStarted, setPreviewStarted] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
   const selectedTemplate = selectedTemplateId ? templates.find((template) => template.id === selectedTemplateId) ?? null : null;
   const selectedPreset = selectedTemplate?.presets[selectedPresetId] ?? templates[0].presets.standard;
   const resolvedRunProjectId =
     runProjectId && availableProjects.some((project) => project.id === runProjectId) ? runProjectId : defaultProjectId;
   const selectedRunProject = availableProjects.find((project) => project.id === resolvedRunProjectId) ?? null;
   const relatedConversations = relatedWorkflowConversations(state.sessions, resolvedRunProjectId, conversationScope);
+  const canStartWorkflow =
+    selectedTemplate?.id === "deep-research" && Boolean(selectedRunProject) && Boolean(question.trim()) && !starting;
 
   function selectTemplate(templateId: TemplateId) {
     setSelectedTemplateId(templateId);
     setSelectedPresetId("standard");
     setRunProjectId(defaultProjectId);
     setConversationScope("project");
-    setPreviewStarted(false);
+    setStartError(null);
+  }
+
+  async function startWorkflow() {
+    const trimmedQuestion = question.trim();
+    if (selectedTemplate?.id !== "deep-research" || !selectedRunProject || !trimmedQuestion) {
+      return;
+    }
+
+    setStarting(true);
+    setStartError(null);
+    try {
+      const threadId = await state.startWorkflow(selectedRunProject.id, {
+        templateId: "deep-research",
+        presetId: selectedPresetId,
+        question: trimmedQuestion
+      });
+      if (threadId) {
+        onOpenConversation?.();
+      } else {
+        setStartError(zh ? "启动 workflow 失败。" : "Workflow start failed.");
+      }
+    } finally {
+      setStarting(false);
+    }
   }
 
   function openConversation(session: SessionSummary) {
@@ -304,6 +331,7 @@ export function WorkflowLibrary({ state, onOpenConversation }: { state: Workbenc
                 onChange={(projectId) => {
                   setRunProjectId(projectId);
                   setConversationScope("project");
+                  setStartError(null);
                 }}
               />
             </div>
@@ -323,7 +351,7 @@ export function WorkflowLibrary({ state, onOpenConversation }: { state: Workbenc
                   value={question}
                   onChange={(event) => {
                     setQuestion(event.target.value);
-                    setPreviewStarted(false);
+                    setStartError(null);
                   }}
                   className="min-h-[190px] rounded-none border-0 bg-transparent px-4 py-3 shadow-none"
                   placeholder={zh ? "描述你想让这个 workflow 处理的问题..." : "Describe what this workflow should handle..."}
@@ -345,7 +373,7 @@ export function WorkflowLibrary({ state, onOpenConversation }: { state: Workbenc
                             )}
                             onClick={() => {
                               setSelectedPresetId(presetId);
-                              setPreviewStarted(false);
+                              setStartError(null);
                             }}
                           >
                             {zh ? preset.zhLabel : preset.label}
@@ -355,11 +383,30 @@ export function WorkflowLibrary({ state, onOpenConversation }: { state: Workbenc
                     </div>
                   </div>
 
-                  <Button type="button" disabled={!question.trim()} onClick={() => setPreviewStarted(true)}>
+                  <Button type="button" disabled={!canStartWorkflow} onClick={() => void startWorkflow()}>
                     <Play className="h-4 w-4" />
-                    {previewStarted ? (zh ? "已预览" : "Preview ready") : zh ? "预览启动" : "Preview run"}
+                    {starting
+                      ? zh
+                        ? "启动中"
+                        : "Starting"
+                      : selectedTemplate.id === "deep-research"
+                        ? zh
+                          ? "启动 workflow"
+                          : "Start workflow"
+                        : zh
+                          ? "即将支持"
+                          : "Coming soon"}
                   </Button>
                 </div>
+                {selectedTemplate.id !== "deep-research" ? (
+                  <p className="type-body-xs border-t border-border px-4 py-2 text-muted">
+                    {zh ? "这个模板还没有接入 runtime。" : "This template is not wired to the runtime yet."}
+                  </p>
+                ) : startError ? (
+                  <p className="type-body-xs border-t border-border px-4 py-2 text-danger" role="alert">
+                    {startError}
+                  </p>
+                ) : null}
               </div>
             </section>
 

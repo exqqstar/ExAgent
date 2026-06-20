@@ -272,12 +272,21 @@ fn workflow_thread_id_from_run_id(run_id: &str) -> Result<ThreadId> {
             "workflow run not found: {run_id}"
         )));
     };
-    if thread_id.trim().is_empty() {
+    if !is_valid_workflow_thread_id_suffix(thread_id) {
         bail!(AppServerError::InvalidRequest(format!(
             "workflow run not found: {run_id}"
         )));
     }
     Ok(ThreadId::new(thread_id.to_string()))
+}
+
+fn is_valid_workflow_thread_id_suffix(thread_id: &str) -> bool {
+    !thread_id.is_empty()
+        && thread_id != "."
+        && thread_id != ".."
+        && thread_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 async fn persist_terminal_workflow_run(workspace_root: &Path, run: &WorkflowRunView) -> Result<()> {
@@ -1283,5 +1292,30 @@ mod tests {
 
         assert_eq!(value["truncated"], json!(true));
         assert_eq!(value["max_bytes"], json!(MAX_WORKFLOW_TEMPLATE_STATS_BYTES));
+    }
+
+    #[test]
+    fn workflow_run_id_suffix_must_be_plain_thread_id_segment() {
+        let valid =
+            workflow_thread_id_from_run_id("workflow_run_thread-123_abc").expect("valid run id");
+        assert_eq!(valid.as_str(), "thread-123_abc");
+
+        for run_id in [
+            "thread-123",
+            "workflow_run_",
+            "workflow_run_ ",
+            "workflow_run_.",
+            "workflow_run_..",
+            "workflow_run_thread/child",
+            "workflow_run_thread\\child",
+            "workflow_run_../thread",
+            "workflow_run_thread child",
+            "workflow_run_thread.child",
+        ] {
+            assert!(
+                workflow_thread_id_from_run_id(run_id).is_err(),
+                "accepted invalid workflow run id: {run_id}"
+            );
+        }
     }
 }

@@ -46,6 +46,7 @@ pub fn run() {
             commands::project_reveal_in_file_manager,
             commands::thread_list,
             commands::thread_start,
+            commands::workflow_start,
             commands::thread_read,
             commands::thread_resume,
             commands::thread_fork,

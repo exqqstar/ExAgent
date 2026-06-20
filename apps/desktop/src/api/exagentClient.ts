@@ -39,6 +39,8 @@ import type {
   TurnInput,
   TurnMode,
   TurnStartResponse,
+  WorkflowStartRequest,
+  WorkflowStartResponse,
   WorkbenchSnapshot
 } from "@/types";
 
@@ -999,6 +1001,49 @@ export async function startThread(projectId: string): Promise<ThreadStartRespons
   return invokeCommand<ThreadStartResponse>("thread_start", { projectId });
 }
 
+export async function startWorkflow(
+  projectId: string,
+  request: WorkflowStartRequest
+): Promise<WorkflowStartResponse> {
+  if (!isTauriRuntime()) {
+    const now = Date.now();
+    const id = `workflow-mock-${mockThreadSequence++}`;
+    const title = `Deep research: ${request.question.trim().slice(0, 80) || "Untitled"}`;
+    mockSnapshot.sessions = [
+      {
+        id,
+        projectId,
+        title,
+        updatedAt: new Intl.DateTimeFormat(undefined, {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit"
+        }).format(new Date(now)),
+        status: "running",
+        createdAt: now
+      },
+      ...mockSnapshot.sessions
+    ];
+    mockThreadReads.set(id, {
+      thread: {
+        id,
+        status: "running",
+        goal_mode: "standard",
+        active_turn: null,
+        turns: []
+      }
+    });
+    return {
+      run_id: `workflow_run_${id}`,
+      thread_id: id,
+      status: "queued"
+    };
+  }
+
+  return invokeCommand<WorkflowStartResponse>("workflow_start", { projectId, request });
+}
+
 export async function readThread(projectId: string, threadId: string): Promise<ThreadReadResponse> {
   if (!isTauriRuntime()) {
     return mockThreadRead(threadId);
@@ -1775,6 +1820,7 @@ export const exagentClient = {
   saveRuntimeSettings,
   setThreadGoal,
   startThread,
+  startWorkflow,
   startTurn,
   submitApprovalDecision,
   resolveOpenQuestion,

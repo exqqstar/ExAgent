@@ -13,7 +13,7 @@ use crate::app_server::protocol::{
     ThreadCompactParams, ThreadCompactResponse, ThreadForkParams, ThreadForkResponse,
     ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
     ThreadStartParams, ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse,
-    TurnStartParams, TurnStartResponse,
+    TurnStartParams, TurnStartResponse, WorkflowStartParams, WorkflowStartResponse,
 };
 use crate::app_server::ThreadManager;
 use crate::config::AgentConfig;
@@ -233,6 +233,13 @@ impl AppServerService {
         params: TurnInterruptParams,
     ) -> Result<TurnInterruptResponse> {
         self.thread_manager.turn_interrupt(params).await
+    }
+
+    pub async fn workflow_start(
+        &self,
+        params: WorkflowStartParams,
+    ) -> Result<WorkflowStartResponse> {
+        self.thread_manager.workflow_start(params).await
     }
 
     pub async fn approval_decision(

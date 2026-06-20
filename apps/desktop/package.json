@@ -27,7 +27,7 @@
     "@radix-ui/react-scroll-area": "^1.2.10",
     "@radix-ui/react-separator": "^1.1.10",
     "@radix-ui/react-slot": "^1.2.5",
-    "@radix-ui/react-tooltip": "^1.2.8",
+    "@radix-ui/react-tooltip": "^1.2.10",
     "@tailwindcss/vite": "^4.1.12",
     "@tanstack/react-query": "^5.85.5",
     "@tauri-apps/api": "^2.8.0",

@@ -13,7 +13,7 @@ use crate::app_server::protocol::{
     ThreadCompactParams, ThreadCompactResponse, ThreadForkParams, ThreadForkResponse,
     ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
     ThreadStartParams, ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse,
-    TurnStartParams, TurnStartResponse,
+    TurnStartParams, TurnStartResponse, WorkflowStartParams, WorkflowStartResponse,
 };
 use crate::app_server::ThreadManager;
 use crate::config::AgentConfig;
@@ -22,6 +22,7 @@ use crate::llm::LlmClient;
 use crate::model::factory::LlmClientFactory;
 use crate::registry::ToolRegistry;
 use crate::resolver::ModelResolver;
+use crate::runtime::workflow::WorkflowSourceProvider;
 
 #[async_trait]
 pub trait AppServerBoundary: Send + Sync {
@@ -152,6 +153,25 @@ impl AppServerService {
         }
     }
 
+    pub fn with_llm_and_workflow_source_provider<F>(
+        config: AgentConfig,
+        llm: Box<dyn LlmClient>,
+        registry_factory: F,
+        workflow_source_provider: Arc<dyn WorkflowSourceProvider>,
+    ) -> Self
+    where
+        F: Fn() -> ToolRegistry + Send + Sync + 'static,
+    {
+        Self {
+            thread_manager: ThreadManager::with_llm_and_workflow_source_provider(
+                config,
+                llm,
+                registry_factory,
+                workflow_source_provider,
+            ),
+        }
+    }
+
     pub async fn run(&self, params: RunParams) -> Result<AgentRunResponse> {
         self.thread_manager.run(params).await
     }
@@ -213,6 +233,13 @@ impl AppServerService {
         params: TurnInterruptParams,
     ) -> Result<TurnInterruptResponse> {
         self.thread_manager.turn_interrupt(params).await
+    }
+
+    pub async fn workflow_start(
+        &self,
+        params: WorkflowStartParams,
+    ) -> Result<WorkflowStartResponse> {
+        self.thread_manager.workflow_start(params).await
     }
 
     pub async fn approval_decision(

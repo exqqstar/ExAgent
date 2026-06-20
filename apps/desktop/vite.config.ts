@@ -17,6 +17,15 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src")
     }
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          markdown: ["react-markdown", "remark-gfm", "rehype-highlight"]
+        }
+      }
+    }
+  },
   test: {
     environment: "jsdom",
     globals: true,

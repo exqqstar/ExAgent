@@ -58,7 +58,7 @@ impl SpawnAgentTool {
 #[async_trait]
 impl ToolHandler for SpawnAgentTool {
     fn spec(&self) -> ToolSpec {
-        let agent_type_enum = AgentType::ALL
+        let agent_type_enum = AgentType::SPAWNABLE
             .iter()
             .map(AgentType::as_str)
             .collect::<Vec<_>>();
@@ -310,7 +310,7 @@ mod tests {
             "string"
         );
         let agent_type_schema = &schema["input_schema"]["properties"]["agent_type"];
-        let expected_agent_types = AgentType::ALL
+        let expected_agent_types = AgentType::SPAWNABLE
             .iter()
             .map(|agent_type| serde_json::Value::String(agent_type.as_str().to_string()))
             .collect::<Vec<_>>();

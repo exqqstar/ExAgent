@@ -53,7 +53,12 @@ pub(in crate::app_server) fn latest_turn_state(events: &[RuntimeEvent]) -> Optio
             | RuntimeEventKind::ThreadGoalContinuationSuppressed { .. }
             | RuntimeEventKind::ThreadGoalTurnStarted { .. }
             | RuntimeEventKind::ThreadGoalToolCompleted { .. }
-            | RuntimeEventKind::ThreadGoalReport { .. } => None,
+            | RuntimeEventKind::ThreadGoalReport { .. }
+            | RuntimeEventKind::WorkflowStarted { .. }
+            | RuntimeEventKind::WorkflowPhaseStarted { .. }
+            | RuntimeEventKind::WorkflowPhaseUpdated { .. }
+            | RuntimeEventKind::WorkflowArtifactRecorded { .. }
+            | RuntimeEventKind::WorkflowCompleted { .. } => None,
         }?;
         Some(TurnState { turn_id, status })
     })
@@ -230,7 +235,12 @@ fn build_turn_views(events: Vec<RuntimeEvent>) -> Vec<TurnView> {
             | RuntimeEventKind::ThreadGoalContinuationStarted { .. }
             | RuntimeEventKind::ThreadGoalContinuationSuppressed { .. }
             | RuntimeEventKind::ThreadGoalTurnStarted { .. }
-            | RuntimeEventKind::ThreadGoalToolCompleted { .. } => {}
+            | RuntimeEventKind::ThreadGoalToolCompleted { .. }
+            | RuntimeEventKind::WorkflowStarted { .. }
+            | RuntimeEventKind::WorkflowPhaseStarted { .. }
+            | RuntimeEventKind::WorkflowPhaseUpdated { .. }
+            | RuntimeEventKind::WorkflowArtifactRecorded { .. }
+            | RuntimeEventKind::WorkflowCompleted { .. } => {}
             RuntimeEventKind::ThreadGoalReport { .. } => {
                 let turn_id = goal_report_turn_id(&event, current_turn_id.as_ref());
                 let synthetic = event.turn_id.is_none() && current_turn_id.is_none();
@@ -587,6 +597,11 @@ fn thread_item_from_event(event: &RuntimeEvent) -> Option<ThreadItem> {
         | RuntimeEventKind::ThreadGoalContinuationSuppressed { .. }
         | RuntimeEventKind::ThreadGoalTurnStarted { .. }
         | RuntimeEventKind::ThreadGoalToolCompleted { .. }
+        | RuntimeEventKind::WorkflowStarted { .. }
+        | RuntimeEventKind::WorkflowPhaseStarted { .. }
+        | RuntimeEventKind::WorkflowPhaseUpdated { .. }
+        | RuntimeEventKind::WorkflowArtifactRecorded { .. }
+        | RuntimeEventKind::WorkflowCompleted { .. }
         | RuntimeEventKind::ReviewSubmitted { .. }
         | RuntimeEventKind::OpenQuestionRecorded { .. }
         | RuntimeEventKind::OpenQuestionResolved { .. } => None,

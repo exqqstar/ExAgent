@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
+use crate::config::PermissionProfile;
 use crate::events::ApprovalCommandPayload;
 use crate::policy::PolicyMode;
 use crate::registry::ToolContext;
@@ -39,6 +40,76 @@ pub struct WebFetchArgs {
 }
 
 pub struct WebFetchTool;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WebFetchService;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WebFetchServiceOutput {
+    pub(crate) status: ToolStatus,
+    pub(crate) content: String,
+    pub(crate) meta: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WebFetchPreparedRequest {
+    url: String,
+    timeout_secs: u64,
+}
+
+impl WebFetchPreparedRequest {
+    pub(crate) fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub(crate) fn timeout_secs(&self) -> u64 {
+        self.timeout_secs
+    }
+}
+
+impl WebFetchService {
+    pub(crate) fn validate_request(
+        &self,
+        url: &str,
+        timeout_secs: Option<u64>,
+    ) -> Result<WebFetchPreparedRequest, String> {
+        let parsed = validate_http_url(url)?;
+        Ok(WebFetchPreparedRequest {
+            url: parsed.as_str().to_string(),
+            timeout_secs: normalize_timeout(timeout_secs),
+        })
+    }
+
+    pub(crate) fn prepare_request(
+        &self,
+        url: &str,
+        timeout_secs: Option<u64>,
+    ) -> Result<WebFetchPreparedRequest, String> {
+        let prepared = self.validate_request(url, timeout_secs)?;
+        let parsed = reqwest::Url::parse(prepared.url())
+            .map_err(|err| format!("invalid URL after validation: {err}"))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| "url must include a hostname".to_string())?;
+        RATE_LIMITER.check(host)?;
+        Ok(prepared)
+    }
+
+    pub(crate) async fn fetch_prepared_readable_text(
+        &self,
+        request: &WebFetchPreparedRequest,
+        max_output_bytes: usize,
+        permission_profile: PermissionProfile,
+    ) -> Result<WebFetchServiceOutput, String> {
+        fetch_url(
+            request.url(),
+            request.timeout_secs(),
+            max_output_bytes,
+            permission_profile,
+        )
+        .await
+    }
+}
 
 #[async_trait]
 impl ToolHandler for WebFetchTool {
@@ -100,18 +171,21 @@ async fn handle_web_fetch(
         .url
         .as_deref()
         .ok_or_else(|| "url is required".to_string())?;
-    let parsed = validate_http_url(url)?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "url must include a hostname".to_string())?;
-    RATE_LIMITER.check(host)?;
-    let timeout_secs = normalize_timeout(args.timeout_secs);
+    let service = WebFetchService;
+    let prepared = service.prepare_request(url, args.timeout_secs)?;
 
     if matches!(ctx.config.policy_mode, PolicyMode::Off) {
-        return fetch_url(parsed.as_str(), timeout_secs, ctx).await;
+        let result = service
+            .fetch_prepared_readable_text(
+                &prepared,
+                ctx.config.max_output_bytes,
+                ctx.config.permission_profile,
+            )
+            .await?;
+        return Ok(web_fetch_outcome_from_service(result));
     }
 
-    request_approval(parsed.as_str(), args.timeout_secs, ctx).await
+    request_approval(prepared.url(), args.timeout_secs, ctx).await
 }
 
 async fn request_approval(
@@ -186,7 +260,14 @@ async fn handle_approval_decision(
     match decision {
         "approved" => {
             let timeout_secs = normalize_timeout(pending.timeout_secs);
-            let mut outcome = fetch_url(&pending.command, timeout_secs, ctx).await?;
+            let result = fetch_url(
+                &pending.command,
+                timeout_secs,
+                ctx.config.max_output_bytes,
+                ctx.config.permission_profile,
+            )
+            .await?;
+            let mut outcome = web_fetch_outcome_from_service(result);
             annotate_policy_meta(
                 &mut outcome.meta,
                 &approval_id,
@@ -226,8 +307,9 @@ async fn handle_approval_decision(
 async fn fetch_url(
     url: &str,
     timeout_secs: u64,
-    ctx: &ToolContext,
-) -> Result<WebFetchOutcome, String> {
+    max_output_bytes: usize,
+    permission_profile: PermissionProfile,
+) -> Result<WebFetchServiceOutput, String> {
     let started_at = Instant::now();
     let initial_url = reqwest::Url::parse(url).map_err(|err| err.to_string())?;
     let client = reqwest::Client::builder()
@@ -247,7 +329,7 @@ async fn fetch_url(
     let (body, body_truncated) = read_capped_body(response).await?;
     let body_bytes = body.len();
     let extracted = extract_text(&body, content_type.as_deref())?;
-    let output = project_output(extracted.as_bytes(), ctx.config.max_output_bytes);
+    let output = project_output(extracted.as_bytes(), max_output_bytes);
     let output_truncated = output.truncated;
     let output_content = output.content;
     let content_type_meta = content_type.unwrap_or_else(|| "unknown".to_string());
@@ -261,11 +343,14 @@ async fn fetch_url(
         "body_truncated": body_truncated,
         "output_truncated": output_truncated,
         "duration_ms": elapsed_millis(started_at),
-        "output_projection": output_projection_meta(ctx.config.max_output_bytes),
+        "output_projection": output_projection_meta(max_output_bytes),
     });
-    merge_object_meta(&mut meta, permission_profile_meta(ctx));
+    merge_object_meta(
+        &mut meta,
+        permission_profile_meta_from_profile(permission_profile),
+    );
 
-    Ok(WebFetchOutcome {
+    Ok(WebFetchServiceOutput {
         status: if status.is_success() {
             ToolStatus::Success
         } else {
@@ -273,8 +358,16 @@ async fn fetch_url(
         },
         content: output_content,
         meta,
-        effects: Vec::new(),
     })
+}
+
+fn web_fetch_outcome_from_service(result: WebFetchServiceOutput) -> WebFetchOutcome {
+    WebFetchOutcome {
+        status: result.status,
+        content: result.content,
+        meta: result.meta,
+        effects: Vec::new(),
+    }
 }
 
 fn same_origin_redirect_policy(initial_url: reqwest::Url) -> reqwest::redirect::Policy {
@@ -417,8 +510,12 @@ fn annotate_policy_meta(
 }
 
 fn permission_profile_meta(ctx: &ToolContext) -> Value {
+    permission_profile_meta_from_profile(ctx.config.permission_profile)
+}
+
+fn permission_profile_meta_from_profile(permission_profile: PermissionProfile) -> Value {
     json!({
-        "permission_profile": ctx.config.permission_profile.as_str(),
+        "permission_profile": permission_profile.as_str(),
         "filesystem_sandbox": "none",
         "network_sandbox": "none",
         "env_isolation": "none",

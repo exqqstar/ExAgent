@@ -62,6 +62,10 @@ impl AgentToolPolicy {
                     && self.workspace == WorkspaceToolCapability::Full
             }
             "read_file" | "search_files" | "web_search" => true,
+            "web_fetch" => {
+                self.workspace == WorkspaceToolCapability::Full
+                    || self.agent_type == Some(AgentType::WorkflowResearch)
+            }
             "write_file" | "run_command" | "apply_patch" | "exec_command" | "write_stdin" => {
                 self.workspace == WorkspaceToolCapability::Full
             }

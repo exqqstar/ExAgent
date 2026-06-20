@@ -8,3 +8,4 @@ pub(in crate::app_server) mod goal_processor;
 pub(in crate::app_server) mod memory_processor;
 pub(in crate::app_server) mod thread_processor;
 pub(in crate::app_server) mod turn_processor;
+pub(in crate::app_server) mod workflow_processor;

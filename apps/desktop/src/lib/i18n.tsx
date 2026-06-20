@@ -65,9 +65,11 @@ export type TranslationKey =
   | "chrome.inspector.open"
   | "chrome.inspector.title"
   | "chrome.session.new"
+  | "chrome.session.workflows"
   | "sidebar.project"
   | "sidebar.newChat"
   | "sidebar.search"
+  | "sidebar.workflows"
   | "sidebar.projects"
   | "sidebar.addProject"
   | "sidebar.openSettings"
@@ -469,9 +471,11 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "chrome.inspector.open": "Open inspector",
     "chrome.inspector.title": "Inspector",
     "chrome.session.new": "New session",
+    "chrome.session.workflows": "Workflows",
     "sidebar.project": "Project",
     "sidebar.newChat": "New chat",
     "sidebar.search": "Search",
+    "sidebar.workflows": "Workflows",
     "sidebar.projects": "Projects",
     "sidebar.addProject": "Add project",
     "sidebar.openSettings": "Open settings",
@@ -864,9 +868,11 @@ const translations: Record<Locale, Record<TranslationKey, string>> = {
     "chrome.inspector.open": "打开检查器",
     "chrome.inspector.title": "检查器",
     "chrome.session.new": "新会话",
+    "chrome.session.workflows": "工作流",
     "sidebar.project": "项目",
     "sidebar.newChat": "新对话",
     "sidebar.search": "搜索",
+    "sidebar.workflows": "工作流",
     "sidebar.projects": "项目",
     "sidebar.addProject": "添加项目",
     "sidebar.openSettings": "打开设置",

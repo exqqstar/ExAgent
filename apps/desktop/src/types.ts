@@ -471,6 +471,22 @@ export interface ThreadStartResponse {
   thread: ThreadView;
 }
 
+export type WorkflowTemplateId = "deep-research";
+export type WorkflowPresetId = "quick" | "standard" | "deep";
+export type WorkflowRunStatus = "queued" | "running" | "waiting_approval" | "completed" | "failed" | "cancelled";
+
+export interface WorkflowStartRequest {
+  templateId: WorkflowTemplateId;
+  presetId: WorkflowPresetId;
+  question: string;
+}
+
+export interface WorkflowStartResponse {
+  run_id: string;
+  thread_id: string;
+  status: WorkflowRunStatus;
+}
+
 export interface TurnStartResponse {
   thread_id: string;
   turn: TurnView;

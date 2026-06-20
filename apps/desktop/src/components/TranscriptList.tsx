@@ -10,8 +10,9 @@ import {
   LoaderCircle,
   Terminal
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { memo, useEffect, useState } from "react";
 import { ApprovalCard } from "@/components/ApprovalCard";
+import { Markdown } from "@/components/Markdown";
 import { QuestionCard } from "@/components/QuestionCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -252,7 +253,7 @@ export function TranscriptList({
   const renderItems = transcriptRenderItems(messages, groupTurnActivity, activeRun);
 
   return (
-    <div className={cn("flex flex-col gap-5", className)}>
+    <div className={cn("flex flex-col gap-7", className)}>
       {renderItems.map((item) =>
         item.type === "activity" ? (
           <TurnActivityGroup key={item.id} group={item} readOnly={readOnly} />
@@ -271,7 +272,7 @@ export function TranscriptList({
   );
 }
 
-export function TranscriptItem({
+function TranscriptItemBase({
   message,
   forkDisabled = false,
   forkLabel = "Fork from here",
@@ -326,7 +327,7 @@ export function TranscriptItem({
     return (
       <article className="group flex w-full max-w-[780px] flex-col py-1" aria-label="Assistant message">
         <div className="min-w-0 type-body-lg break-words text-muted">
-          <AssistantText text={message.body} />
+          <Markdown content={message.body} />
         </div>
         {showActions ? (
           <div className="mt-2 flex items-center gap-1 text-subtle opacity-70 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
@@ -414,7 +415,19 @@ export function TranscriptItem({
   );
 }
 
-function TurnActivityGroup({
+// Memoized so a streaming message (whose `message` object changes each token)
+// re-renders alone instead of re-parsing every other message's markdown.
+// Callback identity is intentionally ignored — only data props gate re-render.
+export const TranscriptItem = memo(
+  TranscriptItemBase,
+  (prev, next) =>
+    prev.message === next.message &&
+    prev.forkDisabled === next.forkDisabled &&
+    prev.forkLabel === next.forkLabel &&
+    prev.readOnly === next.readOnly
+);
+
+function TurnActivityGroupBase({
   group,
   readOnly
 }: {
@@ -463,10 +476,28 @@ function TurnActivityGroup({
           )}
         </div>
       ) : null}
-      <div className="mt-3 border-t border-border" aria-hidden="true" />
     </section>
   );
 }
+
+// Memoized so reasoning streaming in one activity group doesn't re-render
+// (and re-parse markdown for) every other group in the transcript. The group
+// wrapper is rebuilt every render, so compare by fields + message references
+// (messages are immutable, so a changed message has a new reference).
+function sameMessageRefs(a: TranscriptMessage[], b: TranscriptMessage[]) {
+  return a.length === b.length && a.every((message, index) => message === b[index]);
+}
+
+const TurnActivityGroup = memo(
+  TurnActivityGroupBase,
+  (prev, next) =>
+    prev.readOnly === next.readOnly &&
+    prev.group.id === next.group.id &&
+    prev.group.active === next.group.active &&
+    prev.group.activeStatus === next.group.activeStatus &&
+    prev.group.defaultExpanded === next.group.defaultExpanded &&
+    sameMessageRefs(prev.group.messages, next.group.messages)
+);
 
 function ActiveRunPlaceholder({ status }: { status: ActiveRunStatus }) {
   const waitingApproval = status === "awaiting_approval";
@@ -496,7 +527,7 @@ function TurnActivityMessage({ message, readOnly }: { message: TranscriptMessage
         </div>
         {body ? (
           <div className="type-body-md mt-1 text-muted">
-            <AssistantText text={body} />
+            <Markdown content={body} />
           </div>
         ) : null}
       </div>
@@ -808,93 +839,11 @@ function ReasoningBlock({ message }: { message: TranscriptMessage }) {
       </button>
       {expanded && body ? (
         <div className="type-body-md mt-2 border-l border-border pl-4 text-muted">
-          <AssistantText text={body} />
+          <Markdown content={body} />
         </div>
       ) : null}
     </article>
   );
-}
-
-function AssistantText({ text }: { text: string }) {
-  const blocks = text.split(/\n{2,}/);
-  return (
-    <div className="space-y-4">
-      {blocks.map((block, index) => (
-        <AssistantBlock key={`${index}-${block.slice(0, 12)}`} block={block} />
-      ))}
-    </div>
-  );
-}
-
-function AssistantBlock({ block }: { block: string }) {
-  const trimmed = block.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  if (trimmed.startsWith("```")) {
-    const code = trimmed
-      .replace(/^```[^\n]*\n?/, "")
-      .replace(/\n?```$/, "");
-    return (
-      <pre className="type-code-sm message-card overflow-auto rounded-lg border border-border px-3 py-2 text-muted">
-        {code}
-      </pre>
-    );
-  }
-
-  const lines = trimmed.split("\n");
-  const isList = lines.every((line) => /^[-*]\s+/.test(line.trim()));
-  if (isList) {
-    return (
-      <ul className="space-y-1 pl-5">
-        {lines.map((line, index) => (
-          <li key={`${index}-${line}`} className="list-disc">
-            {renderInlineMarkdown(line.trim().replace(/^[-*]\s+/, ""))}
-          </li>
-        ))}
-      </ul>
-    );
-  }
-
-  return (
-    <p className="whitespace-pre-wrap leading-relaxed">
-      {renderInlineMarkdown(trimmed)}
-    </p>
-  );
-}
-
-function renderInlineMarkdown(text: string): ReactNode[] {
-  const nodes: ReactNode[] = [];
-  const pattern = /(\*\*[^*]+\*\*|`[^`]+`)/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = pattern.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      nodes.push(text.slice(lastIndex, match.index));
-    }
-    const token = match[0];
-    if (token.startsWith("**")) {
-      nodes.push(
-        <strong key={`${match.index}-bold`} className="font-semibold text-ink">
-          {token.slice(2, -2)}
-        </strong>
-      );
-    } else {
-      nodes.push(
-        <code key={`${match.index}-code`} className="rounded bg-surface-2 px-1 py-0.5 font-mono text-[0.92em] text-ink">
-          {token.slice(1, -1)}
-        </code>
-      );
-    }
-    lastIndex = match.index + token.length;
-  }
-
-  if (lastIndex < text.length) {
-    nodes.push(text.slice(lastIndex));
-  }
-  return nodes;
 }
 
 export function TranscriptSkeleton() {

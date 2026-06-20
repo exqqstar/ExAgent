@@ -14,7 +14,8 @@ import {
   Plus,
   Search,
   Settings,
-  Trash2
+  Trash2,
+  Workflow
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -54,6 +55,7 @@ import { useI18n, type TranslationKey } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 type WorkbenchState = ReturnType<typeof getWorkbenchState>;
+type SidebarView = "chat" | "workflows";
 type ProjectConfirmation =
   | { type: "archive_project"; project: ProjectSummary }
   | { type: "archive_conversations"; project: ProjectSummary }
@@ -72,7 +74,15 @@ const statusVariant: Record<SessionStatus, "neutral" | "success" | "warning" | "
   archived: "neutral"
 };
 
-export function Sidebar({ state }: { state: WorkbenchState }) {
+export function Sidebar({
+  state,
+  activeView = "chat",
+  onSelectView
+}: {
+  state: WorkbenchState;
+  activeView?: SidebarView;
+  onSelectView?: (view: SidebarView) => void;
+}) {
   const { t } = useI18n();
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const renamingSession = state.sessions.find((session) => session.id === renamingSessionId) ?? null;
@@ -212,6 +222,7 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
   }
 
   function openProjectSession(session: SessionSummary) {
+    onSelectView?.("chat");
     if (session.projectId === state.activeProjectId) {
       void state.openSession(session.id);
       return;
@@ -220,6 +231,7 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
   }
 
   function startProjectSession(project: ProjectSummary) {
+    onSelectView?.("chat");
     void state.startSession(project.id);
   }
 
@@ -386,7 +398,10 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
           type="button"
           className="sidebar-action-row group"
           aria-label={t("sidebar.newChat")}
-          onClick={() => void state.startPersonalSession()}
+          onClick={() => {
+            onSelectView?.("chat");
+            void state.startPersonalSession();
+          }}
         >
           <Pencil className="h-3.5 w-3.5 shrink-0 text-muted transition-colors group-hover:text-ink" />
           <span className="min-w-0 flex-1 truncate">{t("sidebar.newChat")}</span>
@@ -399,6 +414,16 @@ export function Sidebar({ state }: { state: WorkbenchState }) {
         >
           <Search className="h-3.5 w-3.5 shrink-0 text-muted transition-colors group-hover:text-ink" />
           <span className="min-w-0 flex-1 truncate">{t("sidebar.search")}</span>
+        </button>
+        <button
+          type="button"
+          className={cn("sidebar-action-row group", activeView === "workflows" && "active-rail bg-surface-2")}
+          aria-label={t("sidebar.workflows")}
+          aria-current={activeView === "workflows" ? "page" : undefined}
+          onClick={() => onSelectView?.("workflows")}
+        >
+          <Workflow className="h-3.5 w-3.5 shrink-0 text-muted transition-colors group-hover:text-ink" />
+          <span className="min-w-0 flex-1 truncate">{t("sidebar.workflows")}</span>
         </button>
       </div>
 

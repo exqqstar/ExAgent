@@ -19,6 +19,7 @@ use crate::app_server::protocol::{
     ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams, ThreadReadResponse,
     ThreadResumeParams, ThreadResumeResponse, ThreadStartParams, ThreadStartResponse,
     TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse,
+    WorkflowStartParams, WorkflowStartResponse,
 };
 use crate::app_server::AppServerService;
 use crate::events::RuntimeEvent;
@@ -168,6 +169,21 @@ impl DesktopFacade {
             cwd: Some(project.path.display().to_string()),
             permission_profile: None,
         })?;
+        self.index
+            .reindex_project(&project.id, &project.path)
+            .await?;
+        Ok(response)
+    }
+
+    pub async fn start_workflow(
+        &self,
+        project_id: &str,
+        mut params: WorkflowStartParams,
+    ) -> Result<WorkflowStartResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        params.workspace_root = Some(project.path.display().to_string());
+        params.cwd = Some(project.path.display().to_string());
+        let response = self.service.workflow_start(params).await?;
         self.index
             .reindex_project(&project.id, &project.path)
             .await?;

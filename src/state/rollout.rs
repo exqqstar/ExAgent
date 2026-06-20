@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use crate::app_server::protocol::{WorkflowRunStatus, WorkflowRunView};
 use crate::events::{RuntimeEvent, RuntimeEventKind};
 use crate::session::{ThreadLineage, ThreadSnapshot, ThreadSource, TurnContextItem};
 use crate::types::{ConversationMessage, ThreadId, TurnId};
@@ -16,6 +18,7 @@ pub enum RolloutItem {
     TurnContext(TurnContextItem),
     Compacted(CompactedItem),
     EventMsg(RuntimeEvent),
+    WorkflowRun(WorkflowRunView),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -86,6 +89,7 @@ pub fn snapshot_from_rollout_items(
     let mut reference_turn_context = None;
     let mut latest_compaction = None;
     let mut token_info = None;
+    let mut workflow_message_indexes = HashMap::new();
     for item in items {
         match item {
             RolloutItem::ResponseItem(response_item) => {
@@ -100,6 +104,7 @@ pub fn snapshot_from_rollout_items(
                 if let Some(replacement_history) = &compacted.replacement_history {
                     conversation = replacement_history.clone();
                     token_info = None;
+                    workflow_message_indexes.clear();
                 }
             }
             RolloutItem::EventMsg(event) => {
@@ -108,6 +113,15 @@ pub fn snapshot_from_rollout_items(
                 }
             }
             RolloutItem::ThreadMeta(_) => {}
+            RolloutItem::WorkflowRun(run) => {
+                let message = workflow_run_message(run);
+                if let Some(index) = workflow_message_indexes.get(&run.run_id) {
+                    conversation[*index] = message;
+                } else {
+                    workflow_message_indexes.insert(run.run_id.clone(), conversation.len());
+                    conversation.push(message);
+                }
+            }
         }
     }
 
@@ -140,13 +154,76 @@ pub fn events_from_rollout_items(items: &[RolloutItem]) -> Vec<RuntimeEvent> {
 }
 
 pub fn response_items_from_rollout_items(items: &[RolloutItem]) -> Vec<ResponseItem> {
-    items
-        .iter()
-        .filter_map(|item| match item {
-            RolloutItem::ResponseItem(response_item) => Some(response_item.clone()),
-            _ => None,
-        })
-        .collect()
+    let mut response_items = Vec::new();
+    let mut workflow_response_indexes = HashMap::new();
+
+    for item in items {
+        match item {
+            RolloutItem::ResponseItem(response_item) => response_items.push(response_item.clone()),
+            RolloutItem::WorkflowRun(run) => {
+                let response_item = workflow_run_response_item(run);
+                if let Some(index) = workflow_response_indexes.get(&run.run_id) {
+                    response_items[*index] = response_item;
+                } else {
+                    workflow_response_indexes.insert(run.run_id.clone(), response_items.len());
+                    response_items.push(response_item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    response_items
+}
+
+pub fn latest_workflow_run_from_rollout_items(
+    items: &[RolloutItem],
+    run_id: &str,
+) -> Option<WorkflowRunView> {
+    items.iter().rev().find_map(|item| match item {
+        RolloutItem::WorkflowRun(run) if run.run_id == run_id => Some(run.clone()),
+        _ => None,
+    })
+}
+
+fn workflow_run_response_item(run: &WorkflowRunView) -> ResponseItem {
+    ResponseItem::for_turn(workflow_run_turn_id(run), workflow_run_message(run))
+}
+
+fn workflow_run_turn_id(run: &WorkflowRunView) -> TurnId {
+    TurnId::new(format!("workflow_summary_{}", run.run_id))
+}
+
+fn workflow_run_message(run: &WorkflowRunView) -> ConversationMessage {
+    let mut content = format!(
+        "Workflow {}: {}",
+        workflow_run_status_label(run.status),
+        run.label
+    );
+    if let Some(summary) = run
+        .report_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+    {
+        content.push_str("\n\n");
+        content.push_str(summary);
+    }
+
+    let mut message = ConversationMessage::assistant(Some(content), vec![]);
+    message.internal_source = Some("workflow_run".to_string());
+    message
+}
+
+fn workflow_run_status_label(status: WorkflowRunStatus) -> &'static str {
+    match status {
+        WorkflowRunStatus::Queued => "queued",
+        WorkflowRunStatus::Running => "running",
+        WorkflowRunStatus::WaitingApproval => "waiting for approval",
+        WorkflowRunStatus::Completed => "completed",
+        WorkflowRunStatus::Failed => "failed",
+        WorkflowRunStatus::Cancelled => "cancelled",
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -161,7 +238,8 @@ pub fn should_persist_rollout_item(item: &RolloutItem) -> bool {
         RolloutItem::ThreadMeta(_)
         | RolloutItem::ResponseItem(_)
         | RolloutItem::TurnContext(_)
-        | RolloutItem::Compacted(_) => true,
+        | RolloutItem::Compacted(_)
+        | RolloutItem::WorkflowRun(_) => true,
         RolloutItem::EventMsg(event) => should_persist_event(event),
     }
 }
@@ -196,6 +274,11 @@ fn should_persist_event(event: &RuntimeEvent) -> bool {
             | RuntimeEventKind::OpenQuestionRecorded { .. }
             | RuntimeEventKind::OpenQuestionResolved { .. }
             | RuntimeEventKind::ThreadGoalReport { .. }
+            | RuntimeEventKind::WorkflowStarted { .. }
+            | RuntimeEventKind::WorkflowPhaseStarted { .. }
+            | RuntimeEventKind::WorkflowPhaseUpdated { .. }
+            | RuntimeEventKind::WorkflowArtifactRecorded { .. }
+            | RuntimeEventKind::WorkflowCompleted { .. }
     )
 }
 
@@ -362,6 +445,9 @@ impl RolloutStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_server::protocol::{
+        WorkflowPresetId, WorkflowRunStatus, WorkflowStats, WorkflowStopReason, WorkflowTemplateId,
+    };
     use crate::events::{RuntimeEvent, RuntimeEventKind};
     use crate::resolved::ModelRef;
     use crate::session::{ApprovalId, TurnContextItem};
@@ -694,6 +780,88 @@ mod tests {
     }
 
     #[test]
+    fn workflow_run_rollout_item_round_trips_and_persists() {
+        let mut run = workflow_run_view("workflow_run_thread_1", WorkflowRunStatus::Failed);
+        run.stop_reason = Some(WorkflowStopReason::TokenBudgetExceeded);
+        let item = RolloutItem::WorkflowRun(run.clone());
+
+        assert!(should_persist_rollout_item(&item));
+        let value = serde_json::to_value(&item).expect("serialize workflow run");
+        assert_eq!(value["type"], "workflow_run");
+        assert_eq!(value["payload"]["run_id"], "workflow_run_thread_1");
+        assert_eq!(value["payload"]["stop_reason"], "token_budget_exceeded");
+
+        let decoded: RolloutItem =
+            serde_json::from_value(value).expect("deserialize workflow run item");
+        assert_eq!(decoded, item);
+    }
+
+    #[test]
+    fn latest_workflow_run_from_rollout_items_returns_latest_matching_snapshot() {
+        let older = workflow_run_view("workflow_run_thread_1", WorkflowRunStatus::Failed);
+        let newer = workflow_run_view("workflow_run_thread_1", WorkflowRunStatus::Completed);
+        let other = workflow_run_view("workflow_run_thread_2", WorkflowRunStatus::Cancelled);
+
+        let found = latest_workflow_run_from_rollout_items(
+            &[
+                RolloutItem::WorkflowRun(older),
+                RolloutItem::WorkflowRun(other),
+                RolloutItem::WorkflowRun(newer.clone()),
+            ],
+            "workflow_run_thread_1",
+        )
+        .expect("latest workflow run");
+
+        assert_eq!(found.status, WorkflowRunStatus::Completed);
+        assert_eq!(found.updated_at_ms, newer.updated_at_ms);
+    }
+
+    #[test]
+    fn workflow_run_rollout_items_rebuild_visible_snapshot_and_response_item() {
+        let thread_id = ThreadId::new("thread_workflow_summary");
+        let snapshot = crate::session::ThreadSnapshot::new_thread(
+            thread_id.clone(),
+            PathBuf::from("/workspace"),
+            PathBuf::from("/workspace"),
+        );
+        let mut run = workflow_run_view(
+            "workflow_run_thread_workflow_summary",
+            WorkflowRunStatus::Completed,
+        );
+        run.thread_id = thread_id.clone();
+        run.report_summary = Some("Final workflow summary".to_string());
+        let items = vec![
+            RolloutItem::ThreadMeta(thread_meta_from_snapshot(&snapshot)),
+            RolloutItem::WorkflowRun(run.clone()),
+        ];
+
+        let rebuilt = snapshot_from_rollout_items(&thread_id, &items).expect("rebuild snapshot");
+        assert_eq!(rebuilt.conversation.len(), 1);
+        assert_eq!(
+            rebuilt.conversation[0].role,
+            crate::types::MessageRole::Assistant
+        );
+        assert!(rebuilt.conversation[0]
+            .content
+            .contains("Workflow completed: Deep research: test"));
+        assert!(rebuilt.conversation[0]
+            .content
+            .contains("Final workflow summary"));
+        assert_eq!(
+            rebuilt.conversation[0].internal_source.as_deref(),
+            Some("workflow_run")
+        );
+
+        let response_items = response_items_from_rollout_items(&items);
+        assert_eq!(response_items.len(), 1);
+        assert_eq!(
+            response_items[0].turn_id.as_str(),
+            "workflow_summary_workflow_run_thread_workflow_summary"
+        );
+        assert_eq!(response_items[0].message, rebuilt.conversation[0]);
+    }
+
+    #[test]
     fn rollout_path_uses_thread_directory_and_rollout_jsonl() {
         let workspace_root = PathBuf::from("/workspace");
         let thread_id = ThreadId::new("thread_1");
@@ -702,5 +870,40 @@ mod tests {
 
         assert!(paths.thread_dir.ends_with("thread_1"));
         assert!(paths.rollout_path.ends_with("rollout.jsonl"));
+    }
+
+    fn workflow_run_view(run_id: &str, status: WorkflowRunStatus) -> WorkflowRunView {
+        WorkflowRunView {
+            run_id: run_id.to_string(),
+            thread_id: ThreadId::new(run_id.trim_start_matches("workflow_run_")),
+            template_id: WorkflowTemplateId::DeepResearch,
+            preset_id: WorkflowPresetId::Quick,
+            label: "Deep research: test".to_string(),
+            status,
+            phases: Vec::new(),
+            artifacts: Vec::new(),
+            stats: WorkflowStats {
+                agent_calls: 1,
+                failed_agent_calls: 0,
+                skipped_agent_calls: 0,
+                total_artifacts: 0,
+                tokens_used: None,
+                elapsed_ms: 0,
+                template_stats: json!({}),
+            },
+            report_summary: Some("summary".to_string()),
+            stop_reason: None,
+            created_at_ms: 1,
+            updated_at_ms: match status {
+                WorkflowRunStatus::Completed => 3,
+                WorkflowRunStatus::Failed => 2,
+                WorkflowRunStatus::Cancelled => 4,
+                WorkflowRunStatus::Queued
+                | WorkflowRunStatus::Running
+                | WorkflowRunStatus::WaitingApproval => 1,
+            },
+            started_at_ms: Some(1),
+            completed_at_ms: Some(2),
+        }
     }
 }

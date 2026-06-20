@@ -15,10 +15,19 @@ pub enum AgentType {
     Planner,
     Reviewer,
     Worker,
+    WorkflowResearch,
 }
 
 impl AgentType {
-    pub const ALL: [AgentType; 4] = [
+    pub const ALL: [AgentType; 5] = [
+        AgentType::Explorer,
+        AgentType::Planner,
+        AgentType::Reviewer,
+        AgentType::Worker,
+        AgentType::WorkflowResearch,
+    ];
+
+    pub const SPAWNABLE: [AgentType; 4] = [
         AgentType::Explorer,
         AgentType::Planner,
         AgentType::Reviewer,
@@ -31,6 +40,7 @@ impl AgentType {
             Self::Planner => "planner",
             Self::Reviewer => "reviewer",
             Self::Worker => "worker",
+            Self::WorkflowResearch => "workflow_research",
         }
     }
 }
@@ -59,6 +69,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<AgentType>("\"worker\"").unwrap(),
             AgentType::Worker
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentType>("\"workflow_research\"").unwrap(),
+            AgentType::WorkflowResearch
         );
     }
 
@@ -109,6 +123,7 @@ mod tests {
             assert!(profile.tool_policy.allows("read_file"));
             assert!(profile.tool_policy.allows("search_files"));
             assert!(profile.tool_policy.allows("web_search"));
+            assert!(!profile.tool_policy.allows("web_fetch"));
             assert!(profile.tool_policy.allows("list_agents"));
             assert!(profile.tool_policy.allows("send_message"));
             assert!(profile.tool_policy.allows("wait_agent"));
@@ -116,6 +131,38 @@ mod tests {
             assert!(!profile.tool_policy.allows("run_command"));
             assert!(!profile.tool_policy.allows("spawn_agent"));
             assert!(!profile.tool_policy.allows("close_agent"));
+        }
+    }
+
+    #[test]
+    fn workflow_research_profile_is_read_only_and_cannot_orchestrate() {
+        let profile = profile_for_type(Some(AgentType::WorkflowResearch));
+
+        assert_eq!(profile.id, AgentType::WorkflowResearch);
+        assert_eq!(
+            profile.tool_policy.agent_type,
+            Some(AgentType::WorkflowResearch)
+        );
+        for tool_name in ["read_file", "search_files", "web_search", "web_fetch"] {
+            assert!(
+                profile.tool_policy.allows(tool_name),
+                "{tool_name} should be allowed for workflow research"
+            );
+        }
+        for tool_name in [
+            "write_file",
+            "run_command",
+            "exec_command",
+            "apply_patch",
+            "write_stdin",
+            "spawn_agent",
+            "close_agent",
+            "followup_task",
+        ] {
+            assert!(
+                !profile.tool_policy.allows(tool_name),
+                "{tool_name} should be denied for workflow research"
+            );
         }
     }
 
@@ -144,6 +191,7 @@ mod tests {
         assert_eq!(AgentType::Planner.as_str(), "planner");
         assert_eq!(AgentType::Reviewer.as_str(), "reviewer");
         assert_eq!(AgentType::Worker.as_str(), "worker");
+        assert_eq!(AgentType::WorkflowResearch.as_str(), "workflow_research");
     }
 
     #[test]
@@ -155,6 +203,7 @@ mod tests {
         assert!(description.contains("planner (Planner):"));
         assert!(description.contains("reviewer (Reviewer):"));
         assert!(description.contains("worker (Worker):"));
+        assert!(!description.contains("workflow_research (Workflow research):"));
         assert!(description.contains("When to spawn:"));
         assert!(description.contains("Visible tools: workspace=ReadOnly, collaboration=Basic"));
         assert!(description.contains("Defaults: fork_turns=none, thinking_mode=high"));

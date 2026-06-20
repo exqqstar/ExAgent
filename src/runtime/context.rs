@@ -107,7 +107,8 @@ impl ContextManager {
                         manager.set_token_info(info.clone());
                     }
                 }
-                crate::state::rollout::RolloutItem::ThreadMeta(_) => {}
+                crate::state::rollout::RolloutItem::ThreadMeta(_)
+                | crate::state::rollout::RolloutItem::WorkflowRun(_) => {}
             }
         }
         manager

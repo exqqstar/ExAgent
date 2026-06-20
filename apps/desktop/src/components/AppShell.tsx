@@ -19,6 +19,7 @@ import { ChatView } from "@/components/ChatView";
 import { Inspector } from "@/components/Inspector";
 import { MemoryInspector } from "@/components/memory/MemoryInspector";
 import { Sidebar } from "@/components/Sidebar";
+import { WorkflowLibrary } from "@/components/WorkflowLibrary";
 import { loadWorkbench, useWorkbenchStore } from "@/stores/workbenchStore";
 import type { AgentNode } from "@/types";
 import { useI18n, type TranslationKey } from "@/lib/i18n";
@@ -28,6 +29,7 @@ const DESKTOP_SIDEBAR_DEFAULT_WIDTH = 280;
 const DESKTOP_SIDEBAR_MIN_WIDTH = 240;
 const DESKTOP_SIDEBAR_MAX_WIDTH = 420;
 const DESKTOP_SIDEBAR_COLLAPSE_WIDTH = 220;
+type WorkbenchView = "chat" | "workflows";
 
 export function AppShell() {
   const { t } = useI18n();
@@ -47,6 +49,7 @@ export function AppShell() {
   const [desktopSidebarWidth, setDesktopSidebarWidth] = useState(DESKTOP_SIDEBAR_DEFAULT_WIDTH);
   const [desktopSidebarCollapsed, setDesktopSidebarCollapsed] = useState(false);
   const [resizingDesktopSidebar, setResizingDesktopSidebar] = useState(false);
+  const [activeView, setActiveView] = useState<WorkbenchView>("chat");
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [eventLogOpen, setEventLogOpen] = useState(false);
   const pendingApprovalCount = workbench.pendingApprovals.length;
@@ -364,17 +367,22 @@ export function AppShell() {
                   <SheetHeader className="sr-only">
                     <SheetTitle>{t("chrome.sidebar.projectsAndSessions")}</SheetTitle>
                   </SheetHeader>
-                  <Sidebar state={workbench} />
+                  <Sidebar state={workbench} activeView={activeView} onSelectView={setActiveView} />
                 </SheetContent>
               </Sheet>
 
               <div className="window-session-title flex min-w-0 items-center gap-2" data-tauri-drag-region="">
                 <span
                   aria-hidden="true"
-                  className={cn("h-1.5 w-1.5 shrink-0 rounded-full", sessionStatusDotClass(activeStatus))}
+                  className={cn(
+                    "h-1.5 w-1.5 shrink-0 rounded-full",
+                    activeView === "workflows" ? "bg-primary" : sessionStatusDotClass(activeStatus)
+                  )}
                 />
                 <p className="type-label-md min-w-0 truncate text-ink">
-                  {activeSession?.title ?? t("chrome.session.new")}
+                  {activeView === "workflows"
+                    ? t("chrome.session.workflows")
+                    : activeSession?.title ?? t("chrome.session.new")}
                 </p>
               </div>
             </div>
@@ -495,7 +503,7 @@ export function AppShell() {
               className="sidebar-surface relative hidden shrink-0 md:block"
               style={{ width: `${desktopSidebarWidth}px` }}
             >
-              <Sidebar state={workbench} />
+              <Sidebar state={workbench} activeView={activeView} onSelectView={setActiveView} />
               <div
                 aria-label={t("chrome.sidebar.resizeProjectSidebar")}
                 aria-orientation="vertical"
@@ -528,7 +536,11 @@ export function AppShell() {
               desktopSidebarCollapsed && "workspace-main-full"
             )}
           >
-            <ChatView state={workbench} />
+            {activeView === "workflows" ? (
+              <WorkflowLibrary state={workbench} onOpenConversation={() => setActiveView("chat")} />
+            ) : (
+              <ChatView state={workbench} />
+            )}
           </main>
         </div>
 

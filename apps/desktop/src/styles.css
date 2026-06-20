@@ -153,9 +153,9 @@ button {
 }
 
 .type-body-lg {
-  font-size: 1rem;
+  font-size: 0.9375rem;
   font-weight: 400;
-  line-height: 1.55;
+  line-height: 1.6;
   text-wrap: pretty;
 }
 
@@ -750,4 +750,94 @@ button {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* Markdown code syntax highlighting (highlight.js), theme-aware.
+   Dark defaults; overridden for the light theme below. */
+:root {
+  --syntax-keyword: oklch(0.8 0.13 25);
+  --syntax-string: oklch(0.83 0.14 145);
+  --syntax-number: oklch(0.84 0.12 75);
+  --syntax-comment: oklch(0.62 0.02 260);
+  --syntax-func: oklch(0.82 0.12 245);
+  --syntax-attr: oklch(0.82 0.11 300);
+}
+
+:root[data-theme="light"] {
+  --syntax-keyword: oklch(0.52 0.18 25);
+  --syntax-string: oklch(0.5 0.13 150);
+  --syntax-number: oklch(0.52 0.13 60);
+  --syntax-comment: oklch(0.6 0.02 260);
+  --syntax-func: oklch(0.5 0.16 270);
+  --syntax-attr: oklch(0.48 0.16 320);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --syntax-keyword: oklch(0.52 0.18 25);
+    --syntax-string: oklch(0.5 0.13 150);
+    --syntax-number: oklch(0.52 0.13 60);
+    --syntax-comment: oklch(0.6 0.02 260);
+    --syntax-func: oklch(0.5 0.16 270);
+    --syntax-attr: oklch(0.48 0.16 320);
+  }
+}
+
+.hljs {
+  color: var(--color-ink);
+  background: transparent;
+}
+
+.hljs-comment,
+.hljs-quote {
+  color: var(--syntax-comment);
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-doctag,
+.hljs-type,
+.hljs-name {
+  color: var(--syntax-keyword);
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-meta-string {
+  color: var(--syntax-string);
+}
+
+.hljs-number,
+.hljs-built_in,
+.hljs-builtin-name,
+.hljs-meta {
+  color: var(--syntax-number);
+}
+
+.hljs-title,
+.hljs-title.function_,
+.hljs-function .hljs-title {
+  color: var(--syntax-func);
+}
+
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link {
+  color: var(--syntax-attr);
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: 600;
 }

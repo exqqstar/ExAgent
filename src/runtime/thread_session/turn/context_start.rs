@@ -191,7 +191,7 @@ impl ThreadSession {
             .db()
             .frozen_memory_for_scope(
                 project_id.as_deref(),
-                Some(&snapshot.thread_id),
+                None,
                 self.base_config.memory_frozen_context_max_chars,
             )
             .await

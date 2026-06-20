@@ -26,7 +26,8 @@ use crate::runtime::thread_runtime::{
 use crate::runtime::thread_session::{RuntimeInterrupt, ThreadSession, ThreadSessionOptions};
 use crate::runtime::turn_mode::TurnMode;
 use crate::session::{ThreadLineage, ThreadSnapshot};
-use crate::state::index_db::IndexDb;
+use crate::state::index_db::{IndexDb, ProjectUpsert};
+use crate::state::memory::{MemoryEntryKind, MemorySaveInput, MemoryScope};
 use crate::state::rollout::{RolloutItem, RolloutStore};
 use crate::tools::{ToolCapabilities, ToolHandler, ToolInvocation, ToolOutcome, ToolSpec};
 use crate::types::{
@@ -172,6 +173,98 @@ async fn memory_context_refresh_is_best_effort_when_project_resolution_fails() {
             .content
             .contains("stale memory context must be cleared on recall failure")
     }));
+}
+
+#[tokio::test]
+async fn frozen_memory_context_excludes_thread_scoped_entries() {
+    let dir = tempdir().unwrap();
+    let db_dir = tempdir().unwrap();
+    let workspace_root = dir.path().join("workspace");
+    tokio::fs::create_dir_all(&workspace_root).await.unwrap();
+    let thread_id = ThreadId::new("thread_frozen_project_only");
+    let config = AgentConfig {
+        workspace_root: workspace_root.clone(),
+        cwd: workspace_root.clone(),
+        ..AgentConfig::default()
+    };
+    write_rollout_meta(&config, &thread_id);
+
+    let db = IndexDb::open(db_dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    let project = db
+        .upsert_project(ProjectUpsert {
+            name: "Workspace".into(),
+            path: workspace_root.clone(),
+        })
+        .await
+        .unwrap();
+    db.save_memory_entry_for_scope(
+        Some(&project.id),
+        None,
+        MemorySaveInput {
+            scope: MemoryScope::Project,
+            kind: MemoryEntryKind::Workflow,
+            title: "Pinned project memory survives".into(),
+            content: "Project pinned memory should be injected at session start.".into(),
+            files: vec![],
+            concepts: vec!["project memory".into()],
+            source_refs: vec![],
+            pinned: true,
+        },
+        "test",
+    )
+    .await
+    .unwrap();
+    db.save_memory_entry_for_scope(
+        Some(&project.id),
+        Some(&thread_id),
+        MemorySaveInput {
+            scope: MemoryScope::Thread,
+            kind: MemoryEntryKind::Workflow,
+            title: "Pinned thread memory is inert".into(),
+            content: "Thread pinned memory should not be injected as frozen context.".into(),
+            files: vec![],
+            concepts: vec!["thread memory".into()],
+            source_refs: vec![],
+            pinned: true,
+        },
+        "test",
+    )
+    .await
+    .unwrap();
+
+    let memory_runtime = MemoryRuntime::new(db);
+    let agent_factory: AgentFactory = Arc::new(|config| {
+        Ok(Agent::new(
+            config,
+            Box::new(MockLlm::new(vec![])),
+            ToolRegistry::new(),
+        ))
+    });
+    let mut session = ThreadSession::new(
+        ThreadSessionOptions::new(thread_id.clone(), config.clone(), agent_factory)
+            .with_memory_runtime(Some(memory_runtime)),
+    )
+    .expect("create thread session");
+    let snapshot = ThreadSnapshot::new_thread(thread_id, workspace_root.clone(), workspace_root);
+
+    session
+        .ensure_frozen_memory_context(&snapshot)
+        .await
+        .expect("load frozen memory");
+
+    let prompt = session
+        .context_manager
+        .for_prompt(&config.model.capabilities.input_modalities);
+    let rendered = prompt
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(rendered.contains("Pinned project memory survives"));
+    assert!(!rendered.contains("Pinned thread memory is inert"));
 }
 
 #[test]

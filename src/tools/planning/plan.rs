@@ -26,11 +26,9 @@ use crate::tools::followup_task::FollowupTaskTool;
 use crate::tools::goal::{CreateGoalTool, GetGoalTool, UpdateGoalTool};
 use crate::tools::list_agents::ListAgentsTool;
 use crate::tools::list_dir::ListDirTool;
-use crate::tools::memory_forget::MemoryForgetTool;
 use crate::tools::memory_list::MemoryListTool;
 use crate::tools::memory_recall::MemoryRecallTool;
 use crate::tools::memory_save::MemorySaveTool;
-use crate::tools::memory_update::MemoryUpdateTool;
 use crate::tools::read_file::ReadFileTool;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::run_command::RunCommandTool;
@@ -108,8 +106,6 @@ pub(crate) fn register_dynamic_tools(registry: &mut ToolRegistry, deps: DynamicT
     if deps.memory_enabled && deps.memory_api.is_some() {
         registry.register_handler(MemoryRecallTool);
         registry.register_handler(MemorySaveTool);
-        registry.register_handler(MemoryUpdateTool);
-        registry.register_handler(MemoryForgetTool);
         registry.register_handler(MemoryListTool);
     }
 

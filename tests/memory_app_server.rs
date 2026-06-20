@@ -1,7 +1,8 @@
 use exagent::app_server::desktop_facade::{DesktopFacade, NewProjectRequest};
 use exagent::app_server::protocol::{
     BoundaryCapability, BoundaryOp, BoundaryOpResponse, InitializeParams, MemoryListArchivedParams,
-    MemoryUpdateAction, MemoryUpdateParams,
+    MemoryListCandidatesParams, MemorySaveInputView, MemorySaveParams, MemoryUpdateAction,
+    MemoryUpdateParams,
 };
 use exagent::app_server::AppServerService;
 use exagent::config::AgentConfig;
@@ -86,6 +87,113 @@ async fn desktop_memory_search_derives_scope_from_project_lookup() {
     assert_eq!(response.hits.len(), 1);
     assert_eq!(response.hits[0].title, "Derived workspace memory");
     assert_eq!(response.hits[0].scope, "project");
+}
+
+#[tokio::test]
+async fn desktop_memory_apis_reject_thread_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    let db = IndexDb::open(dir.path().join("index.sqlite"))
+        .await
+        .unwrap();
+    let service = AppServerService::with_config_model_resolver_and_goal_store(
+        AgentConfig::default(),
+        Arc::new(EnvModelResolver),
+        db.clone(),
+    );
+    let facade = DesktopFacade::new(service, db);
+    let project = facade
+        .add_project(NewProjectRequest {
+            name: "Memory Thread Rejection".into(),
+            path: workspace,
+        })
+        .await
+        .unwrap();
+
+    let search_err = facade
+        .memory_search(&project.id, Some("thread".into()), "anything", 10)
+        .await
+        .unwrap_err();
+    assert!(search_err
+        .to_string()
+        .contains("unsupported desktop memory scope \"thread\""));
+
+    let save_err = facade
+        .memory_save(
+            &project.id,
+            MemorySaveParams {
+                workspace_root: None,
+                scope: Some("thread".into()),
+                input: MemorySaveInputView {
+                    kind: "fact".into(),
+                    title: "Thread memory".into(),
+                    content: "Desktop APIs should not save thread memory.".into(),
+                    files: vec![],
+                    concepts: vec![],
+                    pinned: false,
+                },
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(save_err
+        .to_string()
+        .contains("unsupported desktop memory scope \"thread\""));
+
+    let update_err = facade
+        .memory_update(
+            &project.id,
+            MemoryUpdateParams {
+                workspace_root: None,
+                entry_id: "missing".into(),
+                action: MemoryUpdateAction::Pin,
+                scope: Some("thread".into()),
+                kind: None,
+                title: None,
+                content: None,
+                files: None,
+                concepts: None,
+                pinned: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(update_err
+        .to_string()
+        .contains("unsupported desktop memory scope \"thread\""));
+
+    let candidates_err = facade
+        .memory_list_candidates(
+            &project.id,
+            MemoryListCandidatesParams {
+                workspace_root: None,
+                scope: Some("thread".into()),
+                query: None,
+                limit: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(candidates_err
+        .to_string()
+        .contains("unsupported desktop memory scope \"thread\""));
+
+    let archived_err = facade
+        .memory_list_archived(
+            &project.id,
+            MemoryListArchivedParams {
+                workspace_root: None,
+                scope: Some("thread".into()),
+                query: None,
+                limit: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(archived_err
+        .to_string()
+        .contains("unsupported desktop memory scope \"thread\""));
 }
 
 #[tokio::test]

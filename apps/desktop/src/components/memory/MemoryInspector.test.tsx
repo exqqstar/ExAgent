@@ -155,6 +155,35 @@ describe("MemoryInspector", () => {
     expect(memoryApi.memoryUpdate).toHaveBeenCalledWith("project-1", "candidate-1", "reject", "project");
   });
 
+  it("preserves pinned state when editing and promoting a candidate", async () => {
+    const user = userEvent.setup();
+    const pinnedCandidate = {
+      ...candidatesResponse.candidates[0],
+      id: "candidate-pinned",
+      title: "Pinned candidate rule",
+      pinned: true
+    };
+    vi.mocked(memoryApi.memoryListCandidates).mockResolvedValue({
+      candidates: [pinnedCandidate]
+    });
+
+    render(<MemoryInspector projectId="project-1" />);
+
+    const candidate = await screen.findByTestId("memory-candidate-candidate-pinned");
+    await user.click(within(candidate).getByRole("button", { name: "Edit and promote Pinned candidate rule" }));
+    await user.click(screen.getByRole("button", { name: "Promote" }));
+
+    expect(memoryApi.memorySave).toHaveBeenCalledWith("project-1", "project", {
+      kind: "preference",
+      title: "Pinned candidate rule",
+      content: "Use dense sections instead of table-heavy memory UI.",
+      files: ["apps/desktop/src/components/Inspector.tsx"],
+      concepts: ["desktop", "memory"],
+      pinned: true
+    });
+    expect(memoryApi.memoryUpdate).toHaveBeenCalledWith("project-1", "candidate-pinned", "reject", "project");
+  });
+
   it("edits an active entry without dropping concepts", async () => {
     const user = userEvent.setup();
     render(<MemoryInspector projectId="project-1" />);

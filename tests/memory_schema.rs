@@ -5,6 +5,34 @@ use exagent::state::memory::{
     MemorySourceKind, MemorySourceRef, MemoryStatus,
 };
 use exagent::types::{ThreadId, TurnId};
+use sqlx::{sqlite::SqlitePoolOptions, Executor, SqlitePool};
+use std::path::Path;
+
+const LEGACY_MEMORY_TABLES: &[&str] = &[
+    "memory_observations",
+    "memory_observations_fts",
+    "memory_projection_cursors",
+];
+
+async fn sqlite_pool(path: &Path) -> SqlitePool {
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .unwrap()
+}
+
+async fn table_exists(pool: &SqlitePool, table: &str) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+    )
+    .bind(table)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+        > 0
+}
 
 #[test]
 fn memory_contracts_have_expected_defaults() {
@@ -80,6 +108,96 @@ async fn active_memory_entries_round_trip_across_scopes_and_fts() {
 
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].source_id, saved.id);
+}
+
+#[tokio::test]
+async fn index_db_open_creates_memory_schema_without_legacy_observation_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("index.sqlite");
+    let db = IndexDb::open(&db_path).await.unwrap();
+
+    assert_eq!(db.schema_version().await.unwrap(), 9);
+
+    let check_pool = sqlite_pool(&db_path).await;
+    for table in LEGACY_MEMORY_TABLES {
+        assert!(
+            !table_exists(&check_pool, table).await,
+            "{table} should not exist in the current memory schema"
+        );
+    }
+    check_pool.close().await;
+}
+
+#[tokio::test]
+async fn opening_v8_database_drops_legacy_observation_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("index.sqlite");
+    let setup_pool = sqlite_pool(&db_path).await;
+    setup_pool
+        .execute(
+            r#"
+CREATE TABLE memory_observations (
+  id TEXT PRIMARY KEY NOT NULL,
+  scope TEXT NOT NULL CHECK(scope IN ('global','project','thread')),
+  project_id TEXT,
+  thread_id TEXT NOT NULL,
+  turn_id TEXT,
+  event_id TEXT,
+  source_tool_call_id TEXT,
+  kind TEXT NOT NULL,
+  title TEXT NOT NULL,
+  narrative TEXT NOT NULL,
+  files_json TEXT NOT NULL,
+  code_refs_json TEXT NOT NULL,
+  concepts_json TEXT NOT NULL,
+  importance INTEGER NOT NULL,
+  confidence REAL NOT NULL,
+  auto_inject_eligible INTEGER NOT NULL,
+  suspicious_injection INTEGER NOT NULL DEFAULT 0,
+  privacy_flags_json TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL
+)
+            "#,
+        )
+        .await
+        .unwrap();
+    setup_pool
+        .execute(
+            r#"
+CREATE VIRTUAL TABLE memory_observations_fts USING fts5(
+  id UNINDEXED, title, narrative
+)
+            "#,
+        )
+        .await
+        .unwrap();
+    setup_pool
+        .execute(
+            r#"
+CREATE TABLE memory_projection_cursors (
+  thread_id TEXT PRIMARY KEY NOT NULL,
+  rollout_path TEXT NOT NULL,
+  last_event_index INTEGER NOT NULL,
+  last_projected_at_ms INTEGER NOT NULL
+)
+            "#,
+        )
+        .await
+        .unwrap();
+    setup_pool.execute("PRAGMA user_version = 8").await.unwrap();
+    setup_pool.close().await;
+
+    let db = IndexDb::open(&db_path).await.unwrap();
+    assert_eq!(db.schema_version().await.unwrap(), 9);
+
+    let check_pool = sqlite_pool(&db_path).await;
+    for table in LEGACY_MEMORY_TABLES {
+        assert!(
+            !table_exists(&check_pool, table).await,
+            "{table} should be dropped when opening a v8 database"
+        );
+    }
+    check_pool.close().await;
 }
 
 #[tokio::test]

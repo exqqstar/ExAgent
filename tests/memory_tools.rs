@@ -7,12 +7,10 @@ use exagent::policy::PolicyManager;
 use exagent::registry::{ToolContext, ToolRegistry};
 use exagent::runtime::agent_profile::AgentToolPolicy;
 use exagent::runtime::memory::{MemoryRuntime, MemoryToolApi};
-use exagent::state::memory::{MemoryEntryKind, MemorySaveInput, MemoryScope, MemorySearchQuery};
-use exagent::tools::memory_forget::MemoryForgetTool;
+use exagent::state::memory::{MemoryEntryKind, MemorySaveInput, MemoryScope};
 use exagent::tools::memory_list::MemoryListTool;
 use exagent::tools::memory_recall::MemoryRecallTool;
 use exagent::tools::memory_save::MemorySaveTool;
-use exagent::tools::memory_update::MemoryUpdateTool;
 use exagent::tools::{ToolCapabilities, ToolHandler, ToolInvocation};
 use exagent::types::{ThreadId, ToolCall, ToolStatus, TurnId};
 use serde_json::json;
@@ -257,221 +255,87 @@ async fn memory_save_rejects_project_id_and_global_scope() {
 }
 
 #[tokio::test]
-async fn memory_forget_is_limited_to_derived_project_scope() {
+async fn memory_save_rejects_pinned_argument_from_model() {
     let fixture = fixture().await;
     let ctx = fixture.context(Some(fixture.memory_api.clone()));
-    let db = fixture.memory_api.runtime().db();
-    assert_eq!(
-        MemoryForgetTool.capabilities(),
-        ToolCapabilities {
-            mutating: true,
-            requires_approval: false,
-            parallel_safe: false,
-        }
-    );
-    let other_workspace = fixture._dir.path().join("other_project");
-    tokio::fs::create_dir_all(&other_workspace).await.unwrap();
-    let other_project = db
-        .upsert_project(ProjectUpsert {
-            name: "Other".into(),
-            path: other_workspace,
-        })
-        .await
-        .unwrap();
-    let other_entry = db
-        .save_memory_entry_for_scope(
-            Some(&other_project.id),
-            None,
-            MemorySaveInput {
-                scope: MemoryScope::Project,
-                kind: MemoryEntryKind::Fact,
-                title: "Other project memory".into(),
-                content: "This entry must not be deletable from the current project.".into(),
-                files: vec!["src/tools/memory_forget.rs".into()],
-                concepts: vec!["forget".into()],
-                source_refs: vec![],
-                pinned: false,
-            },
-            "test",
-        )
-        .await
-        .unwrap();
 
-    let outcome = MemoryForgetTool
+    let outcome = MemorySaveTool
         .handle(
             invocation(
-                "call_forget_other",
-                "memory_forget",
-                json!({ "id": other_entry.id }),
-            ),
-            &ctx,
-        )
-        .await;
-    assert_eq!(outcome.model_result.status, ToolStatus::Error);
-
-    let still_present = db
-        .search_memory(MemorySearchQuery {
-            scope: MemoryScope::Project,
-            project_id: Some(other_project.id),
-            thread_id: None,
-            query: "Other project memory".into(),
-            mode: exagent::state::memory::MemoryRecallMode::ToolPull,
-            limit: 10,
-            include_entries: true,
-        })
-        .await
-        .unwrap();
-    assert_eq!(still_present.len(), 1);
-}
-
-#[tokio::test]
-async fn memory_update_allows_pin_unpin_and_supersede_but_rejects_promote() {
-    let fixture = fixture().await;
-    let ctx = fixture.context(Some(fixture.memory_api.clone()));
-    let db = fixture.memory_api.runtime().db();
-    assert_eq!(
-        MemoryUpdateTool.capabilities(),
-        ToolCapabilities {
-            mutating: true,
-            requires_approval: false,
-            parallel_safe: false,
-        }
-    );
-    let old = db
-        .save_memory_entry_for_scope(
-            Some(&fixture.project_id),
-            None,
-            MemorySaveInput {
-                scope: MemoryScope::Project,
-                kind: MemoryEntryKind::Fact,
-                title: "Tool update old policy".into(),
-                content: "Tool update old content toololdgone should no longer be recalled.".into(),
-                files: vec!["src/tools/memory_update.rs".into()],
-                concepts: vec!["tool update old".into()],
-                source_refs: vec![],
-                pinned: false,
-            },
-            "test",
-        )
-        .await
-        .unwrap();
-
-    let pin_outcome = MemoryUpdateTool
-        .handle(
-            invocation(
-                "call_pin",
-                "memory_update",
-                json!({ "id": old.id.clone(), "action": "pin" }),
-            ),
-            &ctx,
-        )
-        .await;
-    assert_eq!(pin_outcome.model_result.status, ToolStatus::Success);
-    assert_eq!(
-        pin_outcome.model_result.meta.as_ref().unwrap()["pinned"],
-        true
-    );
-
-    let unpin_outcome = MemoryUpdateTool
-        .handle(
-            invocation(
-                "call_unpin",
-                "memory_update",
-                json!({ "id": old.id.clone(), "action": "unpin" }),
-            ),
-            &ctx,
-        )
-        .await;
-    assert_eq!(unpin_outcome.model_result.status, ToolStatus::Success);
-    assert_eq!(
-        unpin_outcome.model_result.meta.as_ref().unwrap()["pinned"],
-        false
-    );
-
-    let promote_outcome = MemoryUpdateTool
-        .handle(
-            invocation(
-                "call_promote",
-                "memory_update",
-                json!({ "id": old.id.clone(), "action": "promote" }),
-            ),
-            &ctx,
-        )
-        .await;
-    assert_eq!(promote_outcome.model_result.status, ToolStatus::Error);
-    assert!(promote_outcome
-        .model_result
-        .content
-        .contains("unsupported for model actors"));
-
-    let supersede_outcome = MemoryUpdateTool
-        .handle(
-            invocation(
-                "call_supersede",
-                "memory_update",
+                "call_save_pinned",
+                "memory_save",
                 json!({
-                    "id": old.id.clone(),
-                    "action": "supersede",
+                    "scope": "project",
                     "kind": "fact",
-                    "title": "Tool update new policy",
-                    "content": "Tool update new content should be recalled.",
-                    "files": ["src/tools/memory_update.rs"],
-                    "concepts": ["tool update new"],
+                    "title": "Pinned must be curated",
+                    "content": "Model proposed memory cannot choose pinned injection.",
                     "pinned": true
                 }),
             ),
             &ctx,
         )
         .await;
-    assert_eq!(supersede_outcome.model_result.status, ToolStatus::Success);
-    let new_id = supersede_outcome.model_result.meta.as_ref().unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert_eq!(
-        supersede_outcome.model_result.meta.as_ref().unwrap()["supersedes_id"],
-        old.id
-    );
-    assert_eq!(
-        supersede_outcome.model_result.meta.as_ref().unwrap()["status"],
-        "active"
-    );
+    assert_eq!(outcome.model_result.status, ToolStatus::Error);
+    assert!(outcome.model_result.content.contains("pinned"));
+}
 
-    let old_hits = db
-        .search_memory(MemorySearchQuery {
-            scope: MemoryScope::Project,
-            project_id: Some(fixture.project_id.clone()),
-            thread_id: None,
-            query: "toololdgone".into(),
-            mode: exagent::state::memory::MemoryRecallMode::ToolPull,
-            limit: 10,
-            include_entries: true,
-        })
-        .await
-        .unwrap();
-    assert!(old_hits.is_empty());
+#[test]
+fn memory_save_schema_does_not_advertise_model_controlled_pinned() {
+    let schema = MemorySaveTool.spec().to_internal_schema();
+    let properties = schema["input_schema"]["properties"]
+        .as_object()
+        .expect("memory_save schema properties");
+    assert!(!properties.contains_key("pinned"));
+}
 
-    let new_hits = db
-        .search_memory(MemorySearchQuery {
-            scope: MemoryScope::Project,
-            project_id: Some(fixture.project_id.clone()),
-            thread_id: None,
-            query: "Tool update new policy".into(),
-            mode: exagent::state::memory::MemoryRecallMode::ToolPull,
-            limit: 10,
-            include_entries: true,
-        })
-        .await
-        .unwrap();
-    assert_eq!(new_hits.len(), 1);
-    assert_eq!(new_hits[0].source_id, new_id);
+#[tokio::test]
+async fn model_memory_tools_reject_thread_scope() {
+    let fixture = fixture().await;
+    let ctx = fixture.context(Some(fixture.memory_api.clone()));
 
-    let old_actions = db.memory_audit_actions_for_tests(&old.id).await.unwrap();
-    assert!(old_actions.iter().any(|action| action == "pin"));
-    assert!(old_actions.iter().any(|action| action == "unpin"));
-    assert!(old_actions.iter().any(|action| action == "supersede_old"));
-    let new_actions = db.memory_audit_actions_for_tests(&new_id).await.unwrap();
-    assert!(new_actions.iter().any(|action| action == "supersede_new"));
+    let save = MemorySaveTool
+        .handle(
+            invocation(
+                "call_save_thread",
+                "memory_save",
+                json!({
+                    "scope": "thread",
+                    "kind": "fact",
+                    "title": "Thread scoped model memory",
+                    "content": "Thread scope should not be model-addressable."
+                }),
+            ),
+            &ctx,
+        )
+        .await;
+    assert_eq!(save.model_result.status, ToolStatus::Error);
+    assert!(save.model_result.content.contains("thread"));
+
+    let recall = MemoryRecallTool
+        .handle(
+            invocation(
+                "call_recall_thread",
+                "memory_recall",
+                json!({ "query": "thread scoped", "scope": "thread" }),
+            ),
+            &ctx,
+        )
+        .await;
+    assert_eq!(recall.model_result.status, ToolStatus::Error);
+    assert!(recall.model_result.content.contains("thread"));
+
+    let list = MemoryListTool
+        .handle(
+            invocation(
+                "call_list_thread",
+                "memory_list",
+                json!({ "query": "thread scoped", "scope": "thread" }),
+            ),
+            &ctx,
+        )
+        .await;
+    assert_eq!(list.model_result.status, ToolStatus::Error);
+    assert!(list.model_result.content.contains("thread"));
 }
 
 #[tokio::test]

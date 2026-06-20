@@ -605,15 +605,11 @@ mod tests {
         })
         .await
         .expect("selection with memory api");
-        for tool_name in [
-            "memory_recall",
-            "memory_save",
-            "memory_update",
-            "memory_forget",
-            "memory_list",
-        ] {
+        for tool_name in ["memory_recall", "memory_save", "memory_list"] {
             assert!(visible_tool_names(&with_api).contains(&tool_name));
         }
+        assert!(!visible_tool_names(&with_api).contains(&"memory_update"));
+        assert!(!visible_tool_names(&with_api).contains(&"memory_forget"));
 
         config.memory_enabled = false;
         let disabled = build_tool_selection(ToolSelectionInput {

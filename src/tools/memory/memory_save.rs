@@ -26,8 +26,6 @@ struct MemorySaveArgs {
     files: Vec<String>,
     #[serde(default)]
     concepts: Vec<String>,
-    #[serde(default)]
-    pinned: bool,
 }
 
 #[async_trait]
@@ -77,7 +75,7 @@ impl ToolHandler for MemorySaveTool {
             files: args.files,
             concepts: args.concepts,
             source_refs: source_refs_for_tool_call(ctx, &call),
-            pinned: args.pinned,
+            pinned: false,
         };
 
         match api

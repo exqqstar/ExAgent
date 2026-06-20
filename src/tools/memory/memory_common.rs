@@ -14,7 +14,6 @@ pub(crate) const MEMORY_TOOL_ACTOR: &str = "model";
 pub(crate) enum MemoryScopeArg {
     Global,
     Project,
-    Thread,
 }
 
 impl From<MemoryScopeArg> for MemoryScope {
@@ -22,7 +21,6 @@ impl From<MemoryScopeArg> for MemoryScope {
         match scope {
             MemoryScopeArg::Global => Self::Global,
             MemoryScopeArg::Project => Self::Project,
-            MemoryScopeArg::Thread => Self::Thread,
         }
     }
 }

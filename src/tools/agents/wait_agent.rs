@@ -22,7 +22,12 @@ impl ToolHandler for WaitAgentTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec::function(
             "wait_agent",
-            "Wait for mailbox activity on the current agent.",
+            "Wait for mailbox activity (subagent messages or completions) on the current agent. \
+Returns `timed_out: false` as soon as activity arrives, or `timed_out: true` if the timeout \
+elapsed first. A timeout does NOT mean a subagent has finished: if you are still waiting on a \
+spawned agent's result, call `wait_agent` again to keep waiting. Do not produce your final \
+answer until the subagent you depend on has reported back, or you have explicitly decided to \
+stop waiting for it.",
             json!({
                 "type": "object",
                 "additionalProperties": false,

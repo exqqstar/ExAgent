@@ -35,6 +35,35 @@ impl ToolHandler for ListAgentsTool {
                 "required": []
             }),
         )
+        // Internal contract: describes the JSON object this tool returns as its
+        // model-facing `content`. See ADR-0042.
+        .with_output_schema(json!({
+            "type": "object",
+            "properties": {
+                "agents": {
+                    "type": "array",
+                    "description": "Live agents in the current root agent tree.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "thread_id": { "type": ["string", "null"], "description": "Thread id of the agent, or null while it is still spawning." },
+                            "root_thread_id": { "type": "string", "description": "Root thread id of the agent tree." },
+                            "depth": { "type": "integer", "description": "Depth below the root agent (root is 0)." },
+                            "agent_path": { "type": "string", "description": "Absolute agent path, such as /root/research." },
+                            "status": { "type": "string", "enum": ["spawning", "running"], "description": "Whether the agent is still spawning or already running." },
+                            "agent_type": { "type": "string", "description": "Agent type, when known." },
+                            "agent_role": { "type": "string", "description": "Optional metadata role label." },
+                            "agent_nickname": { "type": "string", "description": "Optional nickname." },
+                            "last_task_message": { "type": "string", "description": "Preview of the most recent task message assigned to the agent." }
+                        },
+                        "required": ["thread_id", "root_thread_id", "depth", "agent_path", "status"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["agents"],
+            "additionalProperties": false
+        }))
     }
 
     fn capabilities(&self) -> ToolCapabilities {
@@ -104,6 +133,25 @@ mod tests {
             .as_object()
             .expect("properties object")
             .is_empty());
+    }
+
+    #[test]
+    fn list_agents_output_schema_matches_emitted_content() {
+        let spec = ListAgentsTool::new(AgentControl::new_root(
+            ThreadId::new("thread_schema"),
+            Arc::downgrade(&(Arc::new(TestLifecycle) as Arc<dyn SubagentLifecycle>)),
+        ))
+        .spec();
+        let output_schema = spec
+            .output_schema
+            .expect("list_agents declares output_schema");
+        // Top-level key the handler actually emits in the result `content` JSON.
+        assert_eq!(output_schema["required"], json!(["agents"]));
+        // Always-present fields on each listed agent.
+        assert_eq!(
+            output_schema["properties"]["agents"]["items"]["required"],
+            json!(["thread_id", "root_thread_id", "depth", "agent_path", "status"])
+        );
     }
 
     struct TestLifecycle;

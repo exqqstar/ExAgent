@@ -8,6 +8,7 @@ import { GoalControl } from "@/components/GoalControl";
 import { TranscriptList } from "@/components/TranscriptList";
 import { setComposerValue } from "@/stores/workbenchStore";
 import type { getWorkbenchState } from "@/stores/workbenchStore";
+import type { WorkflowRunView } from "@/types";
 import { useI18n, type TranslationKey } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
@@ -17,8 +18,9 @@ export function ChatView({ state }: { state: WorkbenchState }) {
   const { t } = useI18n();
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
 
-  const empty = !state.loading && state.transcript.length === 0;
+  const empty = !state.activeWorkflowRun && !state.loading && state.transcript.length === 0;
   const activeSession = state.sessions.find((session) => session.id === state.activeSessionId);
+  const workflowRun = state.activeWorkflowRun;
   const activeRun =
     state.activeSessionId && (activeSession?.status === "running" || activeSession?.status === "awaiting_approval")
       ? {
@@ -65,6 +67,16 @@ export function ChatView({ state }: { state: WorkbenchState }) {
     return () => window.cancelAnimationFrame(frame);
   }, [activeRunScrollSignature]);
 
+  useEffect(() => {
+    if (!workflowRun || !["queued", "running", "waiting_approval"].includes(workflowRun.status)) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      void state.refreshActiveWorkflowRun();
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [state, workflowRun?.run_id, workflowRun?.status]);
+
   if (state.compareView) {
     return <BranchCompareView state={state} compare={state.compareView} />;
   }
@@ -81,6 +93,9 @@ export function ChatView({ state }: { state: WorkbenchState }) {
               <>
                 <ScrollArea ref={transcriptScrollRef} className="min-h-0 flex-1">
                   <div className="mx-auto flex w-full max-w-[920px] flex-col gap-5 pb-5 pt-1">
+                    {workflowRun ? (
+                      <WorkflowRunPanel run={workflowRun} onCancel={state.cancelActiveWorkflowRun} />
+                    ) : null}
                     <TranscriptList
                       messages={state.transcript}
                       loading={state.loading && state.transcript.length === 0}
@@ -112,6 +127,79 @@ export function ChatView({ state }: { state: WorkbenchState }) {
       </div>
     </div>
   );
+}
+
+function WorkflowRunPanel({ run, onCancel }: { run: WorkflowRunView; onCancel: () => Promise<void> }) {
+  const terminal = ["completed", "failed", "cancelled"].includes(run.status);
+  const tone =
+    run.status === "failed"
+      ? "border-danger/30 bg-danger/8"
+      : run.status === "completed"
+        ? "border-success/30 bg-success/8"
+        : "border-border bg-surface-1";
+  const completed = run.phases.reduce((total, phase) => total + phase.completed_count, 0);
+  const failed = run.phases.reduce((total, phase) => total + phase.failed_count, 0);
+  const planned = run.phases.reduce((total, phase) => total + phase.planned_count, 0);
+
+  return (
+    <section className={cn("rounded-lg border px-4 py-3", tone)} aria-label="Workflow run">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <FileText className="h-4 w-4 shrink-0 text-muted" />
+            <h2 className="type-title-md truncate text-ink">{run.label}</h2>
+            <span className="type-label-sm rounded border border-border bg-surface-2 px-2 py-0.5 text-muted">
+              {workflowStatusLabel(run.status)}
+            </span>
+          </div>
+          {run.report_summary ? (
+            <p className="type-body-sm mt-2 whitespace-pre-wrap text-muted">{run.report_summary}</p>
+          ) : null}
+        </div>
+        {!terminal ? (
+          <Button type="button" variant="outline" size="sm" onClick={() => void onCancel()}>
+            <X className="h-4 w-4" />
+            Cancel
+          </Button>
+        ) : null}
+      </div>
+
+      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+        <WorkflowMetric label="Agents" value={`${run.stats.agent_calls}`} />
+        <WorkflowMetric label="Phase work" value={`${completed}/${planned}`} />
+        <WorkflowMetric label="Failed" value={`${failed + run.stats.failed_agent_calls}`} />
+      </div>
+
+      <div className="mt-3 space-y-2">
+        {run.phases.map((phase) => (
+          <div key={phase.id} className="rounded-md border border-border bg-surface-2/55 px-3 py-2">
+            <div className="flex items-center justify-between gap-3">
+              <span className="type-label-md text-ink">{phase.label}</span>
+              <span className="type-label-sm text-muted">{workflowStatusLabel(phase.status)}</span>
+            </div>
+            <div className="type-body-sm mt-1 text-muted">
+              {phase.completed_count}/{phase.planned_count}
+              {phase.failed_count > 0 ? ` · ${phase.failed_count} failed` : ""}
+              {phase.skipped_count > 0 ? ` · ${phase.skipped_count} skipped` : ""}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function WorkflowMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-border bg-surface-2/55 px-3 py-2">
+      <p className="type-label-sm text-muted">{label}</p>
+      <p className="type-title-sm text-ink">{value}</p>
+    </div>
+  );
+}
+
+function workflowStatusLabel(status: string) {
+  return status.replace(/_/g, " ");
 }
 
 function BranchCompareView({

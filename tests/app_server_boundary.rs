@@ -88,6 +88,10 @@ impl TestWorkflowSourceProvider {
     }
 }
 
+fn empty_workflow_source_provider() -> Arc<TestWorkflowSourceProvider> {
+    Arc::new(TestWorkflowSourceProvider::new(Vec::new()))
+}
+
 #[async_trait]
 impl WorkflowSourceSearch for TestWorkflowSourceProvider {
     async fn search(
@@ -4372,7 +4376,7 @@ async fn submit_boundary_op_dispatches_workflow_start_read_and_cancel() {
     let dir = tempdir().unwrap();
     let llm_started = Arc::new(Notify::new());
     let llm_release = Arc::new(Notify::new());
-    let service = AppServerService::with_llm(
+    let service = AppServerService::with_llm_and_workflow_source_provider(
         AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
@@ -4383,6 +4387,7 @@ async fn submit_boundary_op_dispatches_workflow_start_read_and_cancel() {
             release: llm_release.clone(),
         }),
         ToolRegistry::new,
+        empty_workflow_source_provider(),
     );
 
     let response = service
@@ -4992,7 +4997,7 @@ async fn workflow_read_reports_live_deep_research_search_progress_before_termina
 #[tokio::test]
 async fn workflow_start_marks_deep_research_failed_when_runner_output_is_invalid() {
     let dir = tempdir().unwrap();
-    let service = AppServerService::with_llm(
+    let service = AppServerService::with_llm_and_workflow_source_provider(
         AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
@@ -5004,6 +5009,7 @@ async fn workflow_start_marks_deep_research_failed_when_runner_output_is_invalid
             reasoning: vec![],
         }])),
         ToolRegistry::new,
+        empty_workflow_source_provider(),
     );
 
     let response = service
@@ -5099,16 +5105,16 @@ async fn workflow_start_marks_deep_research_search_phase_failed_when_source_prov
     };
 
     let read = wait_for_workflow_terminal(&service, &started.run_id).await;
-    assert_eq!(read.run.status, WorkflowRunStatus::Completed);
+    assert_eq!(read.run.status, WorkflowRunStatus::Failed);
     assert!(read
         .run
         .report_summary
         .as_deref()
         .unwrap_or_default()
-        .contains("No usable sources"));
+        .contains("Deep search failed"));
     assert_eq!(read.run.stats.agent_calls, 1);
-    assert_eq!(read.run.stats.total_artifacts, 4);
-    assert_eq!(read.run.artifacts[0].label, "Report");
+    assert_eq!(read.run.stats.total_artifacts, 1);
+    assert_eq!(read.run.artifacts[0].label, "Error");
     let phase_statuses = read
         .run
         .phases
@@ -5125,6 +5131,34 @@ async fn workflow_start_marks_deep_research_search_phase_failed_when_source_prov
             ("synthesize", WorkflowPhaseStatus::Skipped),
         ]
     );
+}
+
+#[tokio::test]
+async fn workflow_start_rejects_deep_research_when_web_search_is_not_configured() {
+    let dir = tempdir().unwrap();
+    let service = AppServerService::with_llm(
+        AgentConfig {
+            workspace_root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            web_search: None,
+            ..AgentConfig::default()
+        },
+        Box::new(MockLlm::new(Vec::new())),
+        ToolRegistry::new,
+    );
+
+    let error = service
+        .submit_boundary_op(BoundaryOp::WorkflowStart(WorkflowStartParams {
+            workspace_root: None,
+            cwd: None,
+            template_id: WorkflowTemplateId::DeepResearch,
+            preset_id: WorkflowPresetId::Quick,
+            question: "Research should not start without web search".into(),
+        }))
+        .await
+        .expect_err("deep research should reject missing web search before spawning");
+
+    assert!(error.to_string().contains("web search is not configured"));
 }
 
 #[tokio::test]
@@ -5159,7 +5193,7 @@ async fn workflow_read_rejects_wrong_workspace_and_fresh_service_registry() {
     let other_dir = tempdir().unwrap();
     let llm_started = Arc::new(Notify::new());
     let llm_release = Arc::new(Notify::new());
-    let service = AppServerService::with_llm(
+    let service = AppServerService::with_llm_and_workflow_source_provider(
         AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
@@ -5170,6 +5204,7 @@ async fn workflow_read_rejects_wrong_workspace_and_fresh_service_registry() {
             release: llm_release.clone(),
         }),
         ToolRegistry::new,
+        empty_workflow_source_provider(),
     );
 
     let started = service
@@ -5319,7 +5354,7 @@ async fn workflow_read_restores_completed_terminal_run_after_restart() {
 #[tokio::test]
 async fn workflow_read_restores_failed_terminal_run_after_restart() {
     let dir = tempdir().unwrap();
-    let service = AppServerService::with_llm(
+    let service = AppServerService::with_llm_and_workflow_source_provider(
         AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
@@ -5331,6 +5366,7 @@ async fn workflow_read_restores_failed_terminal_run_after_restart() {
             reasoning: vec![],
         }])),
         ToolRegistry::new,
+        empty_workflow_source_provider(),
     );
 
     let BoundaryOpResponse::WorkflowStarted(started) = service
@@ -5382,7 +5418,7 @@ async fn workflow_read_restores_cancelled_terminal_run_after_restart() {
     let dir = tempdir().unwrap();
     let llm_started = Arc::new(Notify::new());
     let llm_release = Arc::new(Notify::new());
-    let service = AppServerService::with_llm(
+    let service = AppServerService::with_llm_and_workflow_source_provider(
         AgentConfig {
             workspace_root: dir.path().to_path_buf(),
             cwd: dir.path().to_path_buf(),
@@ -5393,6 +5429,7 @@ async fn workflow_read_restores_cancelled_terminal_run_after_restart() {
             release: llm_release.clone(),
         }),
         ToolRegistry::new,
+        empty_workflow_source_provider(),
     );
 
     let BoundaryOpResponse::WorkflowStarted(started) = service

@@ -38,6 +38,7 @@ import type {
   ThreadView,
   ToolInvocationTranscriptStatus,
   TranscriptMessage,
+  WorkflowRunView,
   WorkflowStartRequest,
   WorkbenchSnapshot
 } from "@/types";
@@ -104,6 +105,7 @@ type WorkbenchState = WorkbenchSnapshot & {
   selectedApprovalIds: Set<string>;
   compareThreadId: string | null;
   compareView: BranchCompareView | null;
+  activeWorkflowRun: WorkflowRunView | null;
   loadWorkbench: () => Promise<void>;
   addProject: () => Promise<void>;
   renameProject: (projectId: string, name: string) => Promise<void>;
@@ -116,6 +118,8 @@ type WorkbenchState = WorkbenchSnapshot & {
   openSession: (sessionId: string) => Promise<void>;
   startSession: (projectId?: string) => Promise<string | null>;
   startWorkflow: (projectId: string, request: WorkflowStartRequest) => Promise<string | null>;
+  refreshActiveWorkflowRun: () => Promise<void>;
+  cancelActiveWorkflowRun: () => Promise<void>;
   startPersonalSession: () => Promise<string | null>;
   sendPrompt: () => Promise<void>;
   interruptActiveTurn: () => Promise<void>;
@@ -215,6 +219,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   selectedApprovalIds: new Set(),
   compareThreadId: null,
   compareView: null,
+  activeWorkflowRun: null,
 
   async loadWorkbench() {
     cancelPendingAgentTreeRefresh();
@@ -246,6 +251,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         appliedRuntimeEventIds: new Set(),
         compareThreadId: null,
         compareView: null,
+        activeWorkflowRun: null,
         loading: false,
         error: null
       });
@@ -271,6 +277,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         selectedApprovalIds: new Set(),
         compareThreadId: null,
         compareView: null,
+        activeWorkflowRun: null,
         loading: false,
         error: errorMessage(error)
       });
@@ -456,6 +463,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     set({
       activeSessionId: sessionId,
       activeTurnId: null,
+      activeWorkflowRun: null,
       loading: true,
       error: null,
       activeProviderId: restoredSelection.activeProviderId,
@@ -782,7 +790,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       approvalActionStatus: null,
       selectedApprovalIds: new Set(),
       compareThreadId: null,
-      compareView: null
+      compareView: null,
+      activeWorkflowRun: null
     });
 
     try {
@@ -796,15 +805,54 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         activeProjectId: projectId,
         activeSessionId: started.thread_id,
         activeTurnId: null,
+        activeWorkflowRun: null,
         cwd: project.path,
         loading: false,
         error: null
       });
       await get().openSession(started.thread_id);
+      await get().refreshActiveWorkflowRun();
       return started.thread_id;
     } catch (error) {
       set({ loading: false, error: errorMessage(error) });
       return null;
+    }
+  },
+
+  async refreshActiveWorkflowRun() {
+    const projectId = get().activeProjectId;
+    const threadId = get().activeSessionId;
+    if (!projectId || !threadId) {
+      return;
+    }
+    const runId = get().activeWorkflowRun?.run_id ?? `workflow_run_${threadId}`;
+    try {
+      const response = await exagentClient.readWorkflow(projectId, runId);
+      if (get().activeProjectId !== projectId || get().activeSessionId !== response.run.thread_id) {
+        return;
+      }
+      set({ activeWorkflowRun: response.run });
+    } catch {
+      if (get().activeProjectId === projectId && get().activeSessionId === threadId) {
+        set({ activeWorkflowRun: null });
+      }
+    }
+  },
+
+  async cancelActiveWorkflowRun() {
+    const projectId = get().activeProjectId;
+    const run = get().activeWorkflowRun;
+    if (!projectId || !run) {
+      return;
+    }
+    try {
+      const response = await exagentClient.cancelWorkflow(projectId, run.run_id);
+      if (get().activeProjectId !== projectId || get().activeSessionId !== response.run.thread_id) {
+        return;
+      }
+      set({ activeWorkflowRun: response.run });
+    } catch (error) {
+      set({ error: errorMessage(error) });
     }
   },
 

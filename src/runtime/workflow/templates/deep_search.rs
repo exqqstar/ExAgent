@@ -600,6 +600,17 @@ impl DeepSearchTemplateRunner {
             .iter()
             .map(|output| output.output.results.len())
             .sum();
+        if search_report.outputs.is_empty() && search_report.failed_agent_calls > 0 {
+            return Err(DeepSearchPhaseError::new(
+                DeepSearchPhaseId::Search,
+                " after every search task failed",
+                anyhow::anyhow!(
+                    "{} search task(s) failed before any usable sources could be found",
+                    search_report.failed_agent_calls
+                ),
+            )
+            .into());
+        }
         if self.cancellation.is_cancelled() {
             return Err(DeepSearchCancelled::new(DeepSearchPhaseId::Search).into());
         }
@@ -1654,7 +1665,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn template_runner_counts_search_item_failure_without_failing_run() {
+    async fn template_runner_fails_when_all_search_items_fail() {
         let runner = Arc::new(MockJsonRunner::new(vec![json_text(&scope(vec![
             SearchAngle {
                 label: "extract phase bait".to_string(),
@@ -1664,17 +1675,16 @@ mod tests {
         ]))]));
         let sources = failing_source_provider("search provider failed");
 
-        let result = DeepSearchTemplateRunner::new(limits(1, 1, 1, 1, 1), runner)
+        let error = DeepSearchTemplateRunner::new(limits(1, 1, 1, 1, 1), runner)
             .with_source_provider(sources)
             .run("What changed?")
             .await
-            .expect("failed host search item should be counted and degraded");
+            .expect_err("all failed host search items should fail the workflow");
 
-        assert!(result.report.summary.contains("No usable sources"));
-        assert_eq!(result.phase_counts.searched_angles, 0);
-        assert_eq!(result.phase_counts.search_failed, 1);
-        assert_eq!(result.phase_counts.search_results, 0);
-        assert_eq!(result.selected_sources.len(), 0);
+        let phase_error = error
+            .downcast_ref::<DeepSearchPhaseError>()
+            .expect("phase error");
+        assert_eq!(phase_error.phase_id(), DeepSearchPhaseId::Search);
     }
 
     #[tokio::test]

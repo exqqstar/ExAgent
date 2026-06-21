@@ -47,6 +47,8 @@ pub fn run() {
             commands::thread_list,
             commands::thread_start,
             commands::workflow_start,
+            commands::workflow_read,
+            commands::workflow_cancel,
             commands::thread_read,
             commands::thread_resume,
             commands::thread_fork,

@@ -9,6 +9,7 @@ import {
   SlidersHorizontal,
   Workflow
 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
@@ -50,6 +51,9 @@ type WorkflowPreset = {
     planned: number;
   }>;
 };
+
+const WORKFLOW_RUNTIME_ENABLED = false;
+
 const templates: WorkflowTemplate[] = [
   {
     id: "deep-research",
@@ -246,7 +250,11 @@ export function WorkflowLibrary({ state, onOpenConversation }: { state: Workbenc
   const selectedRunProject = availableProjects.find((project) => project.id === resolvedRunProjectId) ?? null;
   const relatedConversations = relatedWorkflowConversations(state.sessions, resolvedRunProjectId, conversationScope);
   const canStartWorkflow =
-    selectedTemplate?.id === "deep-research" && Boolean(selectedRunProject) && Boolean(question.trim()) && !starting;
+    WORKFLOW_RUNTIME_ENABLED &&
+    selectedTemplate?.id === "deep-research" &&
+    Boolean(selectedRunProject) &&
+    Boolean(question.trim()) &&
+    !starting;
 
   function selectTemplate(templateId: TemplateId) {
     setSelectedTemplateId(templateId);
@@ -310,7 +318,12 @@ export function WorkflowLibrary({ state, onOpenConversation }: { state: Workbenc
               {zh ? "模板库" : "Templates"}
             </Button>
             <div className="min-w-0 border-l border-border pl-3">
-              <h1 className="type-title-lg truncate text-ink">{zh ? selectedTemplate.zhName : selectedTemplate.name}</h1>
+              <div className="flex min-w-0 items-center gap-2">
+                <h1 className="type-title-lg truncate text-ink">{zh ? selectedTemplate.zhName : selectedTemplate.name}</h1>
+                <Badge variant="warning" className="shrink-0">
+                  {zh ? "实施中" : "In progress"}
+                </Badge>
+              </div>
               <p className="type-body-sm mt-0.5 truncate text-muted">
                 {zh ? "配置一次可继续的 workflow 对话。" : "Configure a resumable workflow conversation."}
               </p>
@@ -322,6 +335,14 @@ export function WorkflowLibrary({ state, onOpenConversation }: { state: Workbenc
       <div className="min-h-0 flex-1">
         <ScrollArea className="h-full">
           <div className="mx-auto flex w-full max-w-[820px] flex-col gap-4 px-4 py-6">
+            <section className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2" aria-label={zh ? "工作流状态" : "Workflow status"}>
+              <p className="type-body-sm text-ink">
+                {zh
+                  ? "Workflow 功能实施中。当前页面保留为路线图预览和历史对话入口，新 workflow 启动暂时关闭。"
+                  : "Workflows are in progress. This page remains as a roadmap preview and history entry point; starting new workflow runs is temporarily disabled."}
+              </p>
+            </section>
+
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <p className="type-body-md max-w-[58ch] text-muted">{zh ? selectedTemplate.zhSummary : selectedTemplate.summary}</p>
               <ProjectPicker
@@ -389,6 +410,10 @@ export function WorkflowLibrary({ state, onOpenConversation }: { state: Workbenc
                       ? zh
                         ? "启动中"
                         : "Starting"
+                      : !WORKFLOW_RUNTIME_ENABLED
+                        ? zh
+                          ? "实施中"
+                          : "In progress"
                       : selectedTemplate.id === "deep-research"
                         ? zh
                           ? "启动 workflow"
@@ -398,7 +423,13 @@ export function WorkflowLibrary({ state, onOpenConversation }: { state: Workbenc
                           : "Coming soon"}
                   </Button>
                 </div>
-                {selectedTemplate.id !== "deep-research" ? (
+                {!WORKFLOW_RUNTIME_ENABLED ? (
+                  <p className="type-body-xs border-t border-border px-4 py-2 text-muted">
+                    {zh
+                      ? "自动找源、抓取和验证流程还在收敛，开源版本先不暴露运行入口。"
+                      : "Automatic source discovery, fetching, and verification are still being shaped, so the public build does not expose the run entry yet."}
+                  </p>
+                ) : selectedTemplate.id !== "deep-research" ? (
                   <p className="type-body-xs border-t border-border px-4 py-2 text-muted">
                     {zh ? "这个模板还没有接入 runtime。" : "This template is not wired to the runtime yet."}
                   </p>
@@ -456,7 +487,12 @@ function WorkflowTemplateGallery({
       <div className="border-b border-border px-4 py-3">
         <div className="mx-auto flex max-w-[1280px] items-center justify-between gap-3">
           <div className="min-w-0">
-            <h1 className="type-title-lg text-ink">{zh ? "工作流模板" : "Workflow templates"}</h1>
+            <div className="flex min-w-0 items-center gap-2">
+              <h1 className="type-title-lg text-ink">{zh ? "工作流模板" : "Workflow templates"}</h1>
+              <Badge variant="warning" className="shrink-0">
+                {zh ? "实施中" : "In progress"}
+              </Badge>
+            </div>
             <p className="type-body-sm mt-0.5 truncate text-muted">
               {activeProjectName
                 ? zh
@@ -517,6 +553,9 @@ function WorkflowSelectionCard({
             <Icon className="h-4 w-4" />
           </span>
           <span className="type-title-md truncate text-ink">{zh ? template.zhName : template.name}</span>
+          <Badge variant="warning" className="shrink-0">
+            {zh ? "实施中" : "In progress"}
+          </Badge>
         </span>
         <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border text-muted transition-colors duration-150 group-hover:border-border-strong group-hover:text-ink">
           <ArrowRight className="h-4 w-4" />

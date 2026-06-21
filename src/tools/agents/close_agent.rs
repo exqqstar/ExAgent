@@ -185,7 +185,12 @@ mod tests {
         // Keys the handler actually emits in the result `content` JSON.
         assert_eq!(
             output_schema["required"],
-            json!(["parent_thread_id", "root_thread_id", "closed_agents", "status"])
+            json!([
+                "parent_thread_id",
+                "root_thread_id",
+                "closed_agents",
+                "status"
+            ])
         );
         assert_eq!(
             output_schema["properties"]["closed_agents"]["items"]["required"],

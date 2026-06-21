@@ -150,7 +150,13 @@ mod tests {
         // Always-present fields on each listed agent.
         assert_eq!(
             output_schema["properties"]["agents"]["items"]["required"],
-            json!(["thread_id", "root_thread_id", "depth", "agent_path", "status"])
+            json!([
+                "thread_id",
+                "root_thread_id",
+                "depth",
+                "agent_path",
+                "status"
+            ])
         );
     }
 

@@ -9,6 +9,10 @@
 </p>
 
 <p align="center">
+  English | <a href="README.zh-CN.md">简体中文</a>
+</p>
+
+<p align="center">
   <img src="docs/assets/exagent-desktop-chat.png" alt="ExAgent desktop GUI showing a running chat session, composer, goal control, and runtime inspector" width="1200">
 </p>
 
@@ -31,6 +35,14 @@ inspector for what the agent is doing.
 - GUI provider setup for API-key and OAuth-based model providers
 - Approval-gated coding tools with live transcript and event inspection
 - Persistent shells, subagents, goals, MCP tools, and `SKILL.md` support
+
+## Download
+
+macOS builds are published on the
+[GitHub Releases](https://github.com/exqqstar/ExAgent/releases) page.
+
+For macOS, download the universal DMG asset, open it, and drag ExAgent into
+Applications. The release build is signed and notarized with Developer ID.
 
 ## Quickstart
 

@@ -876,6 +876,8 @@ async fn saving_entry_with_secret_redacts_storage_and_search() {
     let db = IndexDb::open(dir.path().join("index.sqlite"))
         .await
         .unwrap();
+    let fake_api_key = ["OPENAI_API_KEY=", "sk-proj-abc123"].concat();
+    let fake_secret_value = ["sk-", "proj-abc123"].concat();
 
     let saved = db
         .save_memory_entry_for_scope(
@@ -885,7 +887,7 @@ async fn saving_entry_with_secret_redacts_storage_and_search() {
                 scope: MemoryScope::Global,
                 kind: MemoryEntryKind::Fact,
                 title: "API credential".into(),
-                content: "privacy redaction sentinel\nOPENAI_API_KEY=sk-proj-abc123".into(),
+                content: format!("privacy redaction sentinel\n{fake_api_key}"),
                 files: vec!["src/state/memory/store.rs".into()],
                 concepts: vec!["privacy".into()],
                 source_refs: vec![],
@@ -898,8 +900,8 @@ async fn saving_entry_with_secret_redacts_storage_and_search() {
 
     assert!(saved.privacy_flags.redacted_secret);
     assert!(saved.content.contains("[REDACTED_SECRET]"));
-    assert!(!saved.content.contains("OPENAI_API_KEY=sk-proj-abc123"));
-    assert!(!saved.content.contains("sk-proj-abc123"));
+    assert!(!saved.content.contains(&fake_api_key));
+    assert!(!saved.content.contains(&fake_secret_value));
 
     let hits = db
         .search_memory(MemorySearchQuery {
@@ -914,15 +916,15 @@ async fn saving_entry_with_secret_redacts_storage_and_search() {
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);
-    assert!(!hits[0].body.contains("OPENAI_API_KEY=sk-proj-abc123"));
-    assert!(!hits[0].body.contains("sk-proj-abc123"));
+    assert!(!hits[0].body.contains(&fake_api_key));
+    assert!(!hits[0].body.contains(&fake_secret_value));
 
     let secret_hits = db
         .search_memory(MemorySearchQuery {
             scope: MemoryScope::Global,
             project_id: None,
             thread_id: None,
-            query: "sk-proj-abc123".into(),
+            query: fake_secret_value,
             mode: MemoryRecallMode::ToolPull,
             limit: 10,
             include_entries: true,
@@ -984,6 +986,8 @@ async fn entry_concept_with_secret_is_redacted_in_storage_and_search() {
     let db = IndexDb::open(dir.path().join("index.sqlite"))
         .await
         .unwrap();
+    let fake_concept_key = ["OPENAI_API_KEY=", "sk-concept-abc123"].concat();
+    let fake_concept_secret = ["sk-", "concept-abc123"].concat();
 
     let saved = db
         .save_memory_entry_for_scope(
@@ -995,7 +999,7 @@ async fn entry_concept_with_secret_is_redacted_in_storage_and_search() {
                 title: "concept redaction sentinel".into(),
                 content: "concept secret body".into(),
                 files: vec!["src/state/memory/store.rs".into()],
-                concepts: vec!["OPENAI_API_KEY=sk-concept-abc123".into()],
+                concepts: vec![fake_concept_key],
                 source_refs: vec![],
                 pinned: false,
             },
@@ -1025,14 +1029,14 @@ async fn entry_concept_with_secret_is_redacted_in_storage_and_search() {
     assert!(!hits[0]
         .concepts
         .iter()
-        .any(|concept| concept.contains("sk-concept-abc123")));
+        .any(|concept| concept.contains(&fake_concept_secret)));
 
     let secret_hits = db
         .search_memory(MemorySearchQuery {
             scope: MemoryScope::Global,
             project_id: None,
             thread_id: None,
-            query: "sk-concept-abc123".into(),
+            query: fake_concept_secret,
             mode: MemoryRecallMode::ToolPull,
             limit: 10,
             include_entries: true,

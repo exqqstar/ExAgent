@@ -1,0 +1,9 @@
+# Historical false positives from redaction tests that intentionally contained
+# fake credential shapes. Keep this narrow; do not add real credentials here.
+ce557391fb86d6dadf33883c332e7c6754c1d443:tests/memory_privacy.rs:generic-api-key:9
+ce557391fb86d6dadf33883c332e7c6754c1d443:tests/memory_privacy.rs:generic-api-key:27
+ce557391fb86d6dadf33883c332e7c6754c1d443:tests/memory_privacy.rs:private-key:19
+ce557391fb86d6dadf33883c332e7c6754c1d443:tests/memory_projector.rs:generic-api-key:235
+ce557391fb86d6dadf33883c332e7c6754c1d443:tests/memory_schema.rs:generic-api-key:1036
+ce557391fb86d6dadf33883c332e7c6754c1d443:tests/memory_schema.rs:generic-api-key:1049
+ce557391fb86d6dadf33883c332e7c6754c1d443:tests/memory_schema.rs:generic-api-key:1066

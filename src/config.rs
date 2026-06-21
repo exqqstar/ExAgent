@@ -295,6 +295,7 @@ mod tests {
     use crate::model::provider::ProviderProtocol;
     use crate::model::resolved::ResolvedCredential;
 
+    static MODEL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static WEB_SEARCH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -367,7 +368,10 @@ mod tests {
 
     #[test]
     fn default_agent_config_has_resolved_openai_model_without_env_secret() {
+        let _guard = MODEL_ENV_LOCK.lock().unwrap();
+        let previous_model = std::env::var("EXAGENT_MODEL").ok();
         let previous = std::env::var("OPENAI_API_KEY").ok();
+        std::env::remove_var("EXAGENT_MODEL");
         std::env::set_var("OPENAI_API_KEY", "sk-env");
 
         let config = AgentConfig::default();
@@ -384,6 +388,36 @@ mod tests {
             Some(value) => std::env::set_var("OPENAI_API_KEY", value),
             None => std::env::remove_var("OPENAI_API_KEY"),
         }
+        restore_env("EXAGENT_MODEL", previous_model);
+    }
+
+    #[test]
+    fn default_agent_config_ignores_env_model_selection() {
+        let _guard = MODEL_ENV_LOCK.lock().unwrap();
+        let previous_model = std::env::var("EXAGENT_MODEL").ok();
+        let previous_key = std::env::var("DEEPSEEK_API_KEY").ok();
+        let previous_base_url = std::env::var("DEEPSEEK_BASE_URL").ok();
+        let previous_context_window = std::env::var("EXAGENT_MODEL_CONTEXT_WINDOW").ok();
+        std::env::set_var("EXAGENT_MODEL", " deepseek:deepseek-v4-pro ");
+        std::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek");
+        std::env::set_var("DEEPSEEK_BASE_URL", "https://deepseek.local");
+        std::env::set_var("EXAGENT_MODEL_CONTEXT_WINDOW", "1000000");
+
+        let config = AgentConfig::default();
+
+        assert_eq!(config.model.identity.provider_id, "openai");
+        assert_ne!(config.model.identity.model_id, "deepseek-v4-pro");
+        assert_ne!(
+            config.model.endpoint.base_url.as_deref(),
+            Some("https://deepseek.local")
+        );
+        assert_eq!(config.model.capabilities.context_window, None);
+        assert_eq!(config.model.credential, ResolvedCredential::None);
+
+        restore_env("EXAGENT_MODEL", previous_model);
+        restore_env("DEEPSEEK_API_KEY", previous_key);
+        restore_env("DEEPSEEK_BASE_URL", previous_base_url);
+        restore_env("EXAGENT_MODEL_CONTEXT_WINDOW", previous_context_window);
     }
 
     #[test]

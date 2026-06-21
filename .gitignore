@@ -18,8 +18,11 @@ apps/desktop/dist
 /AGENTS.md
 /AGENT.md
 /Agent.md
+/CLAUDE.md
 docs/private/
 docs/.private-archive/
+/docs/architecture/
+/docs/superpowers/
 /.claude
 
 # Local environment files. Keep examples and templates commit-able.

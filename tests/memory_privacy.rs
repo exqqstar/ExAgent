@@ -4,19 +4,23 @@ use exagent::state::memory::privacy::{
 
 #[test]
 fn redacts_common_secret_shapes() {
+    let fake_openai_key = ["OPENAI_API_KEY=", "sk-proj-abc123"].concat();
+    let fake_github_token = ["GITHUB_TOKEN=", "ghp_", "placeholder"].concat();
+    let fake_sk_literal = ["literal ", "sk-test-secret"].concat();
+    let fake_private_key_header = format!("-----BEGIN {} KEY-----", "PRIVATE");
     let input = [
         "normal context survives",
-        "OPENAI_API_KEY=sk-proj-abc123",
-        "GITHUB_TOKEN=ghp_...",
+        fake_openai_key.as_str(),
+        fake_github_token.as_str(),
         "service apikey: secret-value",
         "password=hunter2",
         "authorization: bearer abc123",
-        "literal sk-test-secret",
+        fake_sk_literal.as_str(),
         "AWS_SECRET_ACCESS_KEY=aws-secret",
         "SECRET_KEY=django-secret",
         "PRIVATE_KEY=private-secret",
         "client_secret=oauth-secret",
-        "-----BEGIN PRIVATE KEY-----",
+        fake_private_key_header.as_str(),
     ]
     .join("\n");
 
@@ -24,16 +28,16 @@ fn redacts_common_secret_shapes() {
 
     assert!(redacted.flags.redacted_secret);
     assert!(redacted.text.contains("normal context survives"));
-    assert!(!redacted.text.contains("OPENAI_API_KEY=sk-proj-abc123"));
-    assert!(!redacted.text.contains("GITHUB_TOKEN=ghp_..."));
+    assert!(!redacted.text.contains(&fake_openai_key));
+    assert!(!redacted.text.contains(&fake_github_token));
     assert!(!redacted.text.contains("hunter2"));
     assert!(!redacted.text.contains("authorization: bearer abc123"));
-    assert!(!redacted.text.contains("sk-test-secret"));
+    assert!(!redacted.text.contains(&fake_sk_literal));
     assert!(!redacted.text.contains("aws-secret"));
     assert!(!redacted.text.contains("django-secret"));
     assert!(!redacted.text.contains("private-secret"));
     assert!(!redacted.text.contains("oauth-secret"));
-    assert!(!redacted.text.contains("-----BEGIN PRIVATE KEY-----"));
+    assert!(!redacted.text.contains(&fake_private_key_header));
     assert_eq!(
         redacted
             .text

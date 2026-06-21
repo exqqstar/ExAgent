@@ -474,6 +474,8 @@ export interface ThreadStartResponse {
 export type WorkflowTemplateId = "deep-research";
 export type WorkflowPresetId = "quick" | "standard" | "deep";
 export type WorkflowRunStatus = "queued" | "running" | "waiting_approval" | "completed" | "failed" | "cancelled";
+export type WorkflowPhaseStatus = "pending" | "running" | "completed" | "failed" | "skipped" | "cancelled";
+export type WorkflowStopReason = "token_budget_exceeded" | "runtime_exceeded";
 
 export interface WorkflowStartRequest {
   templateId: WorkflowTemplateId;
@@ -485,6 +487,63 @@ export interface WorkflowStartResponse {
   run_id: string;
   thread_id: string;
   status: WorkflowRunStatus;
+}
+
+export interface WorkflowReadResponse {
+  run: WorkflowRunView;
+}
+
+export interface WorkflowCancelResponse {
+  run: WorkflowRunView;
+}
+
+export interface WorkflowRunView {
+  run_id: string;
+  thread_id: string;
+  template_id: WorkflowTemplateId;
+  preset_id: WorkflowPresetId;
+  label: string;
+  status: WorkflowRunStatus;
+  phases: WorkflowPhaseView[];
+  artifacts: WorkflowArtifactSummary[];
+  stats: WorkflowStats;
+  report_summary?: string | null;
+  stop_reason?: WorkflowStopReason | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+  started_at_ms?: number | null;
+  completed_at_ms?: number | null;
+}
+
+export interface WorkflowPhaseView {
+  id: string;
+  label: string;
+  status: WorkflowPhaseStatus;
+  planned_count: number;
+  completed_count: number;
+  failed_count: number;
+  skipped_count: number;
+  started_at_ms?: number | null;
+  updated_at_ms: number;
+  completed_at_ms?: number | null;
+}
+
+export interface WorkflowArtifactSummary {
+  id: string;
+  label: string;
+  status?: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface WorkflowStats {
+  agent_calls: number;
+  failed_agent_calls: number;
+  skipped_agent_calls: number;
+  total_artifacts: number;
+  tokens_used?: number | null;
+  elapsed_ms: number;
+  template_stats: unknown;
 }
 
 export interface TurnStartResponse {

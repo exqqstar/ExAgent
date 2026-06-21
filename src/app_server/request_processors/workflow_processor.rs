@@ -128,6 +128,8 @@ pub(in crate::app_server) async fn workflow_start(
     let question = params.question;
     let workflow_config = config.clone();
 
+    ensure_workflow_can_start(services, &template_id, &workflow_config)?;
+
     let new_thread = thread_processor::start_thread_with_options(
         services,
         StartThreadOptions {
@@ -232,6 +234,42 @@ fn validate_template(template_id: &WorkflowTemplateId) -> Result<()> {
     match template_id {
         WorkflowTemplateId::DeepResearch => Ok(()),
     }
+}
+
+fn ensure_workflow_can_start(
+    services: &AppServerServices,
+    template_id: &WorkflowTemplateId,
+    workflow_config: &crate::config::AgentConfig,
+) -> Result<()> {
+    match template_id {
+        WorkflowTemplateId::DeepResearch => {
+            ensure_deep_research_sources_available(services, workflow_config)
+        }
+    }
+}
+
+fn ensure_deep_research_sources_available(
+    services: &AppServerServices,
+    workflow_config: &crate::config::AgentConfig,
+) -> Result<()> {
+    if services.workflow_source_provider.is_some() {
+        return Ok(());
+    }
+
+    let Some(search_config) = workflow_config.web_search.as_ref() else {
+        bail!(AppServerError::InvalidRequest(
+            "web search is not configured; enable Brave web_search and configure an API key before starting deep research".into(),
+        ));
+    };
+
+    if !search_config.provider.eq_ignore_ascii_case("brave") {
+        bail!(AppServerError::InvalidRequest(format!(
+            "unsupported web search provider for deep research: {}",
+            search_config.provider
+        )));
+    }
+
+    Ok(())
 }
 
 fn workflow_label(template_id: &WorkflowTemplateId, question: &str) -> String {

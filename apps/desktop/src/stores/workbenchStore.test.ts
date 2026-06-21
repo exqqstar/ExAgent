@@ -7,7 +7,8 @@ import type {
   ProviderModelView,
   ProviderSettingsResponse,
   RuntimeSettingsResponse,
-  ThreadReadResponse
+  ThreadReadResponse,
+  WorkflowRunView
 } from "@/types";
 
 describe("workbenchStore runtime events", () => {
@@ -459,6 +460,66 @@ describe("workbenchStore runtime events", () => {
     const child = useWorkbenchStore.getState().agents[0]?.children[0];
     expect(useWorkbenchStore.getState().tokenUsageByThreadId["thread-child"]?.total.total_tokens).toBe(2800);
     expect(child?.tokensUsed).toBe(2800);
+  });
+
+  it("stores the workflow run after starting a workflow", async () => {
+    const workflowRun = workflowRunView("workflow_run_thread-workflow", "running");
+    vi.spyOn(exagentClient, "startWorkflow").mockResolvedValue({
+      run_id: workflowRun.run_id,
+      thread_id: workflowRun.thread_id,
+      status: "queued"
+    });
+    vi.spyOn(exagentClient, "readWorkflow").mockResolvedValue({ run: workflowRun });
+    vi.spyOn(exagentClient, "reindexProject").mockResolvedValue([
+      {
+        id: "thread-workflow",
+        project_id: "project",
+        rollout_path: "/workspace/project/.exagent/threads/thread-workflow/rollout.jsonl",
+        user_title: null,
+        fallback_title: "Deep research: test",
+        preview: "",
+        title_source: "fallback",
+        status: "running",
+        updated_at: 1,
+        created_at: 1,
+        last_opened_at: null,
+        pinned: false,
+        archived_at: null,
+        fork_parent_thread_id: null,
+        fork_point_turn_id: null
+      }
+    ]);
+    vi.spyOn(exagentClient, "resumeThread").mockResolvedValue(threadReadResponse("thread-workflow"));
+    vi.spyOn(exagentClient, "subscribeRuntimeEvents").mockResolvedValue(vi.fn());
+    vi.spyOn(exagentClient, "replayEvents").mockResolvedValue({
+      thread_id: "thread-workflow",
+      events: []
+    });
+    vi.spyOn(exagentClient, "agentTree").mockResolvedValue(agentTreeResponse("thread-workflow"));
+    vi.spyOn(exagentClient, "listApprovals").mockResolvedValue({ approvals: [] });
+
+    useWorkbenchStore.setState({
+      ...useWorkbenchStore.getInitialState(),
+      loading: false,
+      activeProjectId: "project",
+      projects: [
+        {
+          id: "project",
+          name: "Project",
+          path: "/workspace/project",
+          active: true
+        }
+      ]
+    });
+
+    await useWorkbenchStore.getState().startWorkflow("project", {
+      templateId: "deep-research",
+      presetId: "quick",
+      question: "Research workflow visibility"
+    });
+
+    expect(exagentClient.readWorkflow).toHaveBeenCalledWith("project", "workflow_run_thread-workflow");
+    expect(useWorkbenchStore.getState().activeWorkflowRun).toEqual(workflowRun);
   });
 
   it("keeps live agent token counts when a delayed agent tree refresh is older", async () => {
@@ -1271,6 +1332,40 @@ function threadReadResponse(threadId: string): ThreadReadResponse {
       active_turn: null,
       turns: []
     }
+  };
+}
+
+function workflowRunView(runId: string, status: WorkflowRunView["status"]): WorkflowRunView {
+  return {
+    run_id: runId,
+    thread_id: runId.replace(/^workflow_run_/, ""),
+    template_id: "deep-research",
+    preset_id: "quick",
+    label: "Deep research: test",
+    status,
+    phases: [
+      {
+        id: "search",
+        label: "Search",
+        status: "running",
+        planned_count: 3,
+        completed_count: 1,
+        failed_count: 0,
+        skipped_count: 0,
+        updated_at_ms: 2
+      }
+    ],
+    artifacts: [],
+    stats: {
+      agent_calls: 1,
+      failed_agent_calls: 0,
+      skipped_agent_calls: 0,
+      total_artifacts: 0,
+      elapsed_ms: 10,
+      template_stats: {}
+    },
+    created_at_ms: 1,
+    updated_at_ms: 2
   };
 }
 

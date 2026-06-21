@@ -15,7 +15,8 @@ use exagent::app_server::protocol::{
     ThreadGoalMode, ThreadGoalSetParams, ThreadGoalSetResponse, ThreadGoalStatus, ThreadReadParams,
     ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartResponse,
     TurnContextOverrides, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse, WorkflowPresetId, WorkflowStartParams, WorkflowStartResponse,
+    TurnStartResponse, WorkflowCancelParams, WorkflowCancelResponse, WorkflowPresetId,
+    WorkflowReadParams, WorkflowReadResponse, WorkflowStartParams, WorkflowStartResponse,
     WorkflowTemplateId,
 };
 use exagent::config::ThinkingMode;
@@ -535,6 +536,48 @@ pub async fn workflow_start(
                 template_id: request.template_id,
                 preset_id: request.preset_id,
                 question: request.question,
+            },
+        )
+        .await
+        .map_err(error_string)
+}
+
+#[tauri::command]
+pub async fn workflow_read(
+    state: State<'_, DesktopState>,
+    project_id: String,
+    run_id: String,
+) -> CommandResult<WorkflowReadResponse> {
+    state
+        .facade
+        .read()
+        .await
+        .read_workflow(
+            &project_id,
+            WorkflowReadParams {
+                workspace_root: None,
+                run_id,
+            },
+        )
+        .await
+        .map_err(error_string)
+}
+
+#[tauri::command]
+pub async fn workflow_cancel(
+    state: State<'_, DesktopState>,
+    project_id: String,
+    run_id: String,
+) -> CommandResult<WorkflowCancelResponse> {
+    state
+        .facade
+        .read()
+        .await
+        .cancel_workflow(
+            &project_id,
+            WorkflowCancelParams {
+                workspace_root: None,
+                run_id,
             },
         )
         .await

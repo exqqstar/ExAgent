@@ -40,6 +40,9 @@ import type {
   TurnMode,
   TurnStartResponse,
   WorkflowStartRequest,
+  WorkflowCancelResponse,
+  WorkflowReadResponse,
+  WorkflowRunView,
   WorkflowStartResponse,
   WorkbenchSnapshot
 } from "@/types";
@@ -407,6 +410,7 @@ let mockRuntimeSettings: RuntimeSettingsResponse = {
 
 let mockThreadSequence = 1;
 const mockThreadReads = new Map<string, ThreadReadResponse>();
+const mockWorkflowRuns = new Map<string, WorkflowRunView>();
 
 function mockPersonalProject(): ProjectRecord {
   return {
@@ -1034,14 +1038,89 @@ export async function startWorkflow(
         turns: []
       }
     });
+    const runId = `workflow_run_${id}`;
+    mockWorkflowRuns.set(runId, {
+      run_id: runId,
+      thread_id: id,
+      template_id: request.templateId,
+      preset_id: request.presetId,
+      label: title,
+      status: "running",
+      phases: [
+        {
+          id: "scope",
+          label: "Scope",
+          status: "running",
+          planned_count: 1,
+          completed_count: 0,
+          failed_count: 0,
+          skipped_count: 0,
+          started_at_ms: now,
+          updated_at_ms: now
+        },
+        {
+          id: "search",
+          label: "Search",
+          status: "pending",
+          planned_count: request.presetId === "deep" ? 5 : request.presetId === "standard" ? 4 : 3,
+          completed_count: 0,
+          failed_count: 0,
+          skipped_count: 0,
+          updated_at_ms: now
+        }
+      ],
+      artifacts: [],
+      stats: {
+        agent_calls: 0,
+        failed_agent_calls: 0,
+        skipped_agent_calls: 0,
+        total_artifacts: 0,
+        elapsed_ms: 0,
+        template_stats: {}
+      },
+      created_at_ms: now,
+      updated_at_ms: now,
+      started_at_ms: now
+    });
     return {
-      run_id: `workflow_run_${id}`,
+      run_id: runId,
       thread_id: id,
       status: "queued"
     };
   }
 
   return invokeCommand<WorkflowStartResponse>("workflow_start", { projectId, request });
+}
+
+export async function readWorkflow(projectId: string, runId: string): Promise<WorkflowReadResponse> {
+  if (!isTauriRuntime()) {
+    const run = mockWorkflowRuns.get(runId);
+    if (!run) {
+      throw new Error(`Workflow run not found: ${runId}`);
+    }
+    return { run };
+  }
+
+  return invokeCommand<WorkflowReadResponse>("workflow_read", { projectId, runId });
+}
+
+export async function cancelWorkflow(projectId: string, runId: string): Promise<WorkflowCancelResponse> {
+  if (!isTauriRuntime()) {
+    const run = mockWorkflowRuns.get(runId);
+    if (!run) {
+      throw new Error(`Workflow run not found: ${runId}`);
+    }
+    const cancelled: WorkflowRunView = {
+      ...run,
+      status: "cancelled",
+      completed_at_ms: Date.now(),
+      updated_at_ms: Date.now()
+    };
+    mockWorkflowRuns.set(runId, cancelled);
+    return { run: cancelled };
+  }
+
+  return invokeCommand<WorkflowCancelResponse>("workflow_cancel", { projectId, runId });
 }
 
 export async function readThread(projectId: string, threadId: string): Promise<ThreadReadResponse> {
@@ -1812,10 +1891,12 @@ export const exagentClient = {
   renameProject,
   renameThread,
   compactThread,
+  cancelWorkflow,
   forkThread,
   replayAllEvents,
   replayEvents,
   resumeThread,
+  readWorkflow,
   saveProviderSettings,
   saveRuntimeSettings,
   setThreadGoal,

@@ -190,6 +190,30 @@ impl DesktopFacade {
         Ok(response)
     }
 
+    pub async fn read_workflow(
+        &self,
+        project_id: &str,
+        mut params: crate::app_server::protocol::WorkflowReadParams,
+    ) -> Result<crate::app_server::protocol::WorkflowReadResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        params.workspace_root = Some(project.path.display().to_string());
+        self.service.workflow_read(params).await
+    }
+
+    pub async fn cancel_workflow(
+        &self,
+        project_id: &str,
+        mut params: crate::app_server::protocol::WorkflowCancelParams,
+    ) -> Result<crate::app_server::protocol::WorkflowCancelResponse> {
+        let project = self.index.project_by_id(project_id).await?;
+        params.workspace_root = Some(project.path.display().to_string());
+        let response = self.service.workflow_cancel(params).await?;
+        self.index
+            .reindex_project(&project.id, &project.path)
+            .await?;
+        Ok(response)
+    }
+
     pub async fn read_thread(
         &self,
         project_id: &str,

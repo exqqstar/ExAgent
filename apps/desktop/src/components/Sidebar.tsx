@@ -424,6 +424,9 @@ export function Sidebar({
         >
           <Workflow className="h-3.5 w-3.5 shrink-0 text-muted transition-colors group-hover:text-ink" />
           <span className="min-w-0 flex-1 truncate">{t("sidebar.workflows")}</span>
+          <Badge variant="warning" className="shrink-0">
+            WIP
+          </Badge>
         </button>
       </div>
 

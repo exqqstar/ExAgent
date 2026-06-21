@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   compactThread,
+  cancelWorkflow,
   getThreadGoal,
   importImageFiles,
   listApprovals,
   pickImageFiles,
+  readWorkflow,
   replayAllEvents,
   scanSkillCatalog,
   setThreadGoal,
@@ -96,6 +98,42 @@ describe("exagentClient", () => {
     expect(response).toEqual({
       thread_id: "thread-root",
       latest_compaction: { summary: "manual compact summary" }
+    });
+  });
+
+  it("reads and cancels workflow runs through desktop commands", async () => {
+    const run = {
+      run_id: "workflow_run_thread-root",
+      thread_id: "thread-root",
+      template_id: "deep-research",
+      preset_id: "quick",
+      label: "Deep research: web search",
+      status: "running",
+      phases: [],
+      artifacts: [],
+      stats: {
+        agent_calls: 1,
+        failed_agent_calls: 0,
+        skipped_agent_calls: 0,
+        total_artifacts: 0,
+        elapsed_ms: 12,
+        template_stats: {}
+      },
+      created_at_ms: 1,
+      updated_at_ms: 2
+    };
+    tauriMocks.invoke.mockResolvedValue({ run });
+
+    await expect(readWorkflow("project-exagent", "workflow_run_thread-root")).resolves.toEqual({ run });
+    await expect(cancelWorkflow("project-exagent", "workflow_run_thread-root")).resolves.toEqual({ run });
+
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, "workflow_read", {
+      projectId: "project-exagent",
+      runId: "workflow_run_thread-root"
+    });
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, "workflow_cancel", {
+      projectId: "project-exagent",
+      runId: "workflow_run_thread-root"
     });
   });
 

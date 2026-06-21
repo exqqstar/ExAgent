@@ -25,8 +25,8 @@ inspect runtime state, and resume the thread later from durable local history.
 
 It is not just a chat UI. ExAgent includes the runtime pieces needed for
 recoverable agent work: event replay, persistent shell sessions, approval-gated
-tools, subagents, goal tracking, procedural memory, MCP tools, and a desktop
-inspector for what the agent is doing.
+tools, subagents, goal tracking, project memory, MCP tools, workflow runs, and
+a desktop inspector for what the agent is doing.
 
 ## Highlights
 
@@ -34,7 +34,10 @@ inspector for what the agent is doing.
 - Durable sessions that can be reopened from local project history
 - GUI provider setup for API-key and OAuth-based model providers
 - Approval-gated coding tools with live transcript and event inspection
-- Persistent shells, subagents, goals, MCP tools, and `SKILL.md` support
+- Project memory with automatic recall, explicit memory tools, local curation,
+  and audit state
+- Persistent shells, subagents, goals, MCP tools, workflows, and `SKILL.md`
+  support
 
 ## Download
 
@@ -78,6 +81,33 @@ or file mutation, the app shows an approval card in the transcript.
 For a fuller operator walkthrough, see
 [docs/demo/exagent-walkthrough.md](docs/demo/exagent-walkthrough.md).
 
+## Architecture At A Glance
+
+ExAgent is organized around a local Rust runtime exposed to the desktop through
+a typed app-server boundary. The Tauri shell stays project-aware while the
+runtime owns thread execution, model calls, tools, state, and live events.
+
+- Each thread runs behind an actor-backed `ThreadRuntime`, so turns are
+  serialized while snapshots, status, and events stream back to the GUI.
+- `ThreadSession` assembles the long-lived pieces for one thread: agent,
+  context, rollout storage, tools, goals, memory, policy, and execution
+  sessions.
+- The context layer keeps real conversation history separate from prompt-only
+  internal context such as memory recall, goal state, skills, and project docs;
+  compaction can replace long history with structured summaries.
+- Local durability is append-first: each thread has a `rollout.jsonl` ledger,
+  while `IndexDb` stores cross-thread indexes for projects, threads, goals,
+  memory, and review state.
+- The tool system separates public tool contracts in `src/tools` from per-turn
+  runtime orchestration in `src/runtime/tool`; agent policy gates both tool
+  visibility and execution.
+- The memory system supports automatic prompt recall, explicit memory tools,
+  candidate saves, local promotion/archive/forget flows, and audit state.
+- The model layer normalizes provider-specific APIs into ExAgent conversation,
+  tool-call, multimodal, reasoning, and streaming types.
+- The workflow runtime powers structured runs such as deep search as a
+  phase-based scheduler parallel to the normal chat turn loop.
+
 ## Development
 
 Useful commands from `apps/desktop`:
@@ -115,11 +145,23 @@ Current non-goals:
 - [apps/desktop](apps/desktop): Tauri desktop shell and React workbench
 - [apps/desktop/src-tauri](apps/desktop/src-tauri): desktop Rust commands,
   settings, provider auth, and Tauri entrypoint
+- [src/app_server](src/app_server): typed desktop/runtime boundary, request
+  processors, live views, and projections
 - [src/runtime](src/runtime): live execution kernel, thread actor, session turn
   loop, agent sampling, tool runtime, policy, and exec sessions
+- [src/runtime/agent_profile](src/runtime/agent_profile): agent role catalog
+  and capability policy
+- [src/runtime/goal](src/runtime/goal): structured goal state, accounting, and
+  continuation effects
+- [src/runtime/memory](src/runtime/memory): runtime memory bridge into context
+  and tools
+- [src/runtime/workflow](src/runtime/workflow): structured workflow and deep
+  search runtime
 - [src/tools](src/tools): tool trait, registry, and built-in coding tools
-- [src/state](src/state): durable rollout models plus desktop index storage
+- [src/state](src/state): durable rollout models, desktop index storage, and
+  memory state
 - [src/model](src/model): model provider adapters and conversation types
+- [src/mcp](src/mcp): MCP configuration and tool integration
 - [tests](tests): integration coverage for runtime, protocol, policy, tools,
   and storage
 - [docs/demo](docs/demo): desktop-first walkthroughs

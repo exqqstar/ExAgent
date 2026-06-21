@@ -41,6 +41,32 @@ impl ToolHandler for CloseAgentTool {
                 "required": ["agent_path"]
             }),
         )
+        // Internal contract: describes the JSON object this tool returns as its
+        // model-facing `content`. See ADR-0042.
+        .with_output_schema(json!({
+            "type": "object",
+            "properties": {
+                "parent_thread_id": { "type": "string", "description": "Thread id of the agent that requested the close." },
+                "root_thread_id": { "type": "string", "description": "Root thread id of the agent tree." },
+                "closed_agents": {
+                    "type": "array",
+                    "description": "Agents that were closed, including descendants of the target.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "thread_id": { "type": "string", "description": "Thread id of the closed agent." },
+                            "agent_path": { "type": "string", "description": "Absolute agent path that was closed." },
+                            "depth": { "type": "integer", "description": "Depth below the root agent (root is 0)." }
+                        },
+                        "required": ["thread_id", "agent_path", "depth"],
+                        "additionalProperties": false
+                    }
+                },
+                "status": { "type": "string", "description": "Always \"closed\" on success." }
+            },
+            "required": ["parent_thread_id", "root_thread_id", "closed_agents", "status"],
+            "additionalProperties": false
+        }))
     }
 
     fn capabilities(&self) -> ToolCapabilities {
@@ -143,6 +169,33 @@ mod tests {
         let schema = tool.spec().to_internal_schema();
         assert_eq!(schema["name"], "close_agent");
         assert_eq!(schema["input_schema"]["required"][0], "agent_path");
+    }
+
+    #[test]
+    fn close_agent_output_schema_matches_emitted_content() {
+        let lifecycle = Arc::new(TestLifecycle);
+        let control = AgentControl::new_root(
+            ThreadId::new("thread_schema"),
+            Arc::downgrade(&(lifecycle as Arc<dyn SubagentLifecycle>)),
+        );
+        let spec = CloseAgentTool::new(control).spec();
+        let output_schema = spec
+            .output_schema
+            .expect("close_agent declares output_schema");
+        // Keys the handler actually emits in the result `content` JSON.
+        assert_eq!(
+            output_schema["required"],
+            json!([
+                "parent_thread_id",
+                "root_thread_id",
+                "closed_agents",
+                "status"
+            ])
+        );
+        assert_eq!(
+            output_schema["properties"]["closed_agents"]["items"]["required"],
+            json!(["thread_id", "agent_path", "depth"])
+        );
     }
 
     struct TestLifecycle;

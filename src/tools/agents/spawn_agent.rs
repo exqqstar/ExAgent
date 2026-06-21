@@ -42,7 +42,12 @@ Rules:
 - Do not duplicate work between yourself and a subagent, and do not re-spawn the same task.
 - Give each subagent a concrete, self-contained task it can finish and report back on. Spawned \
 worker agents execute and report; they cannot spawn their own subagents, so do not design tasks \
-that assume further delegation.";
+that assume further delegation.
+
+After spawning, if you need the subagent's result before continuing, use `wait_agent` to await it. \
+`wait_agent` returns when a message arrives or the timeout elapses, so keep calling it across \
+timeouts until the subagent reports back. Do not produce your final answer while you are still \
+waiting on a subagent you intend to use — a wait timeout does not mean the subagent is done.";
 
 #[derive(Clone)]
 pub struct SpawnAgentTool {

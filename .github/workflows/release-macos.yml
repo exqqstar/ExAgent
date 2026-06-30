@@ -65,7 +65,7 @@ jobs:
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
       - name: Build, sign, notarize, and upload macOS artifacts
-        uses: tauri-apps/tauri-action@v0.6.2
+        uses: tauri-apps/tauri-action@v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
